@@ -28,6 +28,7 @@ const {
   hiddenBindValues, catalogJoinSql, studentHiddenSql,
 } = require('../utils/workspace-visibility');
 const audit = require('../utils/audit');
+const { projectAnalysis } = require('../utils/malware-analysis-state');
 
 const GUAC_ENABLED = process.env.GUAC_ENABLED === 'true';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -177,8 +178,8 @@ async function getUserGuacToken(guacUser, guacPassword) {
     if (!ok) return null;
     return JSON.parse(text); // { authToken, username, dataSource, availableDataSources }
   } catch (err) {
-    // Returning null stays the contract — the caller falls back to an admin
-    // token. But a timeout here is a Guacamole outage, not a wrong password,
+    // Returning null stays the contract. Only trusted staff may then use an
+    // operator token. A timeout here is a Guacamole outage, not a wrong password,
     // and the fully silent catch this used to be made the two identical.
     if (err && err.code === 'GUAC_TIMEOUT') console.warn(`[guac-sessions] ${err.message}`);
     return null;
@@ -290,6 +291,10 @@ const DISPLAY_COLUMNS = `
   vi.metadata->>'proxmox_name' AS proxmox_name,
   dl.name                      AS lane_name,
   dl.config                    AS lane_config,
+  dl.lane_id,
+  dl.user_id                   AS lane_owner_id,
+  dl.status                    AS lane_status,
+  COALESCE(r.metadata->>'analysis_profile', tc.metadata->>'analysis_profile') AS analysis_profile,
   tc.os_family,
   tc.os_name,
   r.metadata->>'template_name' AS template_name,
@@ -407,6 +412,7 @@ router.get('/vms', authenticateToken, async (req, res) => {
         powerState:     row.power_state,
         resourceStatus: row.resource_status,
         hasConsole:     !!row.guac_connection_id,
+        analysis:       projectAnalysis(row, req.user),
         // Whether a Credentials button should render — never the credential
         // itself. The privileged branch of this query is cluster-wide, so a
         // password here would be disclosed to every instructor on every page
@@ -421,11 +427,64 @@ router.get('/vms', authenticateToken, async (req, res) => {
       };
     });
 
+    // A failed full reset can leave no live VM row. Keep a recovery card tied
+    // to the durable operation so a page reload still offers Reset Lab.
+    try {
+      const recovery = await cybercoreQuery(`SELECT o.requested_vm_id AS id,
+          dl.lane_id, dl.name, dl.name AS lane_name, dl.config AS lane_config,
+          dl.user_id AS lane_owner_id, dl.status AS lane_status,
+          'malware' AS analysis_profile
+        FROM cybercore_analysis_operation o JOIN cybercore_lane dl ON dl.lane_id = o.lane_id
+        WHERE dl.config->'analysis'->>'operation_id' = o.operation_id::text
+          AND o.state IN ('isolating', 'resetting', 'error') AND ${claimsSql('dl')}
+          AND ($2::boolean OR (o.owner_user_id = $1 AND dl.user_id = $1))
+          AND NOT EXISTS (SELECT 1 FROM cybercore_vm_instance vi
+            JOIN cybercore_resource r ON r.resource_id = vi.resource_id
+            WHERE r.metadata->>'lane_id' = dl.lane_id::text
+              AND vi.destroyed_at IS NULL AND r.status != 'retired')`, [userId, showAll]);
+      for (const row of recovery.rows) {
+        vms.push({ id: row.id, name: row.name, displayName: row.lane_name,
+          osKey: 'windows', osLabel: 'Windows', moduleKey: row.lane_config?.module_key || 'crucible',
+          powerState: 'stopped', resourceStatus: 'provisioning', hasConsole: false, hasCredentials: false,
+          analysis: projectAnalysis(row, req.user) });
+      }
+    } catch (err) {
+      console.warn('[MalwareAnalysis] Recovery cards unavailable:', err.code || 'database error');
+    }
+
     res.json({ vms, scope: showAll ? 'all' : 'mine' });
   } catch (err) {
     console.error('[guac-sessions] GET /vms error:', err.message);
     res.status(500).json({ error: 'Failed to fetch VMs.' });
   }
+});
+
+// The server resolves ownership and the complete analysis boundary. Clients
+// supply only the workspace id; they never supply VMIDs, networks or commands.
+for (const action of ['start', 'reset']) {
+  router.post(`/vms/:vmId/analysis/${action}`, authenticateToken, async (req, res) => {
+    try {
+      const service = require('../utils/malware-analysis').getService();
+      const result = await service.request(req.params.vmId, req.user, action);
+      await audit.log({ req, action: `lane.analysis_${action}_requested`,
+        target: { type: 'lane', id: result.analysis.laneId },
+        metadata: { operation_id: result.analysis.operationId } });
+      res.status(202).json(result);
+    } catch (err) {
+      console.error('[MalwareAnalysis] Request failed:', err.message);
+      res.status(err.status || 500).json({ error: err.status ? err.message : 'Could not prepare the lab operation. Contact an administrator.' });
+    }
+  });
+}
+
+router.get('/vms/:vmId/analysis', authenticateToken, async (req, res) => {
+  try { res.json(await require('../utils/malware-analysis').getService().forVm(req.params.vmId, req.user)); }
+  catch (err) { res.status(err.status || 500).json({ error: err.status ? err.message : 'Could not read analysis status.' }); }
+});
+
+router.get('/analysis-operations/:operationId', authenticateToken, async (req, res) => {
+  try { res.json(await require('../utils/malware-analysis').getService().status(req.params.operationId, req.user)); }
+  catch (err) { res.status(err.status || 500).json({ error: err.status ? err.message : 'Could not read analysis status.' }); }
 });
 
 // ============================================================================
@@ -470,9 +529,13 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
           r.name,
           r.module_key,
           r.status AS resource_status,
-          r.metadata->>'vm_category' AS vm_category
+          r.metadata->>'vm_category' AS vm_category,
+          COALESCE(r.metadata->>'analysis_profile', tc.metadata->>'analysis_profile') AS analysis_profile,
+          dl.config AS lane_config
         FROM cybercore_vm_instance vi
         JOIN cybercore_resource r ON r.resource_id = vi.resource_id
+        ${catalogJoinSql()}
+        LEFT JOIN cybercore_lane dl ON dl.lane_id::text = r.metadata->>'lane_id'
         LEFT JOIN cybercore_user cu ON cu.email = (vi.metadata->>'guac_user')
         WHERE vi.vm_instance_id = $1
           AND vi.destroyed_at IS NULL
@@ -506,10 +569,13 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
           r.module_key,
           r.status        AS resource_status,
           r.metadata->>'vm_category' AS vm_category,
-          a.metadata      AS alloc_metadata
+          a.metadata      AS alloc_metadata,
+          COALESCE(r.metadata->>'analysis_profile', tc.metadata->>'analysis_profile') AS analysis_profile,
+          dl.config AS lane_config
         FROM cybercore_vm_instance vi
         JOIN cybercore_resource r ON r.resource_id = vi.resource_id
         ${catalogJoinSql()}
+        LEFT JOIN cybercore_lane dl ON dl.lane_id::text = r.metadata->>'lane_id'
         JOIN cybercore_allocation a
           ON  a.resource_id = r.resource_id
           AND a.user_id     = $1
@@ -526,6 +592,13 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
     if (!vmRow) {
       // 404 rather than 403 to avoid leaking whether a vmId exists.
       return res.status(404).json({ error: 'VM not found or access denied.' });
+    }
+
+    const malwareConsole = vmRow.analysis_profile === 'malware'
+      || require('../utils/malware-analysis-state').isMalwareLane(vmRow.lane_config || {});
+    if (malwareConsole && (!vmRow.lane_config
+        || !['preparation', 'analysis'].includes(vmRow.lane_config.analysis?.state || 'preparation'))) {
+      return res.status(409).json({ error: 'The malware lab is securing, resetting, or needs recovery. Wait for the lab to be ready before opening its console.' });
     }
 
     // Resolve Guacamole connection ID. Priority:
@@ -574,13 +647,17 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
     }
 
     // Authenticate to Guacamole so the browser never sees the login prompt.
-    // Prefer a scoped per-user token; fall back to the admin token (CyberCore
-    // already enforced authorization above, so admin-level Guac access is safe).
-    // If both fail we still return the launchUrl — the client will clear any
-    // stale GUAC_AUTH so the user gets a clean login prompt rather than an
-    // "Invalid Login" flash from an expired cached token.
+    // Students must use a scoped per-user token on EVERY workstation. An
+    // administrator token obtained from an ordinary workstation would also
+    // allow its holder to change a malware connection's restrictions directly.
+    // Trusted instructors/admins retain their operator fallback; if it fails,
+    // their client can still open the URL and present a clean login prompt.
     let guacAuth = await getUserGuacToken(vmRow.guac_user, vmRow.guac_password);
-    if (!guacAuth) {
+    if (!guacAuth?.authToken && !isPrivileged) {
+      return res.status(503).json({ error: 'Your remote console account is unavailable. An administrator must repair its access before the console can open.' });
+    }
+    if (!guacAuth?.authToken && isPrivileged) {
+      guacAuth = null;
       try {
         // A FRESH admin session, never the token this process caches for its own
         // API calls — see mintGuacToken. The browser owns whatever token it is

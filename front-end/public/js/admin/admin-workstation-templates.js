@@ -23,6 +23,7 @@ function showWorkstationTemplateForm(tpl = null) {
   document.getElementById('wsTplStatus').value        = tpl?.status        || 'draft';
   document.getElementById('wsTplModule').value        = tpl?.module_key    || '';
   document.getElementById('wsTplNotes').value         = tpl?.notes         || '';
+  document.getElementById('wsTplMalwareEnvironment').checked = tpl?.metadata?.analysis_profile === 'malware';
   // Windows images cannot have a cloud-init account invented for them:
   // cloudbase-init is pinned at bake time to one account and can only set THAT
   // account's password. Leaving this blank on a Windows template used to fall
@@ -100,9 +101,9 @@ async function saveWorkstationTemplate() {
     status:        document.getElementById('wsTplStatus').value,
     notes:         document.getElementById('wsTplNotes').value.trim() || null,
     is_active:     document.getElementById('wsTplIsActive').checked,
-    // Rebuilt from the form each save, so every metadata key the deployer reads
-    // must have a field above — an omitted one is silently dropped on edit.
+    // The API merges metadata. Send null explicitly to clear this profile.
     metadata: {
+      analysis_profile: document.getElementById('wsTplMalwareEnvironment').checked ? 'malware' : null,
       ...(ciUser     ? { cloud_init_user: ciUser }      : {}),
       ...(rdpUser    ? { default_rdp_user: rdpUser }    : {}),
       ...(rdpPass    ? { default_rdp_pass: rdpPass }    : {}),
@@ -203,6 +204,7 @@ async function loadWorkstationTemplates() {
             <tr id="wsTplRow-${t.template_id}">
               <td>
                 <strong>${escHtml(t.name)}</strong>
+                ${t.metadata?.analysis_profile === 'malware' ? '<br><span class="badge badge-yellow">Malware environment</span>' : ''}
                 ${t.description ? `<br><span style="font-size:0.75rem;color:var(--gray-500);">${escHtml(t.description.substring(0,70))}</span>` : ''}
               </td>
               <td><code style="font-size:0.75rem;">${escHtml(t.template_key)}</code></td>

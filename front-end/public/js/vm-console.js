@@ -19,6 +19,21 @@ const VmConsole = (() => {
   let _activeVmId = null;
   // Most recent launch URL, kept for the "Open in new tab" button.
   let _activeLaunchUrl = null;
+  let _activeContainer = null;
+  let _activeAnalysis = null;
+  let _launchRequest = 0;
+
+  function _analysisNotice() {
+    if (_activeAnalysis?.profile !== 'malware') return '';
+    const labels = {
+      preparation: 'Preparation · Internet available',
+      isolating: 'Securing lab and starting FakeNet…',
+      analysis: 'Analysis active · Internet blocked · Clipboard exchange disabled',
+      resetting: 'Resetting lab · Restoring clean templates…',
+      error: 'Analysis is not ready · Check the lab status below',
+    };
+    return `<div class="vmc-analysis-notice" role="status">${Utils.escapeHtml(labels[_activeAnalysis.state] || 'Checking lab status…')}</div>`;
+  }
 
   // ──────────────────────────────────────────────────────────────────────────
   // Rendering helpers
@@ -38,6 +53,7 @@ const VmConsole = (() => {
           ✕ Close
         </button>
       </div>
+      ${_analysisNotice()}
     `;
   }
 
@@ -107,8 +123,11 @@ const VmConsole = (() => {
    * @param {string}      vmId      — cybercore_vm_instance.vm_instance_id (UUID)
    * @param {HTMLElement} container — element that will receive the console panel
    */
-  async function open(vmId, container) {
+  async function open(vmId, container, analysis = null) {
     _activeVmId = vmId;
+    _activeContainer = container;
+    _activeAnalysis = analysis;
+    const request = ++_launchRequest;
     container.style.display = 'block';
     _renderLoading(container);
 
@@ -119,7 +138,7 @@ const VmConsole = (() => {
       );
 
       // Discard result if user navigated away or opened a different console
-      if (_activeVmId !== vmId) return;
+      if (_activeVmId !== vmId || request !== _launchRequest) return;
 
       // Pre-authenticate with Guacamole so the iframe never shows the login prompt.
       if (data.guacToken) {
@@ -135,7 +154,7 @@ const VmConsole = (() => {
 
       _renderIframe(container, data.launchUrl);
     } catch (err) {
-      if (_activeVmId !== vmId) return;
+      if (_activeVmId !== vmId || request !== _launchRequest) return;
       const message = err?.data?.error || err?.message || 'Could not connect to remote console.';
       _renderError(container, message);
     }
@@ -147,6 +166,9 @@ const VmConsole = (() => {
   function close() {
     _activeVmId = null;
     _activeLaunchUrl = null;
+    _activeContainer = null;
+    _activeAnalysis = null;
+    ++_launchRequest;
     const panel = document.querySelector('.vmc-panel');
     if (panel) {
       const container = panel.closest('[id]') || panel.parentElement;
@@ -188,7 +210,21 @@ const VmConsole = (() => {
     }
   }
 
-  return { open, close, popout, fullscreen };
+  function setAnalysis(vmId, analysis) {
+    if (_activeVmId !== vmId) return;
+    _activeAnalysis = analysis;
+    const panel = _activeContainer?.querySelector('.vmc-panel');
+    if (!panel) return;
+    panel.querySelector('.vmc-analysis-notice')?.remove();
+    panel.querySelector('.vmc-toolbar')?.insertAdjacentHTML('afterend', _analysisNotice());
+  }
+
+  function reconnect(vmId) {
+    if (_activeVmId !== vmId || !_activeContainer) return;
+    return open(vmId, _activeContainer, _activeAnalysis);
+  }
+
+  return { open, close, popout, fullscreen, setAnalysis, reconnect, activeVmId: () => _activeVmId };
 })();
 
 // ============================================================================
@@ -221,6 +257,170 @@ const VmWorkspaces = (() => {
   let _consoleOnly = true;
   let _lastListEl = null;
   let _lastConsoleId = null;
+  const _views = new Map();
+  const _vms = new Map();
+  const _operations = new Map();
+  const _posting = new Set();
+
+  function _laneKey(vm) {
+    return vm?.analysis?.laneId || vm?.laneId || vm?.id;
+  }
+
+  function _analysisControls(vm) {
+    const analysis = vm.analysis;
+    if (analysis?.profile !== 'malware') return '';
+    const busy = ['isolating', 'resetting'].includes(analysis.state) || _posting.has(_laneKey(vm));
+    const labels = {
+      preparation: 'Preparation · Internet available',
+      isolating: 'Securing lab and starting FakeNet…',
+      analysis: 'Analysis active · Internet blocked',
+      resetting: 'Resetting lab · Restoring clean templates…',
+      error: 'Analysis is not ready',
+    };
+    const startLabel = analysis.state === 'analysis' ? 'Analysis Active'
+      : analysis.state === 'isolating' ? 'Securing Lab…' : 'Start Analysis';
+    const tone = analysis.state === 'analysis' ? 'ready' : analysis.state === 'error' ? 'error' : 'pending';
+    return `
+      <div class="vml-analysis-status vml-analysis-${tone}" role="status" aria-live="polite">
+        <strong>${Utils.escapeHtml(labels[analysis.state] || 'Checking lab status…')}</strong>
+        ${analysis.message ? `<span>${Utils.escapeHtml(analysis.message)}</span>` : ''}
+        ${analysis.state === 'analysis' ? '<span>FakeNet captures and logs are in C:\\Analysis. Copy/paste within the workstation still works.</span>' : ''}
+      </div>
+      <div class="vml-card-actions vml-analysis-actions" aria-busy="${busy}">
+        <button type="button" class="btn btn-sm vml-analysis-start" data-analysis-action="start"
+          ${!busy && analysis.canStart === true ? '' : 'disabled'}>${startLabel}</button>
+        <button type="button" class="btn btn-sm vml-analysis-reset" data-analysis-action="reset"
+          ${!busy && analysis.canReset === true ? '' : 'disabled'}>${analysis.state === 'resetting' ? 'Resetting Lab…' : 'Reset Lab'}</button>
+      </div>`;
+  }
+
+  function _bindAnalysisActions(listEl) {
+    listEl.querySelectorAll('[data-analysis-action]').forEach(button => {
+      button.addEventListener('click', () => {
+        const vmId = button.closest('[data-vm-id]')?.dataset.vmId;
+        if (vmId) runAnalysis(vmId, button.dataset.analysisAction);
+      });
+    });
+  }
+
+  function _paintView(listEl, view) {
+    listEl.innerHTML = view.vms.map(vm => _vmCard(vm, view.consoleContainerId)).join('');
+    _bindAnalysisActions(listEl);
+  }
+
+  function _applyAnalysis(vmId, analysis) {
+    const source = _vms.get(vmId);
+    const laneKey = analysis.laneId || _laneKey(source);
+    const affected = [];
+    for (const [id, vm] of _vms) {
+      if (id !== vmId && (!laneKey || _laneKey(vm) !== laneKey)) continue;
+      if (vm.analysis?.profile !== 'malware') continue;
+      vm.analysis = { ...analysis };
+      affected.push(id);
+      VmConsole.setAnalysis(id, vm.analysis);
+    }
+    for (const [listEl, view] of _views) {
+      if (!listEl.isConnected) { _views.delete(listEl); continue; }
+      if (!view.vms.length) continue;
+      view.vms = view.vms.map(vm => _vms.get(vm.id) || vm);
+      _paintView(listEl, view);
+    }
+    return affected;
+  }
+
+  async function _refreshViews() {
+    await Promise.all([..._views].filter(([el]) => el.isConnected)
+      .map(([el, view]) => render(el, view.consoleContainerId, { ...view.opts, quiet: true })));
+  }
+
+  function _statusPath(vmId, response) {
+    // API.request adds /api. Never poll a foreign URL supplied in a response.
+    const path = response?.statusUrl;
+    return typeof path === 'string' && /^\/(?:api\/)?dashboard\//.test(path)
+      ? path.replace(/^\/api\//, '/') : `/dashboard/vms/${encodeURIComponent(vmId)}/analysis`;
+  }
+
+  function _scheduleAnalysis(vmId, response = {}, action = null, delay = 1500) {
+    const laneKey = _laneKey(_vms.get(vmId));
+    const existingId = laneKey && [..._operations.keys()].find(id => _laneKey(_vms.get(id)) === laneKey);
+    if (existingId && existingId !== vmId) return _scheduleAnalysis(existingId, response, action, delay);
+    let operation = _operations.get(vmId);
+    if (!operation) {
+      operation = { path: _statusPath(vmId, response), action, timer: null, inFlight: false };
+      _operations.set(vmId, operation);
+    } else {
+      if (response.statusUrl) operation.path = _statusPath(vmId, response);
+      if (action) operation.action = action;
+    }
+    if (operation.timer || operation.inFlight) return;
+    operation.timer = setTimeout(async () => {
+      operation.timer = null;
+      operation.inFlight = true;
+      try {
+        const data = await API.request(operation.path);
+        const analysis = data.analysis || data;
+        if (analysis.profile !== 'malware' || !analysis.state) throw new Error('Lab status is unavailable.');
+        const affected = _applyAnalysis(vmId, analysis);
+        if (['isolating', 'resetting'].includes(analysis.state)) {
+          operation.inFlight = false;
+          _scheduleAnalysis(vmId, data);
+          return;
+        }
+        _operations.delete(vmId);
+        if (analysis.state === 'analysis') {
+          // The backend ends pre-analysis sessions; reconnect the embedded console
+          // only after it reports both containment and the new console policy ready.
+          for (const id of affected) await VmConsole.reconnect(id);
+          if (operation.action === 'start') Toast.success('Analysis ready', 'Internet and clipboard exchange are disabled.');
+        } else if (analysis.state === 'preparation' && operation.action === 'reset') {
+          Toast.success('Lab reset', 'Your clean lab is ready. All previous files and changes were removed.');
+        } else if (analysis.state === 'error') {
+          Toast.error('Lab needs attention', analysis.message || 'The operation could not be completed.');
+        }
+        await _refreshViews();
+      } catch (err) {
+        const vm = _vms.get(vmId);
+        if (vm?.analysis) _applyAnalysis(vmId, {
+          ...vm.analysis,
+          message: 'Connection interrupted. Checking lab status again…',
+          canStart: false, canReset: false,
+        });
+        operation.inFlight = false;
+        _scheduleAnalysis(vmId, {}, null, 5000);
+      }
+    }, delay);
+  }
+
+  async function runAnalysis(vmId, action) {
+    const vm = _vms.get(vmId);
+    if (!vm || vm.analysis?.profile !== 'malware' || !['start', 'reset'].includes(action)) return;
+    const key = _laneKey(vm);
+    if (_posting.has(key) || ['isolating', 'resetting'].includes(vm.analysis.state)) return;
+    if (action === 'start' ? !vm.analysis.canStart : !vm.analysis.canReset) return;
+    if (action === 'reset' && !window.confirm('Reset this lab? All downloaded files, samples, and changes on every machine in this lab will be deleted. The workstation and gateway will be rebuilt from their clean templates.')) return;
+
+    _posting.add(key);
+    _applyAnalysis(vmId, {
+      ...vm.analysis, state: action === 'start' ? 'isolating' : 'resetting',
+      message: action === 'start' ? 'Wait for Analysis active before opening a sample.' : 'Rebuilding the lab can take several minutes.',
+      canStart: false, canReset: false,
+    });
+    try {
+      const data = await API.request(`/dashboard/vms/${encodeURIComponent(vmId)}/analysis/${action}`, { method: 'POST' });
+      if (data.analysis) _applyAnalysis(vmId, data.analysis);
+      if (action === 'reset' && _laneKey(_vms.get(VmConsole.activeVmId())) === key) VmConsole.close();
+      _scheduleAnalysis(vmId, data, action, 100);
+    } catch (err) {
+      const message = err?.data?.error || err?.message || 'Could not request the lab operation.';
+      Toast.error(action === 'start' ? 'Could not start analysis' : 'Could not reset lab', message);
+      // A lost response can mean the request succeeded. Read server state before
+      // enabling another destructive action or showing the lab as ready.
+      _applyAnalysis(vmId, { ...vm.analysis, message: `${message} Checking lab status…`, canStart: false, canReset: false });
+      _scheduleAnalysis(vmId, {}, action, 100);
+    } finally {
+      _posting.delete(key);
+    }
+  }
 
   function _isPrivileged() {
     const u = (typeof Auth !== 'undefined') ? Auth.getUser() : null;
@@ -254,12 +454,13 @@ const VmWorkspaces = (() => {
   }
 
   function _vmCard(vm, consoleContainerId) {
-    const canLaunch = vm.hasConsole && vm.powerState === 'running';
+    const transitioning = ['isolating', 'resetting'].includes(vm.analysis?.state);
+    const canLaunch = vm.hasConsole && vm.powerState === 'running' && !transitioning;
     const launchBtn = vm.hasConsole
       ? `<button
            class="btn btn-sm vml-launch-btn"
            onclick="VmWorkspaces.launch('${vm.id}', '${consoleContainerId}')"
-           ${canLaunch ? '' : 'disabled title="VM must be running to open console"'}
+           ${canLaunch ? '' : `disabled title="${transitioning ? 'Wait for the lab operation to finish' : 'VM must be running to open console'}"`}
          >
            ▶ Open Console
          </button>`
@@ -307,7 +508,7 @@ const VmWorkspaces = (() => {
       : '';
 
     return `
-      <div class="vml-card">
+      <div class="vml-card" data-vm-id="${Utils.escapeHtml(vm.id)}">
         <div class="vml-card-header">
           <span class="vml-vm-icon">🖥</span>
           <div class="vml-card-info">
@@ -322,6 +523,7 @@ const VmWorkspaces = (() => {
           </div>
         </div>
         <div class="vml-card-actions">${credBtn}${launchBtn}</div>
+        ${_analysisControls(vm)}
       </div>
     `;
   }
@@ -417,13 +619,13 @@ const VmWorkspaces = (() => {
    *             page would list the whole cluster instead of their machines.
    */
   async function render(listEl, consoleContainerId, opts = {}) {
-    const { toggles = true, scope = null, embedded = false } = opts;
+    const { toggles = true, scope = null, embedded = false, quiet = false } = opts;
     if (!embedded) {
       _lastListEl = listEl;
       _lastConsoleId = consoleContainerId;
     }
     if (toggles) _renderHeaderToggle();
-    listEl.innerHTML = '<div class="vml-loading">Loading workspaces…</div>';
+    if (!quiet) listEl.innerHTML = '<div class="vml-loading">Loading workspaces…</div>';
 
     try {
       // Admins/instructors default to scope=all; non-admins ignore the param server-side.
@@ -441,11 +643,24 @@ const VmWorkspaces = (() => {
         : '';
       const data = await API.request(`/dashboard/vms${scopeQuery}`);
       const rawVms = data.vms || [];
+      for (const vm of rawVms) _vms.set(vm.id, vm);
       // Console filter: by default we only show cards the user can actually
       // click. Lane target VMs (ws01, ws02, etc.) have no Guac connection —
       // they're pivot-only from Kali — so listing them is just visual noise.
       // Flip via the "All VMs" toggle to see the full inventory.
-      const vms = _consoleOnly ? rawVms.filter(v => v.hasConsole) : rawVms;
+      // A failed reset can leave only a durable recovery card while every old
+      // VM has been retired. Keep its Reset Lab action reachable without a console.
+      const vms = _consoleOnly ? rawVms.filter(v => v.hasConsole || v.analysis?.profile === 'malware') : rawVms;
+      const view = { vms, consoleContainerId, opts };
+      _views.set(listEl, view);
+      for (const vm of vms) {
+        if (vm.analysis?.profile === 'malware' && ['isolating', 'resetting'].includes(vm.analysis.state)) {
+          _scheduleAnalysis(vm.id, {
+            statusUrl: vm.analysis.statusUrl || (vm.analysis.operationId
+              ? `/api/dashboard/analysis-operations/${encodeURIComponent(vm.analysis.operationId)}` : null),
+          });
+        }
+      }
 
       if (vms.length === 0) {
         const adminAll = _isPrivileged() && _scopeAll && scope !== 'mine' && !_studentView();
@@ -479,7 +694,7 @@ const VmWorkspaces = (() => {
         return;
       }
 
-      listEl.innerHTML = vms.map(vm => _vmCard(vm, consoleContainerId)).join('');
+      _paintView(listEl, view);
     } catch (err) {
       const msg = err?.data?.error || err?.message || 'Failed to load workspaces.';
       listEl.innerHTML = `<div class="vml-error">⚠ ${Utils.escapeHtml(msg)}</div>`;
@@ -658,8 +873,8 @@ const VmWorkspaces = (() => {
     const container = document.getElementById(consoleContainerId);
     if (!container) return;
     container.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    VmConsole.open(vmId, container);
+    VmConsole.open(vmId, container, _vms.get(vmId)?.analysis);
   }
 
-  return { render, launch, credentials };
+  return { render, launch, credentials, runAnalysis };
 })();

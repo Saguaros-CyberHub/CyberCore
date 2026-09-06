@@ -14,6 +14,16 @@ const { authenticateToken, requireRole } = require('../../middleware/auth');
 
 const adminOnly = requireRole('admin');
 
+function validateAnalysisProfile(metadata) {
+  if (metadata === undefined || metadata === null) return null;
+  if (typeof metadata !== 'object' || Array.isArray(metadata)) return 'metadata must be an object';
+  if (metadata.analysis_profile !== undefined && metadata.analysis_profile !== null
+      && metadata.analysis_profile !== 'malware') {
+    return "metadata.analysis_profile must be 'malware' or null";
+  }
+  return null;
+}
+
 // `os_name` is returned BOTH aliased as `name` (what this tab's own UI reads) and
 // under its real column name, because the topology palette reads `t.os_name` and
 // `t.preferred` — without them every palette entry rendered as a bare VMID with no
@@ -86,6 +96,8 @@ router.post('/workstation-templates', authenticateToken, adminOnly, async (req, 
   if (provider_type && !['qemu', 'lxc'].includes(provider_type)) {
     return res.status(400).json({ error: "provider_type must be 'qemu' or 'lxc'" });
   }
+  const profileError = validateAnalysisProfile(metadata);
+  if (profileError) return res.status(400).json({ error: profileError });
 
   try {
     // Auto-detect type from Proxmox if not manually specified
@@ -127,6 +139,8 @@ router.put('/workstation-templates/:id', authenticateToken, adminOnly, async (re
   if (provider_type !== undefined && provider_type !== null && !['qemu', 'lxc'].includes(provider_type)) {
     return res.status(400).json({ error: "provider_type must be 'qemu', 'lxc', or null" });
   }
+  const profileError = validateAnalysisProfile(metadata);
+  if (profileError) return res.status(400).json({ error: profileError });
 
   try {
     const result = await cybercoreQuery(

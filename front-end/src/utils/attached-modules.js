@@ -234,6 +234,7 @@ async function attachModuleToLane({
   laneSubnetBase, vnetName, bestNode, templateNode, gatewayVmId,
   proxmoxAPI, waitForTask
 }) {
+  require('./malware-analysis-state').assertOrdinaryLaneMutation(laneConfig);
   if (!spec || spec.attachable !== true) {
     throw new Error(`Challenge '${challenge.challenge_key}' is not marked attachable (spec.attachable must be true)`);
   }

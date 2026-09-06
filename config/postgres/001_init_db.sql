@@ -474,3 +474,21 @@ CREATE INDEX IF NOT EXISTS idx_ticket_event_ticket
 CREATE INDEX IF NOT EXISTS idx_ticket_event_public
   ON cybercore_ticket_event (ticket_id, created_at)
   WHERE visibility = 'public';
+
+-- Malware analysis progress is independent of the replaceable VM and gateway.
+CREATE TABLE IF NOT EXISTS cybercore_analysis_operation (
+  operation_id UUID PRIMARY KEY,
+  lane_id UUID NOT NULL,
+  requested_vm_id UUID NOT NULL,
+  owner_user_id UUID NOT NULL REFERENCES cybercore_user(user_id) ON DELETE CASCADE,
+  requested_by UUID NOT NULL REFERENCES cybercore_user(user_id) ON DELETE CASCADE,
+  action TEXT NOT NULL CHECK (action IN ('start', 'reset')),
+  state TEXT NOT NULL CHECK (state IN ('isolating', 'analysis', 'resetting', 'preparation', 'error')),
+  message TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_analysis_lane_running
+  ON cybercore_analysis_operation(lane_id) WHERE state IN ('isolating', 'resetting');
+CREATE INDEX IF NOT EXISTS ix_analysis_vm_history
+  ON cybercore_analysis_operation(requested_vm_id, created_at DESC);

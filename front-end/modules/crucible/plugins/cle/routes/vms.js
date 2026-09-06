@@ -1934,7 +1934,12 @@ router.get('/:laneId/console', instructorOnly, async (req, res) => {
     );
     if (laneRes.rows.length === 0) return res.status(404).json({ error: 'Lane not found in this course' });
 
-    const connId = laneRes.rows[0].config?.guac_connection_id;
+    const config = laneRes.rows[0].config || {};
+    if (require('../../../../../src/utils/malware-analysis-state').isMalwareLane(config)
+        && !['preparation', 'analysis'].includes(config.analysis?.state || 'preparation')) {
+      return res.status(409).json({ error: 'Wait for the malware lab to finish securing or resetting before opening its console.' });
+    }
+    const connId = config.guac_connection_id;
     if (!connId) return res.status(404).json({ error: 'No remote console is configured for this workstation yet' });
 
     // mintGuacToken, NOT getGuacToken: the cached token is the one this process
@@ -2011,6 +2016,7 @@ router.get('/:laneId/topology', instructorOnly, async (req, res) => {
  * gateway + Guac connection + workspace records + lane row).
  */
 router.delete('/:laneId', instructorOnly, async (req, res) => {
+  let claimed = null;
   try {
     const { courseId, laneId } = req.params;
 
@@ -2021,11 +2027,22 @@ router.delete('/:laneId', instructorOnly, async (req, res) => {
     const laneRes = await cybercoreQuery(
       // material_id IS NULL: a vulnerable-lab lane must be removed through
       // DELETE /labs/:labId, which also clears the assignment it belongs to.
-      `SELECT lane_id FROM cybercore_lane
+      `SELECT lane_id, config FROM cybercore_lane
         WHERE lane_id = $1 AND config->>'course_id' = $2 AND config->>'material_id' IS NULL`,
       [laneId, courseId]
     );
     if (laneRes.rows.length === 0) return res.status(404).json({ error: 'Lane not found in this course' });
+
+    const config = laneRes.rows[0].config || {};
+    if (require('../../../../../src/utils/malware-analysis-state').BUSY_STATES.has(config.analysis?.state)) {
+      return res.status(409).json({ error: 'A malware lab operation is running. Wait for it to finish before deleting the environment.' });
+    }
+    // Check and claim together: Start Analysis and Reset Lab use this same
+    // registry, so neither can begin while this deletion is awaiting Proxmox.
+    laneProvision.assertNoConflictingWorkstationOperation({ courseId, laneId });
+    claimed = laneProvision.progressIdForLane(courseId, laneId);
+    const progress = laneDeployer.initProgress(claimed, 'Delete workstation lane', 1);
+    progress.operation = 'delete';
 
     const result = await laneProvision.teardownLane(laneId);
     audit.log({
@@ -2038,7 +2055,9 @@ router.delete('/:laneId', instructorOnly, async (req, res) => {
     res.json({ success: true, message: 'Workstation lane removed', ...result });
   } catch (error) {
     console.error('[CLE] Delete VM error:', error.message);
-    res.status(500).json({ error: error.message });
+    res.status(error.status || 500).json({ error: error.message });
+  } finally {
+    if (claimed) laneDeployer.finishProgress(claimed);
   }
 });
 

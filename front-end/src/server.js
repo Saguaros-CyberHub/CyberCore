@@ -959,6 +959,11 @@ async function start() {
     // terms as the audit log: no ticket system beats no server.
     await require('./utils/tickets').ensureTicketTables();
 
+    // Schema and crash recovery for persistent malware isolation operations.
+    // If unavailable, analysis requests fail; other course tooling stays usable.
+    try { await require('./utils/malware-analysis').getService().initialize(); }
+    catch (err) { console.error('[MalwareAnalysis] Initialization failed:', err.message); }
+
     // The shared incident engine's tables (cybercore_incident_run/_target).
     //
     // Here rather than in front-end/migrations/ for the usual reason — that

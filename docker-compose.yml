@@ -161,6 +161,9 @@ services:
       CYBERCORE_INTERNAL_URL: ${CYBERCORE_INTERNAL_URL:-http://100.100.20.50:80}
       # Guacamole — internal service, always points to compose container
       GUAC_ENABLED: "true"
+      # The analysis connection check uses the same backend as Guacamole below.
+      GUACD_HOSTNAME: guacd
+      GUACD_PORT: 4822
       GUAC_PUBLIC_BASE_URL: /guacamole
       GUAC_API_URL: http://guacamole:8080/guacamole
       GUAC_ADMIN_USER: ${GUAC_ADMIN_USER}

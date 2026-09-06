@@ -460,6 +460,10 @@ router.post('/:templateId/deploy', authenticateToken, staffOnly, async (req, res
     if (!tplRes.rows.length) return res.status(404).json({ error: 'Template not found' });
     const tpl = tplRes.rows[0];
 
+    if (tpl.metadata?.analysis_profile === 'malware') {
+      return res.status(409).json({ error: 'Malware workstations require a dedicated environment with a lane gateway. Deploy this template through the course environment controls.' });
+    }
+
     if (!tpl.template_vmid) return res.status(400).json({ error: 'Template has no Proxmox VMID configured' });
     if (!tpl.node)          return res.status(400).json({ error: 'Template has no node assigned — sync nodes in admin first' });
 

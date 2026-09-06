@@ -1074,6 +1074,7 @@ router.patch('/lanes/:id/internet', authenticateToken, adminOnly, async (req, re
     }
 
     const config = typeof lane.config === 'string' ? JSON.parse(lane.config) : lane.config;
+    require('../../utils/malware-analysis-state').assertOrdinaryLaneMutation(config);
     const node = config?.node;
     const gatewayVmId = config?.gateway_vm_id || (100000 + lane.vxlan_id);
 

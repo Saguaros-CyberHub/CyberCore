@@ -1243,6 +1243,18 @@
               </div>
             </div>
 
+            <div class="form-group">
+              <label style="display:flex;align-items:center;gap:0.6rem;">
+                <input type="checkbox" id="wsTplMalwareEnvironment">
+                Malware workstation / environment
+              </label>
+              <p style="font-size:0.8rem;color:var(--gray-500);margin:0.4rem 0 0;">
+                Adds Start Analysis and Reset Lab to this workstation's dashboard card.
+                Use a dedicated lab with a clean, malware-free template. Reset Lab rebuilds
+                every machine and the gateway from their clean templates.
+              </p>
+            </div>
+
             <input type="hidden" id="wsTplEditId">
             <button class="btn btn-primary" onclick="saveWorkstationTemplate()" style="width:100%; margin-top:0.5rem;">
               <span id="wsTplSaveLabel">Create Workstation Template</span>

@@ -105,6 +105,7 @@ const WORKSTATION_MAX_SLOTS  = 30;
 // because config also holds deployer-owned keys that must NOT be echoed back.
 const LANE_CONFIG_PASSTHROUGH_KEYS = [
   'cle', 'course_id', 'challenge_key', 'material_id', 'cohort_id',
+  'analysis_profile',
 ];                  // .50 – .79
 const WORKSTATION_OCTET = WORKSTATION_OCTET_BASE;   // back-compat alias: slot 0
 
@@ -194,6 +195,9 @@ function consoleForSlot(con, slot) {
  * band exhausted while the cluster had plenty of free ids.
  */
 const _reservedWsVmids = new Map(); // vmid → Date.now() when handed out
+// A whole malware reset can outlast the ordinary clone reservation TTL. Keep
+// its allocated slot ids pinned until that operation settles.
+const _resetHeldWsVmids = new Set();
 const RESERVED_VMID_TTL_MS = 15 * 60 * 1000;
 
 /**
@@ -221,7 +225,7 @@ async function reserveWorkstationVmids(count) {
 
   const ids = [];
   for (let id = EXTRA_WS_VMID_BASE; ids.length < count && id <= EXTRA_WS_VMID_MAX; id++) {
-    if (taken.has(id) || _reservedWsVmids.has(id)) continue;
+    if (taken.has(id) || _reservedWsVmids.has(id) || _resetHeldWsVmids.has(id)) continue;
     _reservedWsVmids.set(id, now);
     ids.push(id);
   }
@@ -1172,6 +1176,7 @@ async function ensureGuacUser(userId, email) {
 /** Guacamole connection parameters for the resolved protocol. */
 function buildGuacParameters({ protocol, hostname, port, creds, template }) {
   const meta = template.metadata || {};
+  const malware = meta.analysis_profile === 'malware';
   const auth = {
     ...(creds?.username ? { username: creds.username } : {}),
     ...(creds?.password ? { password: creds.password } : {}),
@@ -1215,6 +1220,13 @@ function buildGuacParameters({ protocol, hostname, port, creds, template }) {
     'enable-full-window-drag': 'true',
     'color-depth': '24',
     'resize-method': 'display-update',
+    // File channels stay closed for malware workstations even during preparation.
+    // The analysis service closes both clipboard directions when analysis starts.
+    ...(malware ? {
+      'enable-drive': 'false', 'create-drive-path': 'false',
+      'enable-printing': 'false', 'enable-sftp': 'false',
+      'disable-upload': 'true', 'disable-download': 'true',
+    } : {}),
   };
 }
 
@@ -1368,6 +1380,7 @@ async function registerWorkspaceVm({ job, template, workstationVmid, providerTyp
         provider_type: providerType,
         template_name: displayName,
         catalog_template_id: template.id || null,
+        ...(template.metadata?.analysis_profile === 'malware' ? { analysis_profile: 'malware' } : {}),
         lane_id: laneId,
         vxlan_id: vxlanId,
         ...laneConfig,
@@ -1575,6 +1588,7 @@ function workstationConfigEntry(ws) {
     template_name: ws.template.os_name || ws.template.template_key,
     console_protocol: ws.console.protocol,
     console_port: ws.console.wanPort,
+    ...(ws.template.metadata?.analysis_profile === 'malware' ? { analysis_profile: 'malware' } : {}),
   };
 }
 
@@ -1612,6 +1626,10 @@ async function insertLane(job) {
        RETURNING lane_id`,
       [user.id, moduleKey, laneName, vxlanId, JSON.stringify({
         ...laneConfig,
+        ...(workstations.some(w => w.template.metadata?.analysis_profile === 'malware') ? {
+          analysis_profile: 'malware',
+          analysis: { profile: 'malware', state: 'preparation' },
+        } : {}),
         template_id: primary.template.id || null,
         template_name: primary.template.os_name || primary.template.template_key,
         provider_type: primary.providerType,
@@ -1695,14 +1713,24 @@ async function cloneGateway(job) {
     net0: formatLaneGatewayNet0(net.wan),
     net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`,
   });
-  await configureLaneTailscale({
-    subnetScheme, vxlanId, wanIp: net.wan.ip.split('/')[0], laneName, claimSecret, logTag: LOG,
-  });
+  if (job.workstations.some(w => w.template.metadata?.analysis_profile === 'malware')) {
+    // Malware lanes use the approved gateway RDP path. Do not add a second
+    // remote network that would bypass their analysis policy. Remove any token
+    // belonging to an earlier gateway before this clean clone first boots.
+    await cybercoreQuery('DELETE FROM lane_bootstrap_tokens WHERE vxlan_id = $1', [vxlanId]);
+  } else {
+    await configureLaneTailscale({
+      subnetScheme, vxlanId, wanIp: net.wan.ip.split('/')[0], laneName, claimSecret, logTag: LOG,
+    });
+  }
   await proxmoxAPI('POST', `${vmApiBase(targetNode, gatewayVmid, 'lxc')}/status/start`);
   // Wait for the gateway's OWN boot-time config to land before the caller writes
   // the lane's reservations and DNATs over the top of it — see
   // waitForGatewayFirstboot for what happens when these two interleave.
-  await waitForGatewayFirstboot(targetNode, gatewayVmid);
+  const bootReady = await waitForGatewayFirstboot(targetNode, gatewayVmid);
+  if (!bootReady && job.workstations.some(w => w.template.metadata?.analysis_profile === 'malware')) {
+    throw new Error('Malware gateway first boot could not be verified; workstations were not started.');
+  }
 }
 
 /**
@@ -2207,6 +2235,12 @@ async function deployLanes({
 
   const tmpls = (Array.isArray(templates) && templates.length) ? templates : (template ? [template] : []);
   if (!tmpls.length) throw new Error('deployLanes: one of template / templates is required');
+  if (tmpls.some(t => t.metadata?.analysis_profile === 'malware') &&
+      (subnetScheme !== 'v2' || tmpls.some(t =>
+        t.metadata?.analysis_profile !== 'malware' || (t.provider_type || 'qemu') !== 'qemu' ||
+        resolveConsole(t).protocol !== 'rdp'))) {
+    throw new Error('Malware environments require a dedicated v2 lane containing only malware QEMU workstations with RDP consoles.');
+  }
   if (tmpls.length > WORKSTATION_MAX_SLOTS) {
     throw new Error(
       `deployLanes: ${tmpls.length} workstations per lane exceeds the ${WORKSTATION_MAX_SLOTS}-slot band ` +
@@ -3250,7 +3284,7 @@ async function spliceLaneWorkstations(laneId, records, touchedSlots, extraPatch 
  * mandatory here, and scoped to the one node the VM was on rather than the
  * whole cluster.
  */
-async function sweepVmDisks(node, vmid) {
+async function sweepVmDisks(node, vmid, { rootdir = false, strict = false } = {}) {
   const survivors = [];
   let storages;
   try {
@@ -3260,14 +3294,17 @@ async function sweepVmDisks(node, vmid) {
   }
   let swept = 0;
   for (const st of (storages || [])) {
-    if (st.content && !st.content.includes('images')) continue;
+    if (st.content && !st.content.includes('images') && !(rootdir && st.content.includes('rootdir'))) continue;
     let contents;
     try {
       contents = await proxmoxAPI(
-        'GET', `/api2/json/nodes/${node}/storage/${st.storage}/content?content=images`);
-    } catch (_) { continue; }
+        'GET', `/api2/json/nodes/${node}/storage/${st.storage}/content?content=${rootdir ? 'images,rootdir' : 'images'}`);
+    } catch (e) {
+      if (strict) survivors.push(`storage ${st.storage} could not be inspected: ${e.message}`);
+      continue;
+    }
     for (const item of (contents || [])) {
-      const m = (item.volid || '').match(/vm-(\d+)-(disk|cloudinit)/);
+      const m = (item.volid || '').match(/(?:vm|subvol)-(\d+)-(disk|cloudinit)/);
       if (!m || Number(m[1]) !== Number(vmid)) continue;
       let ok = false;
       let lastErr = null;
@@ -3304,7 +3341,7 @@ async function sweepVmDisks(node, vmid) {
  * @param {Array} a.targets [{ slot, vmid, providerType, hostname, node }]
  * @returns {Promise<{destroyed:Array, absent:Array, failed:Array}>}
  */
-async function destroyWorkstationSlots({ laneId, targets, waitTimeoutMs = 120000 }) {
+async function destroyWorkstationSlots({ laneId, targets, waitTimeoutMs = 120000, strictDiskSweep = false }) {
   const destroyed = [];
   const absent = [];
   const failed = [];
@@ -3340,7 +3377,7 @@ async function destroyWorkstationSlots({ laneId, targets, waitTimeoutMs = 120000
       continue;
     }
 
-    const sweep = await sweepVmDisks(t.node, t.vmid);
+    const sweep = await sweepVmDisks(t.node, t.vmid, { rootdir: type === 'lxc', strict: strictDiskSweep });
     if (sweep.survivors.length) {
       failed.push({
         slot: t.slot, vmid: t.vmid, phase: 'disk',
@@ -3411,6 +3448,68 @@ function preflightError(msg, phase = 'preflight') {
   return e;
 }
 
+/** Prevent the ordinary rebuild path from changing an isolated gateway. */
+function assertAnalysisRebuildAllowed(lane, { resetGateway = false, analysisOperationId = null, slots = null } = {}) {
+  const cfg = lane.config || {};
+  const analysis = cfg.analysis || {};
+  if (!resetGateway) {
+    if (analysis.state && analysis.state !== 'preparation') {
+      throw preflightError('This malware environment must be rebuilt with Reset Lab while analysis protection is active.');
+    }
+    return;
+  }
+  if (!analysisOperationId || analysis.operation_id !== analysisOperationId || analysis.state !== 'resetting') {
+    throw preflightError('Reset Lab requires the current analysis reset operation.');
+  }
+  if (slots !== null) throw preflightError('Reset Lab must replace every workstation and the gateway.');
+  if (cfg.subnet_scheme !== 'v2' || cfg.material_id ||
+      (cfg.vms && (!Array.isArray(cfg.vms) || cfg.vms.length)) ||
+      (cfg.attached_modules && (!Array.isArray(cfg.attached_modules) || cfg.attached_modules.length)) ||
+      cfg.attack_box_vm_id || cfg.attack_box_vmid) {
+    throw preflightError('Reset Lab is available only on dedicated v2 malware workstation lanes without attached labs.');
+  }
+  if (!['active', 'deploying', 'suspended'].includes(lane.status)) {
+    throw preflightError('Reset Lab requires a lane that still holds its network allocation.');
+  }
+}
+
+/**
+ * Remove all potentially contaminated guests before replacing their gateway.
+ * Keep the lane row and its allocation throughout: an incomplete reset remains
+ * retryable and can never hand a surviving machine's network to another lane.
+ */
+async function replaceAnalysisGateway({ job, liveByVmid, gatewayNode, gatewayVmid, destroyWaitMs }) {
+  const { laneId, workstations, targetNode } = job;
+  const destroyed = await destroyWorkstationSlots({
+    laneId, waitTimeoutMs: destroyWaitMs, strictDiskSweep: true,
+    targets: workstations.map(ws => ({
+      slot: ws.slot, vmid: ws.vmid, providerType: ws.providerType,
+      // Still inspect disks when a previous reset already removed the VM config.
+      node: liveByVmid[String(ws.vmid)]?.node || targetNode,
+    })),
+  });
+  if (destroyed.failed.length) {
+    throw new Error(`Reset stopped before replacing the isolated gateway: ${destroyed.failed[0].error}`);
+  }
+  const guestsGone = await waitForVmidsGone(workstations.map(ws => ws.vmid), { timeoutMs: destroyWaitMs });
+  if (guestsGone.surviving.length) {
+    throw new Error('Reset could not verify that every old workstation was removed; the gateway was left isolated.');
+  }
+
+  const gateway = await destroyWorkstationSlots({
+    laneId, waitTimeoutMs: destroyWaitMs, strictDiskSweep: true,
+    targets: [{ slot: 'gateway', vmid: gatewayVmid, providerType: 'lxc', node: gatewayNode || targetNode }],
+  });
+  if (gateway.failed.length) throw new Error(`The old gateway could not be removed: ${gateway.failed[0].error}`);
+
+  // No old guest or gateway remains. Any cached tailnet identity belongs to
+  // the destroyed gateway; the new malware gateway never gets a bootstrap key.
+  await tailscale.deleteLaneDevices({ vxlanId: job.vxlanId });
+  await cloneGateway(job);
+  await applyGatewayWorkstationAccess({ node: targetNode, gatewayVmid, workstations });
+  job._gatewayAccessOk = true;
+}
+
 /**
  * Rebuild machines in place inside an EXISTING lane.
  *
@@ -3445,6 +3544,11 @@ function preflightError(msg, phase = 'preflight') {
  * they carry err.destroyed === false.
  *
  * @param {number[]|null} a.slots  null = every recorded slot
+ * @param {boolean} [a.resetGateway] Malware Reset Lab: destroy every old guest
+ *   before replacing the gateway from its clean template. Lane identity and
+ *   network claims survive; analysis state remains owned by the calling service.
+ * @param {string|null} [a.analysisOperationId] Must match the persisted reset
+ *   operation. Required for resetGateway; ordinary rebuilds cannot reset analysis.
  */
 async function rebuildLaneWorkstations({
   laneId,
@@ -3454,6 +3558,8 @@ async function rebuildLaneWorkstations({
   description = '',
   guacParent = undefined,
   destroyWaitMs = 120000,
+  resetGateway = false,
+  analysisOperationId = null,
 }) {
   // ── load ────────────────────────────────────────────────────────────────
   const laneRes = await cybercoreQuery(
@@ -3467,9 +3573,10 @@ async function rebuildLaneWorkstations({
   const cfg = lane.config || {};
   const moduleKey = lane.module_key || 'crucible';
   const subnetScheme = cfg.subnet_scheme || 'v2';
+  assertAnalysisRebuildAllowed(lane, { resetGateway, analysisOperationId, slots });
 
   // ── pre-flight: everything that can fail, before anything is destroyed ───
-  if (lane.status !== 'active') {
+  if (!resetGateway && lane.status !== 'active') {
     throw preflightError(
       `This lane is ${lane.status}, not active. An in-place rebuild keeps the existing gateway and network, which only makes sense for a working lane — rebuild the whole lane instead.`);
   }
@@ -3519,15 +3626,27 @@ async function rebuildLaneWorkstations({
   for (const r of live) liveByVmid[String(r.vmid)] = r;
 
   const gw = liveByVmid[String(gatewayVmid)];
-  if (!gw) {
+  if (!gw && !resetGateway) {
     throw preflightError(
       `This lane's gateway (LXC ${gatewayVmid}) is not on the cluster, so there is nothing to rebuild the machines behind. Rebuild the whole lane instead.`);
   }
   // The gateway can have been migrated since deploy, and every gateway write
   // goes through pctExec on a NAMED node — a stale name fails all of them.
-  const gatewayNode = gw.node || cfg.node;
+  const gatewayNode = gw?.node || cfg.node;
   const targetNode = cfg.node;
   if (!targetNode) throw preflightError('Lane does not record which node it was built on');
+  if (resetGateway) {
+    const contested = await cybercoreQuery(
+      `SELECT lane_id FROM cybercore_lane WHERE vxlan_id = $1 AND lane_id <> $2 AND ${claimsSql()}`,
+      [lane.vxlan_id, laneId]);
+    if (contested.rows.length) throw preflightError('Another lane holds this network; Reset Lab cannot touch its machines.');
+    const gatewayPrefix = `${lane.name}-gateway`.substring(0, 45).toLowerCase()
+      .replace(/[^a-z0-9-]/g, '-').replace(/-+$/g, '');
+    if (gw && (gw.type !== 'lxc' || !gw.name ||
+        !(gw.name === gatewayPrefix || gw.name.startsWith(`${gatewayPrefix}-b`)))) {
+      throw preflightError('The recorded gateway does not match this lane; Reset Lab left it untouched.');
+    }
+  }
 
   // ── templates, resolved FRESH for every slot ─────────────────────────────
   // Untouched slots need theirs too: dns_aliases and the console guest port
@@ -3558,6 +3677,10 @@ async function rebuildLaneWorkstations({
         `Template '${t.rows[0].os_name}' has no Proxmox VMID configured`);
     }
     templates.set(r.template_id, t.rows[0]);
+  }
+  if (resetGateway && [...templates.values()].some(t =>
+    t.metadata?.analysis_profile !== 'malware' || (t.provider_type || 'qemu') !== 'qemu' || resolveConsole(t).protocol !== 'rdp')) {
+    throw preflightError('Reset Lab requires every workstation template to remain an active malware QEMU template with an RDP console.');
   }
 
   // ── networking ───────────────────────────────────────────────────────────
@@ -3637,6 +3760,18 @@ async function rebuildLaneWorkstations({
       ws.template.template_vmid, ws.template.node || getDefaultTemplateNode());
   }
 
+  let gatewaySource = null;
+  if (resetGateway) {
+    for (const ws of workstations) {
+      const liveVm = liveByVmid[String(ws.vmid)];
+      if (liveVm && (liveVm.type !== 'qemu' || liveVm.name !== ws.hostname)) {
+        throw preflightError(`Workstation ${ws.vmid} does not match this lane; Reset Lab left every machine untouched.`);
+      }
+    }
+    const vmid = resolveGatewayVmid(moduleKey, subnetScheme);
+    gatewaySource = { vmid, node: await findTemplateNode(vmid, getDefaultTemplateNode()) };
+  }
+
   // ── the Guacamole parent, which nothing records ──────────────────────────
   // deployLanes takes guacParent as an argument and CLE never passes one, so
   // every CLE connection is at ROOT — but createGuacConnection defaults a
@@ -3668,7 +3803,8 @@ async function rebuildLaneWorkstations({
   const job = {
     laneId, user, vxlanId: lane.vxlan_id, vnet, targetNode, net,
     laneName: lane.name, description, progress, guacParent: parentIdentifier,
-    moduleKey, laneConfig, workstations,
+    moduleKey, subnetScheme, laneConfig, workstations,
+    ...(gatewaySource ? { gwSourceNode: gatewaySource.node, gwSourceVmid: gatewaySource.vmid } : {}),
     cloneSem: cloneSem || createCloneSemaphore(),
     _gatewayAccessOk: false,
   };
@@ -3691,13 +3827,15 @@ async function rebuildLaneWorkstations({
   // failed gateway for a single slot because a degraded lane beats no lane; here
   // the alternative is "leave the student's working machines alone", which is
   // strictly better than a degraded rebuild.
-  await waitForGatewayFirstboot(gatewayNode, gatewayVmid, { timeoutMs: 30000 });
-  try {
-    await applyGatewayWorkstationAccess({ node: gatewayNode, gatewayVmid, workstations });
-    job._gatewayAccessOk = true;
-  } catch (e) {
-    throw preflightError(
-      `Could not configure the lane gateway, so nothing was rebuilt and every machine is still running: ${e.message}`, 'gateway');
+  if (!resetGateway) {
+    await waitForGatewayFirstboot(gatewayNode, gatewayVmid, { timeoutMs: 30000 });
+    try {
+      await applyGatewayWorkstationAccess({ node: gatewayNode, gatewayVmid, workstations });
+      job._gatewayAccessOk = true;
+    } catch (e) {
+      throw preflightError(
+        `Could not configure the lane gateway, so nothing was rebuilt and every machine is still running: ${e.message}`, 'gateway');
+    }
   }
 
   // ── mark in flight, and clear the stale lease evidence ───────────────────
@@ -3722,7 +3860,7 @@ async function rebuildLaneWorkstations({
     [laneId, rebuiltKeys, JSON.stringify({
       rebuild: {
         at: new Date().toISOString(),
-        mode: 'in_place',
+        mode: resetGateway ? 'reset_lab' : 'in_place',
         slots_requested: wanted,
         status: 'running',
         slots: {},
@@ -3734,7 +3872,27 @@ async function rebuildLaneWorkstations({
   // VMID is free in the cluster AND absent from the in-process reservation map,
   // so a concurrent deployLanes would hand it to a different lane.
   holdWorkstationVmids(
-    workstations.filter(w => rebuildSet.has(w.slot) && w.slot !== 0).map(w => w.vmid));
+    workstations.filter(w => rebuildSet.has(w.slot) && (resetGateway || w.slot !== 0)).map(w => w.vmid));
+
+  const resetHeldIds = resetGateway ? workstations.map(w => w.vmid) : [];
+  for (const id of resetHeldIds) _resetHeldWsVmids.add(id);
+  try {
+
+  if (resetGateway) {
+    // Unlike an ordinary rebuild, do not refresh the old gateway's rules. All
+    // old guests and their disks must be gone before a clean gateway can boot.
+    try {
+      await replaceAnalysisGateway({ job, liveByVmid, gatewayNode, gatewayVmid, destroyWaitMs });
+    } catch (e) {
+      await patchLaneConfig(laneId, {
+        rebuild: { mode: 'reset_lab', status: 'failed', error: e.message, at: new Date().toISOString() },
+      });
+      // Leave status deploying to retain the VXLAN/WAN claims. The service
+      // records the failed analysis operation and may retry this same lane.
+      e.destroyed = true;
+      throw e;
+    }
+  }
 
   // ── rebuild, one slot at a time ──────────────────────────────────────────
   // Sequential on purpose: the gateway is already configured, the slots share
@@ -3760,7 +3918,7 @@ async function rebuildLaneWorkstations({
       continue;
     }
 
-    const destroy = await destroyWorkstationSlots({
+    const destroy = resetGateway ? { failed: [] } : await destroyWorkstationSlots({
       laneId,
       targets: [{
         slot: ws.slot, vmid: ws.vmid, providerType: ws.providerType,
@@ -3828,7 +3986,7 @@ async function rebuildLaneWorkstations({
   const rebuildPatch = {
     rebuild: {
       at: new Date().toISOString(),
-      mode: 'in_place',
+      mode: resetGateway ? 'reset_lab' : 'in_place',
       slots_requested: wanted,
       status: ok ? 'ok' : (deployed.some(d => !d.rebuild_failed) ? 'partial' : 'failed'),
       error: ok ? null : errors[0],
@@ -3865,6 +4023,10 @@ async function rebuildLaneWorkstations({
     errors,
     warnings,
   };
+  } finally {
+    holdWorkstationVmids(resetHeldIds);
+    for (const id of resetHeldIds) _resetHeldWsVmids.delete(id);
+  }
 }
 
 module.exports = {

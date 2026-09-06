@@ -641,6 +641,30 @@
       gap: 8px;
     }
 
+    .vml-analysis-status {
+      padding: 10px 12px;
+      border-radius: 6px;
+      background: var(--gray-100, #f7fafc);
+      color: var(--text-secondary, #4a5568);
+      font-size: 0.78rem;
+      line-height: 1.45;
+    }
+    .vml-analysis-status strong,
+    .vml-analysis-status span { display: block; }
+    .vml-analysis-status span { margin-top: 4px; }
+    .vml-analysis-ready { background: #e6ffed; color: #22603b; }
+    .vml-analysis-error { background: #fff1f0; color: #9b2c2c; }
+    .vml-analysis-actions { display: grid; grid-template-columns: 1fr 1fr; }
+    .vml-analysis-actions .btn { white-space: normal; min-height: 38px; }
+    .vml-analysis-start { background: var(--primary, #0c234b); color: white; }
+    .vml-analysis-reset { background: transparent; color: var(--text-secondary); border: 1px solid var(--border-color, #e2e8f0); }
+    .vml-analysis-actions .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+    .vmc-analysis-notice { padding: 8px 14px; background: #fef3c7; color: #713f12; font-size: 0.8rem; }
+    [data-theme="dark"] .vml-analysis-status { background: rgba(255,255,255,0.07); }
+    [data-theme="dark"] .vml-analysis-ready { background: rgba(72,187,120,0.15); color: #9ae6b4; }
+    [data-theme="dark"] .vml-analysis-error { background: rgba(252,129,129,0.15); color: #feb2b2; }
+    [data-theme="dark"] .vmc-analysis-notice { background: #422f14; color: #fbd38d; }
+
     /* Secondary to .vml-launch-btn on purpose: opening the console is the
        primary action on the card, and reading the password is the thing you do
        once, when the console has already let you down. */
