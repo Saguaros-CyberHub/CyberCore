@@ -23,6 +23,68 @@ named process with local logs. Repeating the install restarts only that managed
 agent. It does not install a startup service; after reboot, use **Install Agent**
 again. Supported guest architectures are amd64 and arm64.
 
+## Deploy agents across a class
+
+Under **Blue Team Board**, choose **Group install agents**. Select the lanes,
+then select matching machine names such as `ws01` and `DC01`. Matching is
+case-insensitive and uses the VM names stored in each lane. Review the individual
+VM checkboxes to include or omit exceptions. For an unknown operating system,
+select Windows or Linux before submitting.
+
+The selection preview shows exactly which VMs will receive agents. A request
+accepts up to 200 VMs. Four installations run concurrently per app process;
+the rest queue. Each VM has an independent persisted job and credential, so two
+installs in one lane do not overwrite each other's progress. Busy or unavailable
+VMs are reported individually. Closing the dialog does not cancel accepted jobs.
+
+Jobs waiting in the queue expire after four hours; running jobs expire after
+five minutes. An app restart interrupts in-memory
+dispatch, and interrupted jobs become retryable after their respective timeout.
+Finish an installation batch before updating the app.
+
+## Structure and launch an exercise
+
+An **ability** is one step with a platform-specific command. An **adversary
+profile** is the ordered list of abilities for an exercise. An **operation**
+runs that profile against one lane's `lane-<UUID>` agent group.
+
+For a first exercise, create a Windows discovery profile in the Caldera console
+using abilities for current-user discovery, system information and process
+discovery. Choose abilities that run locally on the agent, without extra target
+facts. Order them as the sequence students should investigate. Save the profile,
+then return to **Blue Team Board > Run Caldera attack** and refresh the list.
+
+Select the profile and student lanes, then launch. Each selected lane needs a
+running VM with a trusted managed agent seen within the last two minutes.
+CyberCore snapshots the profile's ability ordering, creates a separate paused
+operation for each lane, then sends the start requests together. If preparation
+fails for a lane, the prepared batch is stopped before release. After release,
+network failures can produce an uncertain result on individual lanes; refresh
+status before retrying. Request IDs prevent an ambiguous retry from duplicating
+the same operations.
+
+Each operation targets all agents in its lane group. Install agents only on the
+machines that should participate, and use platform-specific abilities where
+Windows and Linux agents share a group. Start requests are concurrent, but actual
+execution follows agent polling and planner timing; it is not synchronized to
+the millisecond. The existing ELK agents forward the resulting host telemetry to
+each student's SIEM.
+
+Each operation receives a new empty fact source so learned facts and supplied
+targets are not shared across student lanes. Host-local profiles work without
+additional seeding. Run profiles that require credentials or remote-target facts
+through Caldera with a lane-specific source; the classroom launcher currently
+does not seed those facts or copy the shared authoring source. A profile can
+finish with skipped steps if platform, executor or fact requirements are unmet.
+
+The dialog shows per-lane operation IDs, status and errors. **Stop this batch** stops
+operation scheduling on the selected batch, including a batch still preparing.
+Commands already executing in a guest can finish. Use Caldera's operation view
+for individual ability results and compare the operation time window in ELK.
+These classroom operations do not create automatic grading incidents.
+
+## Windows installation settings
+
 On Windows, installation uses `Set-MpPreference` to request turning off Microsoft Defender
 real-time monitoring, behavior monitoring, downloaded-file scanning, script
 scanning, block-at-first-seen and potentially unwanted application blocking on
@@ -143,7 +205,8 @@ tested through installation and check-in.
   [Protection History guidance](https://support.microsoft.com/en-us/windows/security/windows-security/protection-history-in-the-windows-security-app).
 - **Started but no check-in:** check guest logs and outbound HTTPS. A script's
 successful exit alone is not reported as a connected agent.
-- **Interrupted install:** after five minutes the job can be retried. Agent jobs
+- **Interrupted install:** a running job can be retried after five minutes; a
+  queued job after four hours. Agent jobs
   and token hashes are stored in the existing lane JSON configuration; no SQL
   migration is required.
 
@@ -164,10 +227,19 @@ remain visible in Caldera.
 Manual Caldera operations are separate from CyberCore's incident engine and
 automatic grading. The incident engine's existing Caldera launch gate is unchanged.
 
+For the bulk-install and classroom-launch changes, rebuild only the app from the
+updated repository, then refresh the Board:
+
+```sh
+docker compose up -d --no-deps --build app
+```
+
 ## Validation
 
-Run the focused `caldera-agent*`, `caldera-lane-agents`, container, authoring-access
-and Blue Team Board tests from `front-end/test`. Set `CADDY_BIN` to a Caddy 2.10.2
+Run the focused `caldera-agent*`, `caldera-lane-agents`, `caldera-lane-operations`,
+`caldera-classroom-ui`, container, authoring-access and Blue Team Board tests from
+`front-end/test`. Set `CADDY_BIN` to a Caddy 2.10.2
 binary to exercise the actual reverse proxy against local mock services.
-A production image build and a real lane check-in must still be verified on the
-deployment; local tests do not establish cluster connectivity.
+A production image build, a real lane check-in and a classroom operation launch
+must still be verified on the deployment; local tests do not establish cluster
+connectivity or guest execution.

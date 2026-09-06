@@ -1115,16 +1115,19 @@ test('E9-G3: no browser or route file names a Caldera OPERATION verb', () => {
     `a Caldera operation verb reached a route or a browser file:\n  ${offenders.join('\n  ')}`);
 });
 
-test('E9-G4: no console builds a request body naming an adversary', () => {
-  // `it.adversary_id` is a property READ off a list row and is expected. An
-  // object KEY spelled adversary_id is what a launch body would look like, and
-  // there is no endpoint that would accept one.
-  for (const rel of ['modules/crucible/plugins/ciab/public/js/instructor-incidents.js',
-    'modules/crucible/plugins/cle/public/js/blue-team.js']) {
-    const code = codeOnly(fs.readFileSync(path.join(ROOT, rel), 'utf8'));
-    assert.ok(!/adversary_id\s*:/.test(code),
-      `${rel} builds an object keyed by adversary_id — the only use for one is a launch`);
-  }
+test('E9-G4: CiAB authoring cannot dispatch; CLE classroom launches use the explicit course-scoped API', () => {
+  // Classroom operations are now an authorized feature using centrally managed
+  // lane agents. This does not register the legacy incident engine or turn a
+  // click in the authoring picker into a launch (E9-U4 still covers that).
+  const ciab = codeOnly(fs.readFileSync(path.join(ROOT, 'modules/crucible/plugins/ciab/public/js/instructor-incidents.js'), 'utf8'));
+  assert.ok(!/adversary_id\s*:/.test(ciab), 'CiAB authoring must remain read-only');
+  const cle = codeOnly(fs.readFileSync(path.join(ROOT, 'modules/crucible/plugins/cle/public/js/blue-team.js'), 'utf8'));
+  assert.match(cle, /adversary_id\s*:\s*state\.adversary/);
+  assert.match(cle, /laneCalderaRequest\(state, install \? '\/caldera-agents\/batch' : '\/caldera-operations'/);
+  assert.match(cle, /courseId: state\.courseId/);
+  assert.match(cle, /request_id:/);
+  // Selection, role checks, exact lane IDs, and retry behavior are exercised by
+  // caldera-classroom-ui.test.js; the adapter gates above stay unchanged.
 });
 
 test('E9-G5: THE MIRROR — the authoring surface actually exists', () => {

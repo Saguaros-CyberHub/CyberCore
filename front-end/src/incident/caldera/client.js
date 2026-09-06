@@ -401,6 +401,15 @@ function createCalderaClient(opts) {
       return call('POST', '/api/v2/operations', operation, 'POST /operations');
     },
 
+    listOperations() {
+      return call('GET', '/api/v2/operations/summary', null, 'GET /operations/summary');
+    },
+
+    startOperation(operationId) {
+      return call('PATCH', '/api/v2/operations/' + encodeURIComponent(operationId),
+        { state: 'running' }, 'PATCH /operations/' + operationId + ' running');
+    },
+
     /**
      * One operation's own row.
      *

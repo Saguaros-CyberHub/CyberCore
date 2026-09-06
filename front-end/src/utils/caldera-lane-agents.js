@@ -5,6 +5,8 @@ const crypto = require('node:crypto');
 const { buildInstallScript } = require('./caldera-agent-scripts');
 
 const JOB_TIMEOUT_MS = 5 * 60 * 1000;
+const QUEUE_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+const MAX_BATCH_TARGETS = 200;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const object = value => typeof value === 'string' ? JSON.parse(value) : (value || {});
 const hashToken = token => crypto.createHash('sha256').update(token).digest('hex');
@@ -71,10 +73,20 @@ function seenAt(value) {
 }
 
 function currentJob(job, now) {
-  if (job?.status === 'running' && now - Date.parse(job.started_at) > JOB_TIMEOUT_MS) {
+  if (['running', 'queued'].includes(job?.status) && now - Date.parse(job.started_at) > (job.status === 'queued' ? QUEUE_TIMEOUT_MS : JOB_TIMEOUT_MS)) {
     return { ...job, status: 'failed', error: 'Installation was interrupted or timed out. Retry to reconnect the managed agent.' };
   }
   return job || null;
+}
+
+function jobForVm(config, vmId) {
+  const cfg = object(config);
+  return cfg.caldera_agent_jobs?.[String(vmId)] || (Number(cfg.caldera_agent_job?.vm_id) === Number(vmId) ? cfg.caldera_agent_job : null);
+}
+
+function vmJobSql() {
+  return `COALESCE(config->'caldera_agent_jobs'->$3::text,
+    CASE WHEN config->'caldera_agent_job'->>'vm_id' = $3::text THEN config->'caldera_agent_job' ELSE '{}'::jsonb END)`;
 }
 
 function installationWarnings(stdout, token) {
@@ -108,6 +120,20 @@ function createService(deps = {}) {
   const sleep = deps.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms)));
   const executor = () => deps.executor || require('./script-executor');
   const proxmox = (...args) => (deps.proxmox || require('./proxmox').proxmoxAPI)(...args);
+  const pending = [];
+  let active = 0;
+  function enqueue(task) {
+    pending.push(task);
+    pump();
+  }
+  function pump() {
+    while (active < 4 && pending.length) {
+      const task = pending.shift();
+      active++;
+      const run = async () => { try { await task(); } finally { active--; pump(); } };
+      if (deps.schedule) deps.schedule(run); else setImmediate(run);
+    }
+  }
 
   async function listAgents(config) {
     const agents = await config.client.listAgents();
@@ -158,14 +184,18 @@ function createService(deps = {}) {
           runnable: targets.some(target => target.runnable),
           internet_enabled: typeof cfg.internet_enabled === 'boolean' ? cfg.internet_enabled : null, group: groupFor(lane.lane_id),
           targets, agents: agents.filter(a => a.group === groupFor(lane.lane_id)).map(publicAgent),
-          job: currentJob(cfg.caldera_agent_job, now()) };
+          job: currentJob(cfg.caldera_agent_job, now()),
+          jobs: [...new Map([cfg.caldera_agent_job, ...Object.values(cfg.caldera_agent_jobs || {})]
+            .filter(Boolean).map(job => [job.vm_id, currentJob(job, now())])).values()] };
       }),
     };
   }
 
   async function saveJob(laneId, job) {
-    await query(`UPDATE cybercore_lane SET config = jsonb_set(config, '{caldera_agent_job}', $2::jsonb), updated_at = NOW()
-      WHERE lane_id = $1 AND config->'caldera_agent_job'->>'job_id' = $3`, [laneId, JSON.stringify(job), job.job_id]);
+    await query(`UPDATE cybercore_lane SET config = jsonb_set(jsonb_set(config, '{caldera_agent_job}', $2::jsonb),
+      '{caldera_agent_jobs}', COALESCE(config->'caldera_agent_jobs', '{}'::jsonb) || jsonb_build_object($4::text, $2::jsonb)), updated_at = NOW()
+      WHERE lane_id = $1 AND COALESCE(config->'caldera_agent_jobs'->$4::text, config->'caldera_agent_job')->>'job_id' = $3`,
+    [laneId, JSON.stringify(job), job.job_id, String(job.vm_id)]);
   }
 
   async function execute(laneId, courseId, target, token, config, job) {
@@ -174,12 +204,13 @@ function createService(deps = {}) {
       const row = await query('SELECT lane_id, status, config FROM cybercore_lane WHERE lane_id = $1', [laneId]);
       const lane = row.rows[0];
       if (!laneEligible(lane) || object(lane.config).course_id !== courseId
-        || object(lane.config).caldera_agent_job?.job_id !== job.job_id
+        || jobForVm(lane.config, target.vm_id)?.job_id !== job.job_id
         || !targetsFor(lane).some(t => t.vm_id === target.vm_id)) {
         throw failure(409, 'The selected VM is no longer in a running lane.');
       }
       const live = await runningTarget(target.vm_id);
       const exec = executor();
+      if (job.status === 'queued') { job.status = 'running'; job.started_at = new Date(now()).toISOString(); }
       job.message = 'Checking the VM guest agent.';
       await saveJob(laneId, job);
       if (!await exec.waitForGuestAgent(live.node, target.vm_id, 15000)) {
@@ -227,7 +258,7 @@ function createService(deps = {}) {
     }
   }
 
-  async function start(lane, input) {
+  async function start(lane, input, batchPreflight = null) {
     if (!UUID.test(lane.lane_id) || !laneEligible(lane)) throw failure(409, 'This lane is unavailable for agent installation.');
     if (object(lane.config).internet_enabled === false) {
       throw failure(409, 'Lane internet access is disabled. Enable Internet for this lane before installing a Caldera agent.');
@@ -237,13 +268,17 @@ function createService(deps = {}) {
     }
     const target = targetsFor(lane).find(t => t.vm_id === input.vm_id);
     if (!target) throw failure(404, 'VM not found in this lane.');
-    const config = settings();
+    const config = batchPreflight?.config || settings();
     // Validate server-side connectivity before modifying a VM or rotating its token.
-    try { await listAgents(config); } catch (_) { throw failure(503, 'Caldera is unavailable or its API key is invalid.'); }
+    if (!batchPreflight) {
+      try { await listAgents(config); } catch (_) { throw failure(503, 'Caldera is unavailable or its API key is invalid.'); }
+    }
     // Verify the selected guest before rotating its credential; repeat at dispatch.
-    await runningTarget(target.vm_id);
+    if (batchPreflight) {
+      if (!runnableGuest(batchPreflight.byId.get(target.vm_id))) throw failure(409, 'The selected VM must be a running QEMU guest.');
+    } else await runningTarget(target.vm_id);
     const token = crypto.randomBytes(32).toString('hex');
-    const job = { job_id: crypto.randomUUID(), status: 'running', vm_id: target.vm_id,
+    const job = { job_id: crypto.randomUUID(), status: 'queued', vm_id: target.vm_id,
       platform: input.platform, group: groupFor(lane.lane_id), paw: pawFor(lane.lane_id, target.vm_id),
       started_at: new Date(now()).toISOString(), message: 'Installation queued.' };
     const access = { vm_id: target.vm_id, token_hash: hashToken(token), paw: job.paw, created_at: job.started_at };
@@ -253,19 +288,51 @@ function createService(deps = {}) {
       jsonb_set(jsonb_set(config, '{caldera_agent_access}', jsonb_build_object('tokens',
         COALESCE((SELECT jsonb_agg(t) FROM jsonb_array_elements(COALESCE(config->'caldera_agent_access'->'tokens', '[]'::jsonb)) t
           WHERE t->>'vm_id' <> $3::text), '[]'::jsonb) || jsonb_build_array($4::jsonb))),
-        '{caldera_agent_job}', $2::jsonb), updated_at = NOW()
+        '{caldera_agent_job}', $2::jsonb) || jsonb_build_object('caldera_agent_jobs',
+          COALESCE(config->'caldera_agent_jobs', '{}'::jsonb) || jsonb_build_object($3::text, $2::jsonb)), updated_at = NOW()
       WHERE lane_id = $1 AND ${eligibleLaneSql()}
         AND config->>'course_id' IS NOT DISTINCT FROM $6::text
-        AND (COALESCE(config->'caldera_agent_job'->>'status', '') <> 'running'
-          OR config->'caldera_agent_job'->>'started_at' < $5)
+        AND (COALESCE((${vmJobSql()})->>'status', '') NOT IN ('running', 'queued')
+          OR ((${vmJobSql()})->>'status' = 'running' AND (${vmJobSql()})->>'started_at' < $5)
+          OR ((${vmJobSql()})->>'status' = 'queued' AND (${vmJobSql()})->>'started_at' < $7))
       RETURNING lane_id`, [lane.lane_id, JSON.stringify(job), String(target.vm_id), JSON.stringify(access),
-      new Date(now() - JOB_TIMEOUT_MS).toISOString(), object(lane.config).course_id || null]);
-    if (!claimed.rows.length) throw failure(409, 'This lane is unavailable or an agent installation is already running.');
+      new Date(now() - JOB_TIMEOUT_MS).toISOString(), object(lane.config).course_id || null,
+      new Date(now() - QUEUE_TIMEOUT_MS).toISOString()]);
+    if (!claimed.rows.length) throw failure(409, 'This lane is unavailable or an agent installation is already running or queued on this VM.');
     const task = () => execute(lane.lane_id, object(lane.config).course_id, target, token, config, job).catch(() => {
       console.error('[Caldera agents] Could not save installation status.');
     });
-    if (deps.schedule) deps.schedule(task); else setImmediate(task);
+    enqueue(task);
     return { ...job };
+  }
+
+  async function startBatch(lanes, input = {}) {
+    const targets = input.targets;
+    if (!Array.isArray(targets) || !targets.length || targets.length > MAX_BATCH_TARGETS) {
+      throw failure(400, `Select between 1 and ${MAX_BATCH_TARGETS} machines.`);
+    }
+    const byLane = new Map(lanes.map(lane => [lane.lane_id, lane]));
+    const seen = new Set();
+    for (const target of targets) {
+      if (!target || !UUID.test(target.lane_id) || !Number.isSafeInteger(target.vm_id) || !['windows', 'linux'].includes(target.platform)) {
+        throw failure(400, 'Every target needs a lane, VM and Windows or Linux platform.');
+      }
+      const lane = byLane.get(target.lane_id);
+      if (!lane || !targetsFor(lane).some(vm => vm.vm_id === target.vm_id)) throw failure(404, 'A selected machine was not found in this course.');
+      const key = `${target.lane_id}:${target.vm_id}`;
+      if (seen.has(key)) throw failure(400, 'A machine was selected more than once.');
+      seen.add(key);
+    }
+    const config = settings();
+    try { await listAgents(config); } catch (_) { throw failure(503, 'Caldera is unavailable or its API key is invalid.'); }
+    const resources = await loadResources();
+    const preflight = { config, byId: new Map(resources.map(vm => [Number(vm.vmid), vm])) };
+    const results = [];
+    for (const target of targets) {
+      try { results.push({ lane_id: target.lane_id, vm_id: target.vm_id, job: await start(byLane.get(target.lane_id), target, preflight) }); }
+      catch (error) { results.push({ lane_id: target.lane_id, vm_id: target.vm_id, error: error.status < 500 ? error.message : 'Could not queue installation on this VM.', status: error.status || 500 }); }
+    }
+    return { results };
   }
 
   async function authorize(uri) {
@@ -285,8 +352,8 @@ function createService(deps = {}) {
     return { paw: access.paw, group: groupFor(access.lane_id) };
   }
 
-  return { status, start, authorize };
+  return { status, start, startBatch, authorize };
 }
 
 module.exports = { createService, targetsFor, hashToken, pawFor, groupFor, seenAt, currentJob, JOB_TIMEOUT_MS,
-  retainedAfterFailure, laneEligible, eligibleLaneSql };
+  retainedAfterFailure, laneEligible, eligibleLaneSql, jobForVm, QUEUE_TIMEOUT_MS, MAX_BATCH_TARGETS };

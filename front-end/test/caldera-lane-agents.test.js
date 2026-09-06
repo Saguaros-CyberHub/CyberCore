@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { createService, targetsFor, hashToken, pawFor, groupFor, seenAt, JOB_TIMEOUT_MS } = require('../src/utils/caldera-lane-agents');
+const { createService, targetsFor, hashToken, pawFor, groupFor, seenAt, JOB_TIMEOUT_MS, QUEUE_TIMEOUT_MS } = require('../src/utils/caldera-lane-agents');
 
 const LANE_ID = '11111111-2222-4333-8444-555555555555';
 const COURSE_ID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
@@ -43,22 +43,27 @@ function harness(options = {}) {
       assertLifecycleSql(sql);
       assert.match(sql, /course_id' IS NOT DISTINCT FROM \$6::text/);
       assert.match(sql, /started_at' < \$5/);
-      assert.match(sql, /status', ''\) <> 'running'/);
-      const [laneId, jobJson, vmId, accessJson, cutoff, courseId] = args;
+      assert.match(sql, /NOT IN \('running', 'queued'\)/);
+      const [laneId, jobJson, vmId, accessJson, cutoff, courseId, queueCutoff] = args;
       const lane = state.lane;
-      const prior = lane?.config.caldera_agent_job;
+      const prior = lane?.config.caldera_agent_jobs?.[vmId] || (String(lane?.config.caldera_agent_job?.vm_id) === vmId ? lane.config.caldera_agent_job : null);
       if (!eligibleFixture(lane) || lane.lane_id !== laneId
         || (lane.config.course_id || null) !== courseId
-        || (prior?.status === 'running' && !(prior.started_at < cutoff))) return { rows: [] };
+        || (prior?.status === 'running' && !(prior.started_at < cutoff))
+        || (prior?.status === 'queued' && !(prior.started_at < queueCutoff))) return { rows: [] };
       const tokens = lane.config.caldera_agent_access?.tokens || [];
       lane.config.caldera_agent_access = { tokens: tokens.filter(t => String(t.vm_id) !== vmId).concat(JSON.parse(accessJson)) };
       lane.config.caldera_agent_job = JSON.parse(jobJson);
+      lane.config.caldera_agent_jobs ||= {};
+      lane.config.caldera_agent_jobs[vmId] = lane.config.caldera_agent_job;
       return { rows: [{ lane_id: laneId }] };
     }
     if (sql.startsWith('UPDATE')) {
       assert.match(sql, /job_id' = \$3/);
-      if (state.lane?.lane_id === args[0] && state.lane.config.caldera_agent_job?.job_id === args[2]) {
+      if (state.lane?.lane_id === args[0] && (state.lane.config.caldera_agent_jobs?.[args[3]] || state.lane.config.caldera_agent_job)?.job_id === args[2]) {
         state.lane.config.caldera_agent_job = JSON.parse(args[1]);
+        state.lane.config.caldera_agent_jobs ||= {};
+        state.lane.config.caldera_agent_jobs[args[3]] = state.lane.config.caldera_agent_job;
       }
       return { rows: [] };
     }
@@ -107,7 +112,7 @@ function harness(options = {}) {
     },
     pollExecStatus: async (...args) => {
       state.calls.push(['poll', ...args]);
-      if (options.result) return options.result(state);
+      if (options.result) return options.result(state, args);
       return { exited: true, exitcode: 0, stdout: `CYBERCORE_CALDERA_STARTED:${pawFor(LANE_ID, 901)}`, stderr: '' };
     },
   };
@@ -182,7 +187,7 @@ for (const platform of ['windows', 'linux']) {
   test(`${platform} installer uses the live node and completes only on its fresh UTC check-in`, async () => {
     const h = harness({ state: { agentOverride: { platform } } });
     const queued = await h.start({ vm_id: 901, platform });
-    assert.equal(queued.status, 'running');
+    assert.equal(queued.status, 'queued');
     assert.deepEqual(h.state.calls, [['proxmox', 'GET', '/api2/json/cluster/resources?type=vm']]);
     await h.run();
     assert.equal(h.job().status, 'completed');
@@ -337,14 +342,14 @@ test('reinstall rotates only the selected VM credential and keeps its stable Cal
 test('a timed-out queued job cannot execute or overwrite the replacement job', async () => {
   const h = harness();
   const old = await h.start();
-  h.state.clock += JOB_TIMEOUT_MS + 1;
+  h.state.clock += QUEUE_TIMEOUT_MS + 1;
   const replacement = await h.start();
   assert.notEqual(old.job_id, replacement.job_id);
   const callsBeforeOldTask = clone(h.state.calls);
   await h.state.scheduled.shift()();
   assert.deepEqual(h.state.calls, callsBeforeOldTask);
   assert.equal(h.job().job_id, replacement.job_id);
-  assert.equal(h.job().status, 'running');
+  assert.equal(h.job().status, 'queued');
   await h.run();
   assert.equal(h.state.calls.filter(c => c[0] === 'windows').length, 1);
   assert.equal(h.job().status, 'completed');
@@ -522,14 +527,14 @@ for (const vmId of [0, -1, 900, 999, '901oops', '9007199254740992']) {
 test('public status scopes agents to each lane and converts abandoned jobs to failed without leaking API errors', async () => {
   const h = harness();
   await h.start();
-  h.state.clock += JOB_TIMEOUT_MS + 1;
+  h.state.clock += QUEUE_TIMEOUT_MS + 1;
   h.state.calderaFailure = true;
   const status = await h.service.status([h.state.lane]);
   assert.equal(status.lanes[0].job.status, 'failed');
   assert.match(status.lanes[0].job.error, /interrupted or timed out/);
   assert.match(status.agents_error, /Could not read Caldera/);
   assert.doesNotMatch(JSON.stringify(status), /private-api-key|lane-password-private|token_hash/);
-  assert.equal(h.job().status, 'running', 'viewing status must not write a replacement job');
+  assert.equal(h.job().status, 'queued', 'viewing status must not write a replacement job');
   const other = harness({ state: { agentOverride: { group: 'another-lane' } } });
   assert.deepEqual((await other.service.status([other.state.lane])).lanes[0].agents, []);
 });
@@ -565,4 +570,71 @@ test('failed power discovery reports unknown power and cannot advertise runnable
   assert.equal(status.lanes[0].targets[0].runnable, false);
   assert.equal(status.lanes[0].targets[0].power_state, 'unknown');
   assert.doesNotMatch(JSON.stringify(status), /private-proxmox-credential/);
+});
+
+function addBatchMachines(h, count) {
+  h.state.lane.config.vms = Array.from({ length: count }, (_, i) => ({ vm_id: 901 + i, name: `Machine ${i}`, os: 'windows' }));
+  h.state.resources = h.state.lane.config.vms.map(vm => ({ vmid: vm.vm_id, node: 'actual-node', type: 'qemu', status: 'running' }));
+  return h.state.lane.config.vms.map(vm => ({ lane_id: LANE_ID, vm_id: vm.vm_id, platform: 'windows' }));
+}
+
+test('batch validation completes before any credential claims or guest execution', async () => {
+  const h = harness(); const targets = addBatchMachines(h, 2);
+  for (const bad of [[], [...targets, targets[0]], [...targets, { ...targets[0], lane_id: COURSE_ID }],
+    [...targets, { ...targets[0], vm_id: 999 }], [...targets, { ...targets[0], platform: 'unknown' }], Array(201).fill(targets[0])]) {
+    await assert.rejects(h.service.startBatch([h.state.lane], { targets: bad }), error => [400, 404].includes(error.status));
+  }
+  assert.equal(h.state.sql.length, 0);
+  assert.equal(h.state.calls.length, 0);
+  assert.equal(h.state.agentReads, 0);
+});
+
+test('different VMs claim independent jobs and credentials while duplicate VM claims stay blocked', async () => {
+  const h = harness(); const targets = addBatchMachines(h, 2);
+  const batch = await h.service.startBatch([h.state.lane], { targets });
+  assert.ok(batch.results.every(row => row.job.status === 'queued'));
+  assert.equal(Object.keys(h.state.lane.config.caldera_agent_jobs).length, 2);
+  assert.equal(h.state.lane.config.caldera_agent_access.tokens.length, 2);
+  await assert.rejects(h.start({ vm_id: 901, platform: 'windows' }), { status: 409 });
+  const status = await h.service.status([h.state.lane]);
+  assert.deepEqual(status.lanes[0].jobs.map(job => job.vm_id).sort(), [901, 902]);
+  assert.doesNotMatch(JSON.stringify(batch), /token_hash|\/agent\//);
+});
+
+test('batch reports unavailable and busy targets independently and reuses one preflight inventory', async () => {
+  const h = harness(); const targets = addBatchMachines(h, 3);
+  await h.start({ vm_id: 901, platform: 'windows' });
+  h.state.resources[2].status = 'stopped';
+  const reads = h.state.agentReads;
+  const powerReads = h.state.calls.filter(call => call[0] === 'proxmox').length;
+  const result = await h.service.startBatch([h.state.lane], { targets });
+  assert.equal(result.results[0].status, 409);
+  assert.equal(result.results[1].job.status, 'queued');
+  assert.equal(result.results[2].status, 409);
+  assert.equal(h.state.agentReads, reads + 1);
+  assert.equal(h.state.calls.filter(call => call[0] === 'proxmox').length, powerReads + 1);
+});
+
+test('batch dispatch is limited to four VMs and sibling job completion is preserved', async () => {
+  let active = 0; let maximum = 0; const release = [];
+  const h = harness({
+    agents: (state, fresh) => state.lane.config.vms.map(vm => ({ ...fresh(), paw: pawFor(LANE_ID, vm.vm_id) })),
+    result: (state, args) => new Promise(resolve => {
+      active++; maximum = Math.max(maximum, active);
+      release.push(() => { active--; resolve({ exited: true, exitcode: 0, stderr: '', stdout: `CYBERCORE_CALDERA_STARTED:${pawFor(LANE_ID, args[1])}` }); });
+    }),
+  });
+  const targets = addBatchMachines(h, 7);
+  await h.service.startBatch([h.state.lane], { targets });
+  assert.equal(h.state.scheduled.length, 4);
+  while (h.state.scheduled.length) {
+    const work = h.state.scheduled.splice(0).map(task => task());
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(active <= 4);
+    release.splice(0).forEach(resolve => resolve());
+    await Promise.all(work);
+  }
+  assert.equal(maximum, 4);
+  assert.ok(Object.values(h.state.lane.config.caldera_agent_jobs).every(job => job.status === 'completed'));
+  assert.equal(h.state.lane.config.caldera_agent_access.tokens.length, 7);
 });

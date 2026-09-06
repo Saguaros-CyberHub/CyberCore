@@ -165,6 +165,31 @@ test('default selection skips gateway and unavailable lanes and posts only the s
   h.api.closeCalderaAgents();
 });
 
+test('single-agent status follows the selected VM and queued sibling installs do not disable an available VM', async () => {
+  const h = harness();
+  const data = fixture();
+  data.lanes[0].jobs = [{ vm_id: 102, status: 'queued', message: 'Waiting for worker' }];
+  data.lanes[0].job = data.lanes[0].jobs[0];
+  h.setStatus(data); await h.open();
+  assert.equal(h.el('laneCalderaVm').value, '101');
+  assert.equal(h.el('laneCalderaInstall').disabled, false);
+  assert.equal(h.el('laneCalderaJob').innerHTML, '');
+  h.el('laneCalderaVm').value = '102'; h.el('laneCalderaVm').onchange();
+  assert.equal(h.el('laneCalderaInstall').disabled, true);
+  assert.equal(h.el('laneCalderaVm').disabled, false);
+  assert.match(h.el('laneCalderaJob').innerHTML, /Installation queued on VM 102/);
+  await h.submit(); assert.equal(h.calls.filter(call => call.method === 'POST').length, 0);
+  h.el('laneCalderaVm').value = '101'; h.el('laneCalderaVm').onchange();
+  assert.equal(h.el('laneCalderaInstall').disabled, false);
+  h.setInstallHandler(async () => ({ job: { vm_id: 101, status: 'queued', message: 'Queued second VM' } }));
+  await h.submit();
+  assert.match(h.el('laneCalderaJob').innerHTML, /Queued second VM/);
+  assert.match(h.el('laneCalderaInstall').textContent, /Installation queued/);
+  assert.equal(h.el('laneCalderaInstall').disabled, true);
+  await h.submit(); assert.equal(h.calls.filter(call => call.method === 'POST').length, 1);
+  h.api.closeCalderaAgents();
+});
+
 test('a retained suspended lane with running VMs remains selectable and installable', async () => {
   const h = harness();
   const data = fixture();

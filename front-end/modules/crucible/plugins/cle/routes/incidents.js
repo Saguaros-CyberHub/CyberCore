@@ -71,11 +71,10 @@ const projection = require('../../../../../src/incident/projection');
  *   incident/caldera/authoring.js owns the API key, the client, the fact-source
  *                                 sync and the adversary list.
  *
- * NEITHER CAN DISPATCH. The client they build calls the source and adversary
- * endpoints only; src/incident/engines/index.js still refuses 'caldera', so no
- * run row can name it as an engine and there is no path from a picked adversary
- * to a launch. cle/routes/attacks.js — the file that CAN launch — is untouched
- * by this and gains no adversary parameter.
+ * Authoring endpoints only sync sources and read profiles. The separate
+ * /caldera-operations endpoints below launch classroom operations through
+ * utils/caldera-lane-operations.js. The incident engine remains unregistered
+ * for Caldera, and cle/routes/attacks.js has no adversary parameter.
  *
  * These sit in the BOARD file rather than in attacks.js because the panel that
  * shows them (public/js/blue-team.js) already speaks to this collection and
@@ -209,10 +208,9 @@ router.get('/', async (req, res) => {
 // Attack authoring — staff only, and registered BEFORE anything taking :runId
 // ---------------------------------------------------------------------------
 /**
- * WHAT THIS IS. One standalone Caldera "authoring" instance lives outside every
- * lane, with no agents and no implants. An instructor builds adversaries in its
- * own web UI; CyberCore reads them back out. Nothing inside a lane ever talks to
- * it, and nothing below launches anything.
+ * WHAT THIS IS. One central Caldera instance serves the course's managed lane
+ * agents. Instructors build profiles in its web UI. These /authoring endpoints
+ * sync course facts and read profiles; classroom launches use separate routes.
  *
  * REGISTRATION ORDER IS LOAD-BEARING. Express matches in the order routes are
  * declared, and '/authoring/adversaries' would be read as a run id by
@@ -360,7 +358,7 @@ router.get('/authoring/adversaries', async (req, res) => {
 
 /** GET /:runId — the board itself. */
 // Manual agent management for the Blue Team Board. The incident engine remains
-// separate; operations are controlled in the central Caldera console.
+// separate; classroom operations use one group per lane on the central server.
 const laneAgents = require('../../../../../src/utils/caldera-lane-agents').createService();
 async function courseAgentLanes(courseId) {
   return require('../../../../../src/incident/runner').findScopeLanes(scopeOf(courseId), { includeSuspended: true });
@@ -390,6 +388,57 @@ router.post('/caldera-agents', async (req, res) => {
       metadata: { course_id: ctx.courseId, vm_id: job.vm_id, job_id: job.job_id } }).catch(() => {});
     res.status(202).json({ job });
   } catch (error) { fail(res, error, 'POST /caldera-agents'); }
+});
+
+router.post('/caldera-agents/batch', async (req, res) => {
+  try {
+    const ctx = await loadStaffCourse(req, res);
+    if (!ctx) return;
+    if (!isFeatureEnabled(ctx.course, 'blue_team')) return res.status(404).json({ error: 'Blue Team Board is not enabled for this course' });
+    const result = await laneAgents.startBatch(await courseAgentLanes(ctx.courseId), req.body || {});
+    audit.log({ req, action: 'caldera_agent_batch_install', target: { type: 'course', id: ctx.courseId },
+      metadata: { queued: result.results.filter(row => row.job).length, targets: result.results.length } }).catch(() => {});
+    res.status(202).json(result);
+  } catch (error) { fail(res, error, 'POST /caldera-agents/batch'); }
+});
+
+let classroomOperations;
+function operationService() {
+  return classroomOperations ||= require('../../../../../src/utils/caldera-lane-operations').createService();
+}
+
+router.get('/caldera-operations/status', async (req, res) => {
+  try {
+    const ctx = await loadStaffCourse(req, res);
+    if (!ctx) return;
+    res.set('Cache-Control', 'no-store');
+    res.json(await operationService().status(await courseAgentLanes(ctx.courseId), { courseId: ctx.courseId }));
+  } catch (error) { fail(res, error, 'GET /caldera-operations/status'); }
+});
+
+router.post('/caldera-operations', async (req, res) => {
+  try {
+    const ctx = await loadStaffCourse(req, res);
+    if (!ctx) return;
+    if (!isFeatureEnabled(ctx.course, 'blue_team')) return res.status(404).json({ error: 'Blue Team Board is not enabled for this course' });
+    const result = await operationService().launch(await courseAgentLanes(ctx.courseId), req.body || {},
+      { courseId: ctx.courseId, label: ctx.course.code || ctx.course.course_name });
+    audit.log({ req, action: 'caldera_classroom_launch', target: { type: 'course', id: ctx.courseId },
+      metadata: { batch_id: result.batch_id, lanes: result.results.length } }).catch(() => {});
+    res.status(202).json(result);
+  } catch (error) { fail(res, error, 'POST /caldera-operations'); }
+});
+
+// Stop remains available if the course's feature is switched off during an exercise.
+router.post('/caldera-operations/stop', async (req, res) => {
+  try {
+    const ctx = await loadStaffCourse(req, res);
+    if (!ctx) return;
+    const result = await operationService().stop(await courseAgentLanes(ctx.courseId), req.body || {}, { courseId: ctx.courseId });
+    audit.log({ req, action: 'caldera_classroom_stop', target: { type: 'course', id: ctx.courseId },
+      metadata: { batch_id: result.batch_id, lanes: result.results.length } }).catch(() => {});
+    res.json(result);
+  } catch (error) { fail(res, error, 'POST /caldera-operations/stop'); }
 });
 
 router.get('/:runId', async (req, res) => {

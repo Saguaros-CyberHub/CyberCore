@@ -36,6 +36,7 @@ function reset() {
   state.tasks = [];
   state.audits = [];
   state.agentReads = 0;
+  state.operationCalls = [];
   state.runReads = 0;
   state.dbError = false;
   state.powerError = false;
@@ -69,10 +70,13 @@ const service = createService({
     if (state.dbError) throw new Error('private database failure');
     if (/UPDATE cybercore_lane/.test(sql) && /RETURNING lane_id/.test(sql)) {
       const lane = state.lanes.find(row => row.lane_id === params[0] && eligibleLane(row));
-      if (!lane || lane.config.caldera_agent_job?.status === 'running') return { rows: [] };
+      const prior = lane?.config.caldera_agent_jobs?.[params[2]] || lane?.config.caldera_agent_job;
+      if (!lane || (String(prior?.vm_id) === params[2] && ['queued', 'running'].includes(prior?.status))) return { rows: [] };
       lane.config.caldera_agent_job = JSON.parse(params[1]);
+      lane.config.caldera_agent_jobs ||= {};
+      lane.config.caldera_agent_jobs[params[2]] = lane.config.caldera_agent_job;
       const token = JSON.parse(params[3]);
-      lane.config.caldera_agent_access = { tokens: [token] };
+      lane.config.caldera_agent_access = { tokens: (lane.config.caldera_agent_access?.tokens || []).filter(row => row.vm_id !== token.vm_id).concat(token) };
       return { rows: [{ lane_id: lane.lane_id }] };
     }
     if (/SELECT l\.lane_id/.test(sql)) {
@@ -103,6 +107,19 @@ put('src/incident/board', {
 });
 put('src/incident/caldera/authoring', {});
 put('src/routes/caldera-authoring', { authoringConfig: () => ({}), PUBLIC_PATH: '/caldera' });
+put('src/utils/caldera-lane-operations', { createService: () => ({
+  status: async (lanes, context) => {
+    state.operationCalls.push({ action: 'status', lanes, context });
+    return { adversaries: [], lanes: lanes.map(lane => ({ lane_id: lane.lane_id, operations: [] })) };
+  },
+  ...Object.fromEntries(['launch', 'stop'].map(action => [action, async (lanes, body, context) => {
+    if (!Array.isArray(body.lane_ids) || body.lane_ids.some(id => !lanes.some(lane => lane.lane_id === id))) {
+      throw Object.assign(new Error('Lane not found'), { status: 404 });
+    }
+    state.operationCalls.push({ action, lanes, body, context });
+    return { batch_id: body.request_id || body.batch_id, results: body.lane_ids.map(lane_id => ({ lane_id, status: 'preparing' })) };
+  }])),
+}) });
 put('modules/crucible/plugins/cle/utils/db', { query: async (sql, params) => ({
   rows: params[0] === COURSE && ['student', 'enrolled-instructor'].includes(params[1]) ? [clone(state.course)] : [],
 }) });
@@ -139,6 +156,52 @@ const install = (body = {}, options = {}) => request(courseRouter, 'POST', '/cal
 });
 const authorize = uri => request(callbackRouter, 'GET', '/authorize', { user: null, headers: { 'X-Forwarded-Uri': uri } });
 beforeEach(reset);
+
+test('classroom bulk endpoints enforce staff access before calling services', async () => {
+  for (const user of [{ role: 'student', userId: 'student' }, { role: 'instructor', userId: 'enrolled-instructor' }]) {
+    for (const [method, url] of [['POST', '/caldera-agents/batch'], ['POST', '/caldera-operations'], ['POST', '/caldera-operations/stop'], ['GET', '/caldera-operations/status']]) {
+      assert.equal((await request(courseRouter, method, url, { user })).status, 403);
+    }
+  }
+  assert.equal(state.operationCalls.length, 0);
+  assert.equal(state.agentReads, 0);
+});
+
+test('bulk installer refuses any foreign target before claiming the valid sibling', async () => {
+  const response = await request(courseRouter, 'POST', '/caldera-agents/batch', { body: { targets: [
+    { lane_id: LANE, vm_id: 101, platform: 'windows' }, { lane_id: OTHER_LANE, vm_id: 201, platform: 'linux' },
+  ] } });
+  assert.equal(response.status, 404);
+  assert.equal(state.tasks.length, 0);
+  assert.equal(state.agentReads, 0);
+});
+
+test('bulk installer queues course targets and reports duplicate active VM failures', async () => {
+  const body = { targets: [{ lane_id: LANE, vm_id: 101, platform: 'windows' }] };
+  const response = await request(courseRouter, 'POST', '/caldera-agents/batch', { body });
+  assert.equal(response.status, 202);
+  assert.equal(response.body.results[0].job.status, 'queued');
+  const repeated = await request(courseRouter, 'POST', '/caldera-agents/batch', { body });
+  assert.equal(repeated.body.results[0].status, 409);
+  assert.equal(state.tasks.length, 1);
+});
+
+test('operation routes pass only resolved course lanes and preserve stop after disabling feature', async () => {
+  const body = { lane_ids: [LANE], request_id: COURSE, adversary_id: 'discovery', batch_id: COURSE };
+  assert.equal((await request(courseRouter, 'POST', '/caldera-operations', { body })).status, 202);
+  assert.equal(state.operationCalls[0].context.courseId, COURSE);
+  assert.deepEqual(state.operationCalls[0].lanes.map(lane => lane.lane_id), [LANE]);
+  assert.equal((await request(courseRouter, 'POST', '/caldera-operations', { body: { ...body, lane_ids: [OTHER_LANE] } })).status, 404);
+  state.course.features.blue_team = false;
+  assert.equal((await request(courseRouter, 'POST', '/caldera-operations', { body })).status, 404);
+  assert.equal((await request(courseRouter, 'POST', '/caldera-agents/batch', { body: { targets: [] } })).status, 404);
+  assert.equal((await request(courseRouter, 'POST', '/caldera-operations/stop', { body })).status, 200);
+  const status = await request(courseRouter, 'GET', '/caldera-operations/status');
+  assert.equal(status.status, 200);
+  assert.equal(status.headers['cache-control'], 'no-store');
+  assert.equal(state.operationCalls.at(-1).action, 'status');
+  assert.equal(state.runReads, 0);
+});
 
 test('course staff and admins read only scoped lanes and projected agents, with no callback credentials', async () => {
   for (const user of [{ role: 'instructor', userId: 'owner' }, { role: 'admin', userId: 'admin' }]) {
@@ -292,7 +355,7 @@ test('installation returns 202 with a public job, ignores caller destinations, a
   const first = await install({ server_url: 'https://arbitrary.example/', group: 'foreign-group', api_key: 'caller-key' });
   assert.equal(first.status, 202);
   assert.deepEqual(Object.keys(first.body), ['job']);
-  assert.equal(first.body.job.status, 'running');
+  assert.equal(first.body.job.status, 'queued');
   assert.equal(first.body.job.vm_id, 101);
   assert.equal(first.body.job.group, groupFor(LANE));
   assert.equal(state.tasks.length, 1);
