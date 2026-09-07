@@ -111,6 +111,15 @@ time, and outcome before controller cleanup. Raw Ansible output stays in the
 controller log because task results can contain lab passwords. The overall
 playbook deadline remains two hours.
 
+The launcher flushes the controller log before publishing its completion code
+through a flushed temporary file and atomic rename. Cleanup also flushes the
+guest filesystem before powering off the controller, including controllers
+cloned from older templates. An unconfirmed flush is recorded in
+`config.goad.controller_stop.log_flush`. A last-task heading identifies progress;
+the controller log is still needed to determine why Ansible failed. In the
+2026-09-07 incident, that log ended mid-recap with trailing NUL bytes, so the
+original playbook error could not be recovered from the supplied tail.
+
 Manual Ansible recovery does not resume the completed CyberCore job or run its
 remaining hooks and identity checks. Existing retry actions recreate lanes;
 toggling a lane active only changes power/status. Preserve generated lab and

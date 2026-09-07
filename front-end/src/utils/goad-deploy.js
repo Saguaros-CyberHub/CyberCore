@@ -16,6 +16,7 @@ const { agentExec, agentShellExec, pollExecStatus, waitForGuestAgent } = require
 const nodeSsh = require('./node-ssh');
 const { goadWindowsVms, configureGoadWindowsRtc, seedGoadWindowsClocks,
   verifyGoadWindowsClocks } = require('./goad-clock');
+const { buildGoadPlaybookLaunch } = require('./goad-playbook-launch');
 // Core planning reads identity metadata only. GOAD source stays on the controller.
 const {
   preflightGoadRebrand, canonicalGoadLabName, describeRebrand, listExtensionBases, RebrandError, REBRAND_CODES,
@@ -1523,7 +1524,6 @@ async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSu
   // SCCM + full GOAD can take an hour+; give it 2h headroom.
   const logPath = `/var/log/goad-run-${vxlanId}.log`;
   const donePath = `/var/log/goad-done-${vxlanId}.txt`;
-  const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 
   // THE 5TH ARGUMENT: the extension keys, comma-joined, in the order they are to
   // be installed. run.sh renders each one's inventory (substituting {{ip_range}}
@@ -1545,8 +1545,8 @@ async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSu
   // an older controller that ignores a 5th argument degrades to "lab installs,
   // extensions do not" rather than breaking the lab.
   const extArg = (extensions?.selected || []).length
-    ? ` ${sq(extensions.selected.join(','))}`
-    : '';
+    ? extensions.selected.join(',')
+    : null;
 
   // ---- Capability gate: does THIS controller understand argv[5]? ----------
   //
@@ -1622,8 +1622,9 @@ async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSu
   // backgrounds, </dev/null </dev/null 2>&1 close inherited fds so the
   // wrapper bash QGA started can exit cleanly without dragging children.
   // Inner sh -c runs the playbook + records exit code atomically.
-  const innerCmd = `/opt/goad-light/run.sh ${sq(labName)} ${sq(hostMap)} ${sq(initialUser)} ${sq(initialPass)}${extArg} > ${logPath} 2>&1; echo \\$? > ${donePath}`;
-  const wrappedCmd = `rm -f ${donePath}; nohup setsid sh -c "${innerCmd}" </dev/null >/dev/null 2>&1 &`;
+  const wrappedCmd = buildGoadPlaybookLaunch({ logPath, donePath,
+    argv: ['/opt/goad-light/run.sh', labName, hostMap, initialUser, initialPass,
+      ...(extArg ? [extArg] : [])] });
 
   // ---- mssql offline-install fix (strip FULLTEXT) -----------------------
   // GOAD's mssql role renders sql_conf.ini with FEATURES=SQLENGINE,FULLTEXT.
@@ -1728,10 +1729,24 @@ print("patched mssql install task -> offline setup.exe")
     console.warn(`[GOAD] mssql install-command patch failed (non-fatal): ${err.message}`);
   }
 
-  // Fire-and-forget — we don't care about this PID's status afterward.
-  await agentExecArgv(bestNode, controllerVmId,
+  // Wait only for the short launcher. The detached playbook is monitored by
+  // its durable completion file, never by a long-running guest-agent PID.
+  const { pid: launchPid } = await agentExecArgv(bestNode, controllerVmId,
     ['/bin/bash', '-c', wrappedCmd],
     proxmoxAPI);
+  const launchDeadline = Date.now() + 15000;
+  let launchStatus;
+  while (Date.now() < launchDeadline) {
+    try {
+      launchStatus = await proxmoxAPI('GET',
+        `/api2/json/nodes/${bestNode}/qemu/${controllerVmId}/agent/exec-status?pid=${launchPid}`);
+      if (launchStatus?.exited) break;
+    } catch { /* A short guest-agent reconnect can be retried within the deadline. */ }
+    await sleep(1000);
+  }
+  if (!launchStatus?.exited || launchStatus.exitcode !== 0) {
+    throw new Error(`GOAD controller ${controllerVmId} could not confirm provisioning launch; log at ${logPath}`);
+  }
 
   return waitForGoadPlaybook({ controllerVmId, bestNode, logPath, donePath, proxmoxAPI });
 }
@@ -1814,14 +1829,27 @@ async function waitForGoadPlaybook({ controllerVmId, bestNode, logPath, donePath
  * Stop the controller after the playbook finishes (or fails). Keeps the
  * provisioning credentials off any running box during student session.
  */
-async function stopController({ controllerVmId, bestNode, proxmoxAPI, waitForTask }) {
+async function stopController({ controllerVmId, bestNode, proxmoxAPI, waitForTask, deps = {} }) {
+  // Proxmox stop removes power immediately. Flush guest writes first, including
+  // logs from older baked runners and a worker interrupted by the deadline.
+  // A failed flush must not leave the credential-bearing controller running.
+  const logFlush = { synced: false, error: null };
+  try {
+    const { pid } = await agentExecArgv(bestNode, controllerVmId, ['/bin/sync'], proxmoxAPI);
+    const result = await (deps.pollExecStatus || pollExecStatus)(bestNode, controllerVmId, pid, 30000);
+    if (!result?.exited || result.exitcode !== 0) throw new Error('Guest sync did not complete');
+    logFlush.synced = true;
+  } catch {
+    logFlush.error = 'Controller filesystem flush could not be confirmed; recent diagnostics may be incomplete';
+    console.warn(`[GOAD] ${logFlush.error}`);
+  }
   try {
     const task = await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${controllerVmId}/status/stop`);
     if (task && waitForTask) await waitForTask(bestNode, task);
-    return { stopped: true, error: null };
+    return { stopped: true, error: null, log_flush: logFlush };
   } catch (err) {
     console.warn(`[GOAD] stopController: ${err.message}`);
-    return { stopped: false, error: err.message };
+    return { stopped: false, error: err.message, log_flush: logFlush };
   }
 }
 
@@ -2740,7 +2768,7 @@ async function deployGoadLane({
     };
     console.error(`[GOAD] Lane ${lane.lane_id} failed during ${stage}: ${provisioningError.message}`);
   } finally {
-    controllerStop = await stopController({ controllerVmId, bestNode, proxmoxAPI, waitForTask });
+    controllerStop = await stopController({ controllerVmId, bestNode, proxmoxAPI, waitForTask, deps: runtime });
     if (!controllerStop.stopped && !provisioningError) {
       stage = 'controller_cleanup';
       provisioningError = new Error(`Controller VM ${controllerVmId} could not be stopped: ${controllerStop.error}`);

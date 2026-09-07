@@ -590,7 +590,7 @@ test('run.sh still takes exactly the four positional arguments goad-deploy.js se
     'run.sh must still bind LAB/HOST_MAP/INITIAL_USER/INITIAL_PASSWORD in that order');
 
   const deploy = fs.readFileSync(GOAD_DEPLOY, 'utf8');
-  assert.ok(/\/opt\/goad-light\/run\.sh \$\{sq\(labName\)\} \$\{sq\(hostMap\)\} \$\{sq\(initialUser\)\} \$\{sq\(initialPass\)\}/.test(deploy),
+  assert.ok(/argv:\s*\['\/opt\/goad-light\/run\.sh', labName, hostMap, initialUser, initialPass/.test(deploy),
     'goad-deploy.js must still invoke run.sh with exactly those four arguments in that order');
 });
 

@@ -105,7 +105,8 @@ test('actual playbook runner patches v3 addressing before launching the minted l
   await assert.rejects(runGoadPlaybook({ controllerVmId: 1, bestNode: 'offline', spec,
     vxlanId: 4242, laneSubnetBase: '10.9.9', extSubnetBase: '10.9.8', proxmoxAPI: api }), /__CAPTURED_RUN__/);
   assert.deepEqual(calls, ['capability', 'addressing', 'launch']);
-  assert.ok(launch.includes(`/opt/goad-light/run.sh '${spec.goad.version}'`));
+  launch = launch.replaceAll("'\\''", "'");
+  assert.ok(launch.includes(`'/opt/goad-light/run.sh' '${spec.goad.version}'`));
   assert.match(launch, /ELK\|10\.9\.8\.24\|/);
   assert.match(launch, /ws01\|10\.9\.9\.31\|/);
   assert.match(launch, /kali\|10\.9\.8\.50\|/);

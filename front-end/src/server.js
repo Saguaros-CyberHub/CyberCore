@@ -937,6 +937,15 @@ async function start() {
     // Ensure MFA columns exist on cybercore_user (idempotent)
     await ensureMfaColumns();
 
+    // Crucible's event columns and score join otherwise exist only on fresh
+    // database volumes. Keep existing deployments usable after an app update.
+    try {
+      await require('./utils/crucible-events-schema').ensureCrucibleEventSchema();
+      console.log('Crucible event schema is ready.');
+    } catch (err) {
+      console.error(`[Crucible] Event schema initialization failed; event requests remain unavailable: ${err.message}`);
+    }
+
     // Lane WAN address columns. Must be before anything can deploy a lane, and
     // idempotent, because migrations/033 is hand-run and could lag the code.
     await ensureLaneWanColumns();

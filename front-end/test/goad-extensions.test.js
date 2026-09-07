@@ -659,13 +659,15 @@ async function captureRunSh(spec, { capable = true } = {}) {
   } finally {
     console.warn = realWarn;
   }
-  return captured;
+  // Decode the outer single-quote escaping for argument-fragment assertions.
+  // The launch tests execute both shells and verify literal argv end to end.
+  return captured.replaceAll("'\\''", "'");
 }
 
 test('THE 5TH ARGUMENT: the selected extension keys reach run.sh, comma-joined and quoted', async () => {
   const cmd = await captureRunSh(runShSpec({ extensions: ['elk', 'wazuh'] }));
   assert.match(cmd,
-    /\/opt\/goad-light\/run\.sh 'GOAD-Light' '[^']*' 'vagrant' 'vagrant' 'elk,wazuh' > \/var\/log\/goad-run-4242\.log/,
+    /'\/opt\/goad-light\/run\.sh' 'GOAD-Light' '[^']*' 'vagrant' 'vagrant' 'elk,wazuh' > '\/var\/log\/goad-run-4242\.log'/,
     'the keys must arrive as one quoted 5th argument, after the four that were always there:\n' + cmd);
 });
 
@@ -695,7 +697,7 @@ test('the capability probe does not run when no extension is selected', async ()
   // asserting the four-argument command still gets through with capable:false —
   // if the probe ran unconditionally, this would refuse.
   const cmd = await captureRunSh(runShSpec(), { capable: false });
-  assert.match(cmd, /run\.sh 'GOAD-Light' '[^']*' 'vagrant' 'vagrant' >/);
+  assert.match(cmd, /run\.sh' 'GOAD-Light' '[^']*' 'vagrant' 'vagrant' >/);
 });
 
 test('the order the spec ticked them in is the order run.sh installs them in', async () => {
@@ -724,8 +726,8 @@ test('NO extensions means the command line every in-flight lane already runs', a
 
   // FOUR arguments, then the redirect. No trailing '', no trailing space.
   assert.match(absent,
-    /\/opt\/goad-light\/run\.sh 'GOAD-Light' '[^']*' 'vagrant' 'vagrant' > \/var\/log\/goad-run-4242\.log 2>&1;/,
-    'the four-argument form must be untouched:\n' + absent);
+    /'\/opt\/goad-light\/run\.sh' 'GOAD-Light' '[^']*' 'vagrant' 'vagrant' > '\/var\/log\/goad-run-4242\.log' 2>&1\n/,
+    'the four-argument form must be preserved:\n' + absent);
   assert.ok(!absent.includes("'vagrant' ''"),
     'the argument is OMITTED, not passed empty. The controller is a baked template and cannot be '
     + 'renegotiated: an empty 5th argument is still a 5th argument — $# becomes 5, and anything an older '

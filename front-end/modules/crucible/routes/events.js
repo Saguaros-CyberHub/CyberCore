@@ -17,17 +17,17 @@ router.get('/api/crucible/events', authenticateToken, async (req, res) => {
     const { type } = req.query;
     const isAdmin = req.user.role === 'admin';
 
-    const conditions = [`module_key = 'crucible'`];
+    const conditions = [`e.module_key = 'crucible'`];
     const params = [];
 
     if (type && EVENT_TYPES.includes(type)) {
       params.push(type);
-      conditions.push(`event_type = $${params.length}`);
+      conditions.push(`e.event_type = $${params.length}`);
     }
 
     if (!isAdmin) {
-      conditions.push(`status = 'active'`);
-      conditions.push(`is_public = true`);
+      conditions.push(`e.status = 'active'`);
+      conditions.push(`e.is_public = true`);
     }
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';

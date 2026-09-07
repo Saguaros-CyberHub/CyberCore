@@ -1,6 +1,30 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { waitForGoadPlaybook } = require('../src/utils/goad-deploy');
+const { waitForGoadPlaybook, runGoadPlaybook } = require('../src/utils/goad-deploy');
+
+test('a rejected detached launcher fails immediately without waiting for a missing completion file', async () => {
+  let statusReads = 0;
+  const proxmoxAPI = async (method, url, body) => {
+    if (method === 'GET') {
+      assert.match(url, /exec-status\?pid=42$/);
+      statusReads++;
+      return { exited: true, exitcode: 125, 'err-data': 'private-launch-diagnostic' };
+    }
+    const command = new URLSearchParams(body).getAll('command').at(-1);
+    if (command.includes('nohup setsid')) return { pid: 42 };
+    // Skip existing best-effort SQL role patches; this test needs no live API.
+    throw new Error('offline fixture patch skipped');
+  };
+  await assert.rejects(runGoadPlaybook({ controllerVmId: 210881, bestNode: 'offline',
+    spec: { goad: { enabled: true, version: 'GOAD-Mini' }, vms: [{ name: 'DC01' }] },
+    vxlanId: 4242, laneSubnetBase: '10.9.9', proxmoxAPI,
+  }), error => {
+    assert.match(error.message, /could not confirm provisioning launch/);
+    assert.ok(!error.message.includes('private-launch-diagnostic'));
+    return true;
+  });
+  assert.equal(statusReads, 1);
+});
 
 function harness({ sentinels = ['__MISSING__'], tail = '', tailError = false } = {}) {
   const commands = [];
