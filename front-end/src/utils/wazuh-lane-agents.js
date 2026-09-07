@@ -52,6 +52,50 @@ function publicJob(job, now) {
     .map(key => [key, safe[key]]));
 }
 
+// Every lane name across every deployer ends in `-<vxlanId>`; everything before
+// that last hyphen is the lane's "family" (cle-cybr388, ciab-cochise101,
+// crucible). See cle/utils/lane-provision.js:198 and ciab equivalent at :159.
+const NAME_SUFFIX = /^(.*?)-(\d+)$/;
+
+// One coarse label per deployment path, derived from flags the deployers
+// already write. Order matters: a bake lane is also `ciab`, and a malware lane
+// can also be a course lane, so the most specific test comes first.
+function laneKind(cfg) {
+  if (cfg.ciab_bake || cfg.staging) return 'staging';
+  if (isMalwareLane(cfg)) return 'malware';
+  if (cfg.goad) return 'goad';
+  if (cfg.profile_lane_group || cfg.ciab) return 'ciab';
+  if (cfg.cle && cfg.material_id) return 'course-lab';
+  if (cfg.cle || cfg.course_id) return 'course';
+  if (cfg.group_id) return 'group';
+  if (cfg.challenge_key || cfg.challenge_id) return 'challenge';
+  return 'lane';
+}
+
+// The grouping/sorting context the admin dialog needs, ENUMERATED BY NAME.
+// Never spread cfg or the lane row: lane config carries owner emails and has
+// historically carried guest credentials (challenge-lane-deployer.js:2383).
+function publicLaneContext(lane, cfg, course) {
+  const parsed = String(lane.name || '').match(NAME_SUFFIX);
+  const courseId = typeof cfg.course_id === 'string' && UUID.test(cfg.course_id) ? cfg.course_id.toLowerCase() : null;
+  return {
+    vxlan_id: Number.isSafeInteger(lane.vxlan_id) ? lane.vxlan_id : null,
+    lane_number: Number.isSafeInteger(lane.vxlan_id) ? lane.vxlan_id : parsed ? Number(parsed[2]) : null,
+    family: parsed ? parsed[1] : null,
+    // pg hands back a Date; a service test or a legacy row can hand back a
+    // string or garbage. new Date(x).toISOString() would throw RangeError and
+    // take the whole inventory response with it.
+    created_at: Number.isFinite(Date.parse(lane.created_at)) ? new Date(lane.created_at).toISOString() : null,
+    kind: laneKind(cfg),
+    course_id: courseId,
+    course_code: course?.courseCode || null,
+    course_name: course?.courseName || (typeof cfg.course_name === 'string' ? cfg.course_name.slice(0, 120) : null),
+    group_id: cfg.group_id != null && cfg.group_id !== '' ? String(cfg.group_id) : null,
+    group_label: typeof cfg.group_name === 'string' && cfg.group_name.trim() ? cfg.group_name.trim().slice(0, 120) : null,
+    material_id: typeof cfg.material_id === 'string' ? cfg.material_id : null,
+  };
+}
+
 const INSTALL_ERRORS = {
   'preflight-failed': 'The Wazuh installer could not complete its initial guest checks. Review guest permissions and the existing installation.',
   'root-required': 'The Wazuh installer requires root privileges on this Linux VM.',
@@ -94,6 +138,39 @@ function createService(deps = {}) {
   const buildScript = args => (deps.buildInstallScript || require('./wazuh-agent-scripts').buildInstallScript)(args);
   const proxmox = (...args) => (deps.proxmox || require('./proxmox').proxmoxAPI)(...args);
   const ensureGatewayAccess = deps.ensureGatewayAccess || require('./wazuh-gateway-access').ensureWazuhGatewayAccess;
+  // Course labels come from cle_db, which core cannot join. course-directory.js
+  // is the sanctioned seam and degrades to null rather than throwing. The memo
+  // is per SERVICE INSTANCE (not module level) so route/service tests start
+  // cold, and it is keyed on the injectable now() so TTL expiry is testable.
+  const courseDirectory = deps.courseDirectory || require('./course-directory');
+  const deadline = deps.deadline || (ms => new Promise(resolve => {
+    const timer = setTimeout(() => resolve(null), ms);
+    if (timer.unref) timer.unref();
+  }));
+  const COURSE_HIT_TTL_MS = 60 * 1000;
+  const COURSE_MISS_TTL_MS = 10 * 1000;
+  const COURSE_DEADLINE_MS = 1500;
+  const courseMemo = new Map();
+  async function describeCourses(ids) {
+    const out = new Map();
+    // No provider registered (any non-CLE deployment) means every lookup would
+    // resolve null anyway; skip the work rather than repeat it every 5 seconds.
+    if (!ids.length || !courseDirectory.hasCourseDirectory()) return out;
+    const at = now();
+    if (courseMemo.size > 1000) courseMemo.clear();
+    await Promise.all([...new Set(ids)].map(async id => {
+      const hit = courseMemo.get(id);
+      if (hit && at - hit.at < (hit.course ? COURSE_HIT_TTL_MS : COURSE_MISS_TTL_MS)) { out.set(id, hit.course); return; }
+      let course = null;
+      // A slow (rather than dead) cle_db must not hold up a polled inventory
+      // request; a miss is cached briefly so recovery is still quick.
+      try { course = await Promise.race([courseDirectory.describeCourse(id), deadline(COURSE_DEADLINE_MS)]); }
+      catch (_) { course = null; }
+      courseMemo.set(id, { course: course || null, at });
+      out.set(id, course || null);
+    }));
+    return out;
+  }
   const pending = [];
   let active = 0;
   function pump() {
@@ -154,9 +231,11 @@ function createService(deps = {}) {
 
   async function status(lanes) {
     let config = null, configuration_error = null, agents_error = null, agents = [];
-    let resources = [], power_error = null;
+    let resources = [], power_error = null, courses = new Map();
     try { config = settings(); }
     catch (error) { configuration_error = error.safe ? error.message : 'The Wazuh manager and API connection are not configured correctly.'; }
+    // Parsed once: every lane's config is read twice below (targets and context).
+    const cfgs = lanes.map(lane => object(lane.config));
     await Promise.all([
       (async () => {
         if (!lanes.length) return;
@@ -168,18 +247,28 @@ function createService(deps = {}) {
         try { agents = await listAgents(config); }
         catch (_) { agents_error = 'Could not read Wazuh check-ins. Check API connectivity, credentials and TLS trust.'; }
       })(),
+      (async () => {
+        // Labels are cosmetic. A directory outage degrades the dialog's group
+        // headings to lane-name prefixes; it never becomes an inventory error.
+        try {
+          courses = await describeCourses(cfgs
+            .map(cfg => typeof cfg.course_id === 'string' && UUID.test(cfg.course_id) ? cfg.course_id.toLowerCase() : null)
+            .filter(Boolean));
+        } catch (_) { courses = new Map(); }
+      })(),
     ]);
     const byId = new Map(resources.map(vm => [Number(vm.vmid), vm]));
     return { manager: config?.manager || null, console_url: config?.consoleUrl || null,
       configuration_error, agents_error, power_error,
-      lanes: lanes.map(lane => {
-        const cfg = object(lane.config);
+      lanes: lanes.map((lane, index) => {
+        const cfg = cfgs[index];
         const targets = targetsFor(lane).map(target => {
           const live = byId.get(target.vm_id);
           const job = jobForVm(cfg, target.vm_id);
           const agent = job?.manager === config?.manager && agents.find(item => item.name === job.agent_name
             && (!job.agent_id || String(item.id) === String(job.agent_id)));
           return { vm_id: target.vm_id, name: target.name, platform: target.platform, type: target.type,
+            role: target.role || '',
             power_state: live?.status || 'unknown', runnable: laneEligible(lane) && runnableGuest(live)
               && !isMalwareLane(cfg) && cfg.wazuh_teardown_started !== true,
             agent: agent ? publicAgent(agent) : null };
@@ -189,6 +278,7 @@ function createService(deps = {}) {
         return { lane_id: lane.lane_id, name: lane.name, lane_status: lane.status,
           runnable: targets.some(target => target.runnable),
           internet_enabled: typeof cfg.internet_enabled === 'boolean' ? cfg.internet_enabled : null,
+          ...publicLaneContext(lane, cfg, courses.get(typeof cfg.course_id === 'string' ? cfg.course_id.toLowerCase() : '')),
           targets, jobs: jobs.map(job => publicJob(job, now())),
           agents: agents.filter(agent => jobs.some(job => job.manager === config?.manager
             && job.agent_name === agent.name && (!job.agent_id || String(job.agent_id) === String(agent.id)))).map(publicAgent) };

@@ -120,6 +120,8 @@ function harness(options = {}) {
     if (state.gatewayFailure) throw Object.assign(new Error('Could not prepare Wazuh TCP 1514 access on the lane gateway.'), { status: 409, safe: true });
   },
   buildInstallScript: args => { state.scripts.push(args); return `installation ${args.agentKey}`; },
+  courseDirectory: options.courseDirectory,
+  deadline: options.deadline,
   proxmox: async (...args) => {
     state.calls.push(['proxmox', ...args]);
     if (state.powerFailure) throw new Error('private-proxmox-password');
@@ -504,6 +506,59 @@ test('status associates duplicate hostnames to persisted lane identities and str
   assert.equal(status.lanes[1].targets[0].power_state, 'unknown');
   assert.equal(status.lanes[1].runnable, false);
   assert.doesNotMatch(JSON.stringify(status), /private-|agentKey|password/);
+});
+
+test('status projects allowlisted lane context and resolves course labels through the directory', async () => {
+  const calls = [];
+  const h = harness({
+    courseDirectory: { hasCourseDirectory: () => true, describeCourse: async id => {
+      calls.push(id);
+      return { courseId: id, courseName: 'Network Defense', courseCode: 'CYBR388' };
+    } },
+    deadline: () => new Promise(() => {}),
+    state: { lane: { lane_id: LANE_ID, name: 'cle-cybr388-10447', status: 'active', vxlan_id: 10447,
+      created_at: '2026-09-01T00:00:00.000Z', config: {
+        internet_enabled: true, cle: true, course_id: OTHER_ID, group_id: 'g1', group_name: '  Cochise 101  ',
+        user_email: 'snapshot@example.test', password: 'private-lane-password', gateway_vm_id: 900,
+        vms: [{ vm_id: 901, name: 'Windows workstation', os: 'windows', role: 'dc' }],
+      } } },
+  });
+  const lane = (await h.service.status([h.state.lane])).lanes[0];
+  assert.equal(lane.course_code, 'CYBR388');
+  assert.equal(lane.course_name, 'Network Defense');
+  assert.equal(lane.course_id, OTHER_ID.toLowerCase());
+  assert.equal(lane.kind, 'course');
+  assert.equal(lane.family, 'cle-cybr388');
+  assert.equal(lane.lane_number, 10447);
+  assert.equal(lane.vxlan_id, 10447);
+  assert.equal(lane.group_id, 'g1');
+  assert.equal(lane.group_label, 'Cochise 101');
+  assert.equal(lane.created_at, '2026-09-01T00:00:00.000Z');
+  assert.equal(lane.targets[0].role, 'dc');
+  // The owner email snapshot and the lane password live in the same config
+  // object the context is derived from; enumerating fields keeps them out.
+  assert.doesNotMatch(JSON.stringify(lane), /private-|password|snapshot@example|gateway_vm_id|user_email/);
+
+  await h.service.status([h.state.lane]);
+  assert.deepEqual(calls, [OTHER_ID.toLowerCase()], 'a second poll inside the TTL reuses the memo');
+  h.state.clock += 61 * 1000;
+  await h.service.status([h.state.lane]);
+  assert.equal(calls.length, 2, 'an expired memo entry is refetched');
+});
+
+test('lane context degrades to nulls without a course directory, a name suffix or a usable timestamp', async () => {
+  const h = harness({ state: { lane: { lane_id: LANE_ID, name: 'Lab', status: 'active',
+    created_at: 'garbage', config: { internet_enabled: true, analysis_profile: 'malware',
+      vms: [{ vm_id: 901, name: 'Windows workstation' }] } } } });
+  const lane = (await h.service.status([h.state.lane])).lanes[0];
+  assert.equal(lane.course_code, null);
+  assert.equal(lane.course_name, null);
+  assert.equal(lane.course_id, null);
+  assert.equal(lane.family, null);
+  assert.equal(lane.lane_number, null);
+  assert.equal(lane.vxlan_id, null);
+  assert.equal(lane.created_at, null);
+  assert.equal(lane.kind, 'malware');
 });
 
 test('API, TLS configuration and power outages produce safe status and block claims', async () => {

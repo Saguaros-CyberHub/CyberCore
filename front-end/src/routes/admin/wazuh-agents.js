@@ -25,7 +25,10 @@ function createRouter(deps = {}) {
   router.get('/wazuh-agents', authenticateToken, adminOnly, async (req, res) => {
     res.set('Cache-Control', 'no-store');
     try {
-      const lanes = await query(`SELECT lane_id, name, status, config FROM cybercore_lane
+      // vxlan_id and created_at feed the dialog's grouping and sort controls only.
+      // They are projected through wazuh-lane-agents' publicLaneContext allowlist;
+      // the raw config row is never echoed back.
+      const lanes = await query(`SELECT lane_id, name, status, config, vxlan_id, created_at FROM cybercore_lane
         WHERE ${eligibleLaneSql()} ORDER BY name, lane_id`);
       res.json(await service.status(lanes.rows));
     } catch (error) { fail(res, error); }
@@ -55,6 +58,8 @@ function createRouter(deps = {}) {
         targets.push({ lane_id: laneId, vm_id: target.vm_id, platform: target.platform });
       }
       const laneIds = [...new Set(targets.map(target => target.lane_id))];
+      // startBatch needs only lane_id/name/status/config; the status-only context
+      // columns above are deliberately not selected here.
       const lanes = await query(`SELECT lane_id, name, status, config FROM cybercore_lane
         WHERE lane_id = ANY($1::uuid[]) AND ${eligibleLaneSql()}`, [laneIds]);
       if (lanes.rows.length !== laneIds.length) {

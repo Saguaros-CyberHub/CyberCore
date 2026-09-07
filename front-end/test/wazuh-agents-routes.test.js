@@ -82,6 +82,8 @@ test('admin status spans course and challenge lanes and prevents response cachin
   assert.equal(result.headers['cache-control'], 'no-store');
   assert.deepEqual(result.body.lanes.map(lane => lane.lane_id), [LANE, OTHER]);
   assert.equal(state.calls[0].lanes[0].config.course_id, OTHER);
+  // Grouping/sort context for the dialog. Projected by the service's allowlist.
+  assert.match(state.queries[0].sql, /vxlan_id, created_at/);
   assert.doesNotMatch(JSON.stringify(result.body), /private-lane-password/);
 });
 
@@ -105,6 +107,8 @@ test('batch resolves only selected lanes and strips browser-supplied scripts, co
   assert.deepEqual(state.calls[0].input, { targets: [target()] });
   assert.deepEqual(state.queries[0].args, [[LANE]]);
   assert.match(state.queries[0].sql, /ANY\(\$1::uuid\[\]\)/);
+  // startBatch needs no display context; only the status query carries it.
+  assert.doesNotMatch(state.queries[0].sql, /created_at/);
   assert.equal(state.audits[0].action, 'lane.wazuh_agents_queued');
   assert.doesNotMatch(JSON.stringify(state.audits[0].metadata), /browser-secret|private-lane-password|malicious/);
 });
