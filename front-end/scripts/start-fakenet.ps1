@@ -4,6 +4,11 @@
 # https://github.com/mandiant/flare-fakenet-ng/blob/master/fakenet/configs/default.ini
 # https://github.com/mandiant/flare-fakenet-ng/blob/master/fakenet/fakenet.py
 
+param(
+    [ValidatePattern('^$|^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')]
+    [string]$AttemptId = ''
+)
+
 function Get-FakeNetIniValue {
     param([string]$Text, [string]$Section, [string]$Key)
     $current = ''
@@ -157,6 +162,60 @@ function Test-FakeNetStartup {
         $LogText -notmatch '(?im)Traceback \(most recent call last\)|\bERROR:|Error starting .* listener|\[\s*FakeNet\]\s+Stopping'
 }
 
+function Write-CyberCoreFakeNetResult {
+    param([string]$StartupAttemptId, [hashtable]$Result, [string]$CaptureDirectory = 'C:\Analysis')
+    if ($StartupAttemptId -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') {
+        throw 'Invalid FakeNet startup attempt ID.'
+    }
+    $Result.attemptId = $StartupAttemptId
+    $resultPath = Join-Path $CaptureDirectory "cybercore-fakenet-start-$StartupAttemptId.json"
+    $tempPath = $resultPath + '.tmp'
+    [IO.File]::WriteAllText($tempPath, ($Result | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+    # Readers see either the prior status or this complete JSON document.
+    if (Test-Path -LiteralPath $resultPath) { [IO.File]::Replace($tempPath, $resultPath, [NullString]::Value) }
+    else { [IO.File]::Move($tempPath, $resultPath) }
+}
+
+function Open-CyberCoreFakeNetStatusReader {
+    param([string]$ResultPath)
+    # Get-Content omits FileShare.Delete on Windows. Its brief read can then
+    # prevent the worker's atomic File.Replace and strand status at 'starting'.
+    # Sharing deletion keeps an overlapping reader on the old complete document
+    # while subsequent readers open the newly published one.
+    $stream = [IO.FileStream]::new($ResultPath, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+        ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    try { return [IO.StreamReader]::new($stream, [Text.Encoding]::UTF8) }
+    catch { $stream.Dispose(); throw }
+}
+
+function Read-CyberCoreFakeNetResult {
+    param([string]$StartupAttemptId, [string]$CaptureDirectory = 'C:\Analysis')
+    if ($StartupAttemptId -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') {
+        throw 'Invalid FakeNet startup attempt ID.'
+    }
+    $resultPath = Join-Path $CaptureDirectory "cybercore-fakenet-start-$StartupAttemptId.json"
+    $reader = Open-CyberCoreFakeNetStatusReader $resultPath
+    try { $result = $reader.ReadToEnd() | ConvertFrom-Json }
+    finally { $reader.Dispose() }
+    if ($result.attemptId -ne $StartupAttemptId) { throw 'FakeNet status belongs to a different startup attempt.' }
+    if ($result.complete -eq $true -and $result.ready -eq $true) {
+        $configPath = 'C:\Tools\FakeNet\configs\cybercore-analysis.ini'
+        if ($result.pid -notmatch '^\d+$' -or [long]$result.pid -lt 1) { throw 'FakeNet returned an invalid process ID.' }
+        $current = Get-CimInstance Win32_Process -Filter "ProcessId = $($result.pid)"
+        if (-not $current -or $current.ExecutablePath -ine 'C:\Tools\FakeNet\fakenet.exe' -or
+            $current.CommandLine -notlike "*$configPath*" -or
+            $current.CreationDate.ToUniversalTime().ToString('o') -ne $result.processCreatedUtc -or
+            (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash -ne $result.configHash) {
+            throw 'FakeNet stopped or its running configuration changed during startup. Check C:\Analysis.'
+        }
+        $logText = Get-Content -LiteralPath $result.logPath -Raw
+        if (-not (Test-FakeNetStartup $logText $true ((Get-Date) - $current.CreationDate).TotalSeconds)) {
+            throw "FakeNet is no longer reporting successful initialization. Check $($result.logPath)."
+        }
+    }
+    return $result
+}
+
 function Start-CyberCoreFakeNet {
     $ErrorActionPreference = 'Stop'
     if (-not [Security.Principal.WindowsIdentity]::GetCurrent().IsSystem) {
@@ -181,13 +240,15 @@ function Start-CyberCoreFakeNet {
         $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
         $matching = @($existing | Where-Object { $_.ProcessId -eq $state.pid -and $_.CommandLine -like "*$configPath*" })
         if (-not $matching.Count -or -not (Test-Path -LiteralPath $configPath -PathType Leaf) -or
-            (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash -ne $state.configHash) {
+            (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash -ne $state.configHash -or
+            ($state.processCreatedUtc -and $matching[0].CreationDate.ToUniversalTime().ToString('o') -ne $state.processCreatedUtc)) {
             throw 'The running FakeNet configuration has changed. Reset Lab before continuing.'
         }
         $logText = Get-Content -LiteralPath $state.logPath -Raw
         $age = ((Get-Date) - $matching[0].CreationDate).TotalSeconds
         if (-not (Test-FakeNetStartup $logText $true $age)) { throw 'The existing FakeNet instance is not ready. Check C:\Analysis or Reset Lab.' }
-        return @{ ready = $true; pid = [int]$state.pid; captureDirectory = $captureDir; logPath = $state.logPath; reused = $true }
+        return @{ ready = $true; pid = [int]$state.pid; captureDirectory = $captureDir; logPath = $state.logPath; reused = $true;
+            configHash = $state.configHash; processCreatedUtc = $matching[0].CreationDate.ToUniversalTime().ToString('o') }
     }
     $sourceText = ''
     foreach ($candidate in @((Join-Path $configDir 'cybercore.ini.template'), (Join-Path $configDir 'default.ini'))) {
@@ -219,20 +280,37 @@ function Start-CyberCoreFakeNet {
         }
         $age = ((Get-Date) - $startedAt).TotalSeconds
         if (Test-FakeNetStartup $logText (-not $process.HasExited) $age) {
-            $state = @{ pid = $process.Id; configHash = (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash; logPath = $logPath }
+            $current = Get-CimInstance Win32_Process -Filter "ProcessId = $($process.Id)"
+            if (-not $current) { throw "FakeNet exited during startup. Check $logPath." }
+            $state = @{ pid = $process.Id; configHash = (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash; logPath = $logPath;
+                processCreatedUtc = $current.CreationDate.ToUniversalTime().ToString('o') }
             [IO.File]::WriteAllText($statePath, ($state | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
-            return @{ ready = $true; pid = $process.Id; captureDirectory = $captureDir; logPath = $logPath; reused = $false }
+            return @{ ready = $true; pid = $process.Id; captureDirectory = $captureDir; logPath = $logPath; reused = $false;
+                configHash = $state.configHash; processCreatedUtc = $state.processCreatedUtc }
         }
     }
     throw "FakeNet startup was not confirmed within 45 seconds. Check $logPath."
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
+    $exitCode = 0
     try {
-        Start-CyberCoreFakeNet | ConvertTo-Json -Compress
-        exit 0
+        if ($AttemptId) {
+            Write-CyberCoreFakeNetResult $AttemptId @{ complete = $false; phase = 'starting' }
+        }
+        $result = Start-CyberCoreFakeNet
     } catch {
-        @{ ready = $false; error = $_.Exception.Message } | ConvertTo-Json -Compress
-        exit 1
+        $result = @{ ready = $false; error = $_.Exception.Message; diagnostic = $_.ToString() }
+        $exitCode = 1
     }
+    $result.complete = $true
+    if ($AttemptId) {
+        # Publish before process exit; a long-lived descendant can retain handles.
+        Write-CyberCoreFakeNetResult $AttemptId $result
+        # Removing registration leaves the running application alone. Never call
+        # Stop-ScheduledTask: that would stop FakeNet and its captures.
+        Unregister-ScheduledTask -TaskName "CyberCore-FakeNet-$AttemptId" -Confirm:$false -ErrorAction SilentlyContinue
+    }
+    $result | ConvertTo-Json -Compress
+    exit $exitCode
 }

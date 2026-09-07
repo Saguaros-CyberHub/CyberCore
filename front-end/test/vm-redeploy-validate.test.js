@@ -184,6 +184,24 @@ test('an active lane recording no machines cannot be rebuilt in place', () => {
   assert.match(v.reason, /whole-lane rebuild/);
 });
 
+test('analysis transitions block both course redeploy modes even after transient progress finishes', () => {
+  for (const state of ['isolating', 'resetting']) {
+    for (const fullLane of [false, true]) {
+      const result = redeployEligibility(lane({ status: 'active', config: { analysis: { state } } }), fullLane);
+      assert.strictEqual(result.ok, false);
+      assert.match(result.reason, /analysis operation/);
+    }
+  }
+});
+
+test('malformed persisted analysis state cannot bypass course redeploy admission', () => {
+  for (const analysis of ['resetting', [], {}, { state: 'unknown' }]) {
+    const result = redeployEligibility(lane({ status: 'active', config: { analysis } }), true);
+    assert.strictEqual(result.ok, false);
+    assert.match(result.reason, /invalid/);
+  }
+});
+
 // ── source-level guards ─────────────────────────────────────────────────────
 
 function redeployHandler() {

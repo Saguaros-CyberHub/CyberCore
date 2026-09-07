@@ -1628,7 +1628,9 @@ async function insertLane(job) {
         ...laneConfig,
         ...(workstations.some(w => w.template.metadata?.analysis_profile === 'malware') ? {
           analysis_profile: 'malware',
-          analysis: { profile: 'malware', state: 'preparation' },
+          // Whole-lane Reset Lab supplies a durable operation marker. Keep
+          // that transition until its caller verifies and adopts this lane.
+          analysis: { state: 'preparation', ...laneConfig?.analysis, profile: 'malware' },
         } : {}),
         template_id: primary.template.id || null,
         template_name: primary.template.os_name || primary.template.template_key,
@@ -1713,23 +1715,12 @@ async function cloneGateway(job) {
     net0: formatLaneGatewayNet0(net.wan),
     net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`,
   });
-  // Malware lanes DO get a tailnet identity, and it is safe because it does not
-  // outlive preparation. applyAnalysisPolicy (utils/malware-network-policy.js)
-  // stops tailscaled, removes it from every runlevel, and replaces the whole
-  // filter table with a deny-by-default allowlist when the student starts
-  // analysis; renderVerification then REFUSES to report success while any
-  // runlevel still lists tailscale or tailscaled is still running. So the tailnet
-  // route exists while an instructor is setting the box up and is provably gone
-  // before anything is detonated.
+  // Malware gateways retain their userspace Tailscale identity in preparation
+  // and analysis. The analysis policy blocks guest-initiated traffic while
+  // preserving replies to connections the gateway initiates into the lane.
   //
-  // Staging nothing was the earlier approach and it was worse in both directions:
-  // it cost the instructor that access, and it left the gateway's firstboot loop
-  // polling /api/lane-bootstrap for its full 10-minute window (60 rounds of
-  // "No claimable token" per lane, times a class) because that loop only breaks
-  // on a response containing "tailscale_authkey".
-  //
-  // DELETE first because this also runs on the Reset Lab path, where
-  // replaceAnalysisGateway destroyed a gateway whose token may still be sitting
+  // DELETE first because this also runs after a whole-lane rebuild, where
+  // teardown destroyed a gateway whose token may still be sitting
   // unclaimed at this vxlan_id — storeLaneBootstrap upserts rather than failing,
   // so without this a fresh clone could claim its predecessor's key.
   await cybercoreQuery('DELETE FROM lane_bootstrap_tokens WHERE vxlan_id = $1', [vxlanId]);

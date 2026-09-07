@@ -431,16 +431,28 @@ router.get('/vms', authenticateToken, async (req, res) => {
     // to the durable operation so a page reload still offers Reset Lab.
     try {
       const recovery = await cybercoreQuery(`SELECT o.requested_vm_id AS id,
-          dl.lane_id, dl.name, dl.name AS lane_name, dl.config AS lane_config,
-          dl.user_id AS lane_owner_id, dl.status AS lane_status,
+          COALESCE(dl.lane_id, o.lane_id) AS lane_id,
+          COALESCE(dl.name, o.reset_plan->'lane'->>'name', 'Malware lab') AS name,
+          COALESCE(dl.name, o.reset_plan->'lane'->>'name', 'Malware lab') AS lane_name,
+          COALESCE(dl.config, jsonb_build_object(
+            'subnet_scheme', 'v2', 'analysis_profile', 'malware', 'module_key', 'crucible',
+            'analysis', jsonb_build_object('profile', 'malware', 'state', o.state,
+              'action', o.action, 'operation_id', o.operation_id, 'message', o.message))) AS lane_config,
+          COALESCE(dl.user_id, o.owner_user_id) AS lane_owner_id,
+          COALESCE(dl.status, 'deploying') AS lane_status,
           'malware' AS analysis_profile
-        FROM cybercore_analysis_operation o JOIN cybercore_lane dl ON dl.lane_id = o.lane_id
-        WHERE dl.config->'analysis'->>'operation_id' = o.operation_id::text
-          AND o.state IN ('isolating', 'resetting', 'error') AND ${claimsSql('dl')}
-          AND ($2::boolean OR (o.owner_user_id = $1 AND dl.user_id = $1))
+        FROM cybercore_analysis_operation o LEFT JOIN cybercore_lane dl ON dl.lane_id = o.lane_id
+        WHERE o.state IN ('isolating', 'resetting', 'error')
+          AND ((dl.config->'analysis'->>'operation_id' = o.operation_id::text AND ${claimsSql('dl')})
+            OR (dl.lane_id IS NULL AND o.action = 'reset' AND o.reset_plan->>'version' = '1'
+              AND o.reset_plan->'lane'->>'user_id' = o.owner_user_id::text
+              AND o.reset_plan->'deployment'->>'userId' = o.owner_user_id::text))
+          AND ($2::boolean OR (o.owner_user_id = $1 AND (dl.lane_id IS NULL OR dl.user_id = $1)))
+          AND NOT EXISTS (SELECT 1 FROM cybercore_analysis_operation successor
+            WHERE successor.reset_plan->>'previousOperationId' = o.operation_id::text)
           AND NOT EXISTS (SELECT 1 FROM cybercore_vm_instance vi
             JOIN cybercore_resource r ON r.resource_id = vi.resource_id
-            WHERE r.metadata->>'lane_id' = dl.lane_id::text
+            WHERE r.metadata->>'lane_id' = o.lane_id::text
               AND vi.destroyed_at IS NULL AND r.status != 'retired')`, [userId, showAll]);
       for (const row of recovery.rows) {
         vms.push({ id: row.id, name: row.name, displayName: row.lane_name,
@@ -597,8 +609,8 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
     const malwareConsole = vmRow.analysis_profile === 'malware'
       || require('../utils/malware-analysis-state').isMalwareLane(vmRow.lane_config || {});
     if (malwareConsole && (!vmRow.lane_config
-        || !['preparation', 'analysis'].includes(vmRow.lane_config.analysis?.state || 'preparation'))) {
-      return res.status(409).json({ error: 'The malware lab is securing, resetting, or needs recovery. Wait for the lab to be ready before opening its console.' });
+        || !['preparation', 'analysis', 'error'].includes(vmRow.lane_config.analysis?.state || 'preparation'))) {
+      return res.status(409).json({ error: 'The malware lab is securing or resetting. Wait for the operation to finish before opening its console.' });
     }
 
     // Resolve Guacamole connection ID. Priority:

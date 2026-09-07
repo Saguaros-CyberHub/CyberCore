@@ -275,6 +275,27 @@ function cloudInitConfigFor(vmid) {
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
+test('malware provisioning preserves a whole-lane reset marker until its caller completes it', async () => {
+  const malware = { ...WIN, metadata: { ...WIN.metadata, analysis_profile: 'malware' } };
+  for (const analysis of [undefined, {
+    profile: 'malware', state: 'resetting', action: 'reset', operation_id: 'reset-operation',
+    message: 'Restoring the clean gateway and workstation...',
+  }]) {
+    reset();
+    const result = await laneDeployer.deployLanes({
+      users: USERS, template: malware, vxlanBlock: BLOCK,
+      laneConfig: { course_id: 'course', ...(analysis ? {
+        analysis, workstation_redeploy: { id: 'replacement-marker', source_lane_id: 'old-lane' },
+      } : {}) },
+    });
+    assert.strictEqual(result.failed.length, 0);
+    const config = [...lanes.values()][0].config;
+    assert.strictEqual(config.analysis_profile, 'malware');
+    assert.deepStrictEqual(config.analysis, analysis || { state: 'preparation', profile: 'malware' });
+    if (analysis) assert.strictEqual(config.workstation_redeploy.id, 'replacement-marker');
+  }
+});
+
 // ── 1. single template: unchanged shape ──────────────────────────────────────
 test('single template keeps the pre-slot lane shape', async () => {
   reset();

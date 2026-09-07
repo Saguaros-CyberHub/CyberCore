@@ -251,7 +251,7 @@ async function resolveCourseLab(challengeId) {
  *   boot. Pre-validated by the route with laneDeployer.normalizeResourceSpec;
  *   omitted fields keep the catalog template's own sizing.
  */
-async function provisionLanes({ courseId, challenge, template, templates, students, courseName, courseCode, resources, progressId, progressLabel }) {
+async function provisionLanes({ courseId, challenge, template, templates, students, courseName, courseCode, resources, progressId, progressLabel, laneConfig = {} }) {
   if (!students.length) return { provisioned: [], failed: [], progressId: null };
 
   const vxlanBlock = challenge.vxlan_block || challenge.spec?.vxlan_block;
@@ -271,6 +271,7 @@ async function provisionLanes({ courseId, challenge, template, templates, studen
     // config.course_id is how every CLE read path finds these lanes again —
     // listing, counts, teardown. It must be on every lane.
     laneConfig: {
+      ...laneConfig,
       cle: true,
       course_id: courseId,
       challenge_key: challenge.challenge_key,

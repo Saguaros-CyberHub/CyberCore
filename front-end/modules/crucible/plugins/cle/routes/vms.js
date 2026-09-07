@@ -30,6 +30,7 @@ const {
 const vmResize = require('../../../../../src/utils/vm-resize');
 const { runBatch } = require('../../../../../src/utils/batch-deployer');
 const laneDeployer = require('../../../../../src/utils/lane-deployer');
+const workstationRedeploy = require('../../../../../src/utils/workstation-lane-redeploy');
 const { normalizeResourceSpec, WORKSTATION_MAX_SLOTS } = laneDeployer;
 const { buildLaneTopology } = require('../../../../../src/utils/lane-topology');
 const laneProvision = require('../utils/lane-provision');
@@ -374,6 +375,14 @@ function machineSlotsOf(lane) {
  * it, and this is the belt.
  */
 function redeployEligibility(lane, fullLane) {
+  const analysis = lane.config?.analysis;
+  if (analysis != null && (typeof analysis !== 'object' || Array.isArray(analysis)
+      || !['preparation', 'isolating', 'analysis', 'resetting', 'error'].includes(analysis.state))) {
+    return { ok: false, reason: 'the lane analysis state is invalid and needs administrator recovery' };
+  }
+  if (['isolating', 'resetting'].includes(lane.config?.analysis?.state)) {
+    return { ok: false, reason: 'an analysis operation is already running on this lane' };
+  }
   if (lane.status === 'deploying') {
     return { ok: false, reason: 'a deploy or rebuild is already running on this lane' };
   }
@@ -1388,33 +1397,10 @@ async function runFullLaneRebuild(ctx, progressId) {
   let done = 0;
   for (const lane of lanes) {
     try {
-      const cfg = lane.config || {};
-      const recorded = Array.isArray(cfg.workstations) ? cfg.workstations : [];
-      const templateIds = recorded.length
-        ? recorded.slice().sort((a, b) => a.slot - b.slot).map(w => w.template_id)
-        : [cfg.template_id];
-      const resources = recorded.length
-        ? recorded.slice().sort((a, b) => a.slot - b.slot).map(w => w.resources || null)
-        : (cfg.resources || null);
-
-      const templates = [];
-      for (const id of templateIds) templates.push(await loadWorkstationTemplate(id));
-
-      const teardown = await laneDeployer.teardownLanes([lane.lane_id]);
-      if (teardown.lanes_kept_for_retry > 0) {
-        throw new Error(
-          `Could not fully tear the lane down (${(teardown.errors || [])[0] || 'machines survived'}), so it was not rebuilt.`);
-      }
-
-      await laneProvision.provisionLanes({
-        courseId, challenge, templates, resources,
-        students: [{ id: lane.user_id, email: lane.student_email }],
-        courseName, courseCode,
-        // Publish under the claim this route already holds, not under the
-        // provision key — otherwise the two progress endpoints disagree and
-        // deployLanes finishes a claim that is not its own.
-        progressId, progressLabel: `Rebuild \u2014 ${courseName}`,
+      const plan = await workstationRedeploy.prepareWholeLaneRedeploy({
+        lane, course: ctx.course || { course_id: courseId, course_name: courseName, code: courseCode }, challenge,
       });
+      await workstationRedeploy.redeployWholeLane({ plan, progressId });
       progress.succeeded++;
     } catch (e) {
       progress.failed++;
@@ -1936,7 +1922,7 @@ router.get('/:laneId/console', instructorOnly, async (req, res) => {
 
     const config = laneRes.rows[0].config || {};
     if (require('../../../../../src/utils/malware-analysis-state').isMalwareLane(config)
-        && !['preparation', 'analysis'].includes(config.analysis?.state || 'preparation')) {
+        && !['preparation', 'analysis', 'error'].includes(config.analysis?.state || 'preparation')) {
       return res.status(409).json({ error: 'Wait for the malware lab to finish securing or resetting before opening its console.' });
     }
     const connId = config.guac_connection_id;

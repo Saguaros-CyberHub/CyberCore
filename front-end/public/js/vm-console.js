@@ -278,7 +278,7 @@ const VmWorkspaces = (() => {
       error: 'Analysis is not ready',
     };
     const startLabel = analysis.state === 'analysis' ? 'Analysis Active'
-      : analysis.state === 'isolating' ? 'Securing Lab…' : 'Start Analysis';
+      : analysis.state === 'isolating' ? 'Securing Lab…' : analysis.state === 'error' ? 'Retry Setup' : 'Start Analysis';
     const tone = analysis.state === 'analysis' ? 'ready' : analysis.state === 'error' ? 'error' : 'pending';
     return `
       <div class="vml-analysis-status vml-analysis-${tone}" role="status" aria-live="polite">
@@ -310,10 +310,13 @@ const VmWorkspaces = (() => {
 
   function _applyAnalysis(vmId, analysis) {
     const source = _vms.get(vmId);
-    const laneKey = analysis.laneId || _laneKey(source);
+    const previousLaneKey = _laneKey(source);
+    const laneKey = analysis.laneId || previousLaneKey;
     const affected = [];
     for (const [id, vm] of _vms) {
-      if (id !== vmId && (!laneKey || _laneKey(vm) !== laneKey)) continue;
+      const sameLane = (laneKey && _laneKey(vm) === laneKey)
+        || (previousLaneKey && _laneKey(vm) === previousLaneKey);
+      if (id !== vmId && !sameLane) continue;
       if (vm.analysis?.profile !== 'malware') continue;
       vm.analysis = { ...analysis };
       affected.push(id);
@@ -376,6 +379,11 @@ const VmWorkspaces = (() => {
           Toast.success('Lab reset', 'Your clean lab is ready. All previous files and changes were removed.');
         } else if (analysis.state === 'error') {
           Toast.error('Lab needs attention', analysis.message || 'The operation could not be completed.');
+          // Keep a disconnected setup console usable for diagnostics without
+          // treating a failed simulation check as analysis readiness.
+          if (operation.action === 'start') {
+            for (const id of affected) await VmConsole.reconnect(id);
+          }
         }
         await _refreshViews();
       } catch (err) {
@@ -397,7 +405,7 @@ const VmWorkspaces = (() => {
     const key = _laneKey(vm);
     if (_posting.has(key) || ['isolating', 'resetting'].includes(vm.analysis.state)) return;
     if (action === 'start' ? !vm.analysis.canStart : !vm.analysis.canReset) return;
-    if (action === 'reset' && !window.confirm('Reset this lab? All downloaded files, samples, and changes on every machine in this lab will be deleted. The workstation and gateway will be rebuilt from their clean templates.')) return;
+    if (action === 'reset' && !window.confirm('Rebuild this whole lab, as in Courses → Redeploy? All downloaded files, samples, and changes on every machine in this lab will be deleted. The lane, gateway, workstations, and console connection will be recreated.')) return;
 
     _posting.add(key);
     _applyAnalysis(vmId, {
