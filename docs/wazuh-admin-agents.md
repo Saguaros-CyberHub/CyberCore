@@ -31,7 +31,8 @@ WAZUH_DASHBOARD_URL=https://wazuh.example.edu
 
 Replace `X.Y.Z-1` with an available package version compatible with your manager.
 There is no implicit latest version. Use an API account permitted to list agents,
-create agents and read their enrollment keys. CyberCore holds that account's
+create agents, read their enrollment keys and delete agents (`agent:delete`)
+for lane cleanup. CyberCore holds that account's
 credentials; each VM receives only its own agent enrollment key.
 
 To assign lane agents to an existing Wazuh group, set:
@@ -131,6 +132,14 @@ deployment metadata and interfaces. Internet-disabled and malware analysis lanes
 are refused. Upstream firewalls must also permit the manager connection; this
 action changes only the selected lane gateway.
 
+For the lab transit network, the upstream firewall also needs IPv4 TCP access
+from `100.100.60.0/22` to the manager `100.100.20.10` on destination port `1514`.
+Lane traffic is masqueraded to each gateway's WAN address. In OPNsense, apply the
+pass rule on the lab transit interface and use its normal route, with no WAN
+policy-routing gateway selected. Keep the destination host and port restricted.
+The live firewall log can identify a remaining upstream block after the lane
+gateway rule accepts packets. See [OPNsense firewall rules](https://docs.opnsense.org/manual/firewall.html).
+
 Use a stable IPv4 manager address or a hostname resolving to one IPv4 address.
 The rule is restricted to that resolved address. If the manager address changes,
 review the existing tagged rule and restart hook before retrying; CyberCore
@@ -178,6 +187,44 @@ settings. Configure log collection, Windows audit policy, Sysmon and Linux audit
 sources for the intended exercises using Wazuh's configuration tools. No new
 active-response policy is enabled by the CyberCore batch workflow.
 
+A fresh Windows MSI uses `0.0.0.0` as its default manager address. CyberCore
+replaces that placeholder only when the agent has no enrollment key. A real
+alternate manager or a conflicting key still stops installation. Removing the
+server-side registration alone does not change `ossec.conf` on the guest.
+
+## Removing agents and destroying lanes
+
+Full lane destruction automatically queues removal of its managed Wazuh
+registrations. The latest saved agent identities are copied to a durable cleanup
+table in the same database statement that deletes the lane. New installations
+are refused once teardown starts. If VM teardown fails, the lane and its agent
+registrations remain available for the teardown retry.
+
+The cleanup worker verifies the saved manager, unique lane/VM agent name and
+agent ID before removal. It never selects agents by `StudentVM` membership,
+reused VMID or disconnected status alone. Registrations created by unrelated
+manual installers are outside this automatic cleanup scope.
+
+If Wazuh is unavailable, the lane's completed VM teardown can finish while the
+removal job persists and retries after an app restart. Successful or absent
+registrations are checked again during a 15-minute grace period to catch an
+enrollment request that was still in flight when the lane disappeared. A changed
+manager or conflicting identity leaves a pending error for review. The cleanup
+schema and worker initialize automatically when the app starts; no additional
+environment variables are required.
+
+For manual removal, run this **on the Wazuh manager**, replacing `AGENT_ID` with
+the specific registration ID shown in Wazuh:
+
+```sh
+/var/ossec/bin/manage_agents -r AGENT_ID
+```
+
+This removes the server registration; it does not uninstall software on a
+running VM. Keep the registration for a CyberCore-managed VM you intend to retry,
+since retries reuse its saved identity. See the official
+[Wazuh CLI removal instructions](https://documentation.wazuh.com/current/user-manual/agent/agent-management/remove-agents/remove.html).
+
 This Admin action is an explicit batch operation. The existing GOAD deployment
 scripts continue to install agents for a selected lane-local SIEM extension;
 central automatic enrollment on future deployments is a separate lifecycle hook.
@@ -193,6 +240,8 @@ central automatic enrollment on future deployments is a separate lifecycle hook.
 - `front-end/src/utils/wazuh-agent-scripts.js`: Windows and Linux installers.
 - `front-end/src/utils/wazuh-gateway-access.js`: verified, persistent manager
   TCP 1514 access on the selected lane gateway.
+- `front-end/src/utils/wazuh-agent-cleanup.js`: durable agent-removal jobs and
+  retry worker for destroyed lanes.
 
 Enrollment follows Wazuh's documented [API client-key workflow](https://documentation.wazuh.com/current/user-manual/agent/agent-enrollment/enrollment-methods/via-manager-API/requesting-the-key.html)
 and [key import procedure](https://documentation.wazuh.com/current/user-manual/agent/agent-enrollment/enrollment-methods/via-manager-API/importing-the-key.html).

@@ -78,11 +78,19 @@ test('the gate in teardownLanes keys on errors, not on warnings', () => {
   // means bookkeeping in another system (a Guacamole 403) that holds nothing on
   // the cluster. Keying the row decision on warnings would leave every torn-down
   // machine on screen as a permanent ERROR after one Guacamole hiccup.
-  assert.match(src, /if \(errors\.length === 0\) \{[\s\S]{0,400}?DELETE FROM cybercore_lane/,
-    'the row delete must sit inside the errors.length === 0 branch');
   const gateStart = src.indexOf('let deleted = 0;');
   assert.notStrictEqual(gateStart, -1);
-  const gate = src.slice(gateStart, gateStart + 1600);
+  const gateEnd = src.indexOf('\n  console.log(', gateStart);
+  assert.ok(gateEnd > gateStart);
+  const gate = src.slice(gateStart, gateEnd);
+  const failureBranch = gate.indexOf('\n  } else {');
+  assert.notStrictEqual(failureBranch, -1);
+  const success = gate.slice(0, failureBranch);
+  assert.match(success, /^let deleted = 0;\s+if \(errors\.length === 0\) \{/,
+    'the only row-delete branch must remain gated on no teardown errors');
+  assert.strictEqual((success.match(/DELETE FROM cybercore_lane/g) || []).length, 1);
+  assert.ok(!/DELETE FROM cybercore_lane/.test(gate.slice(failureBranch)),
+    'the failure branch must never delete retained lane rows');
 
   // warnings.length IS referenced in the gate — to log the Guacamole/workspace
   // failures after the fact. What must never happen is it being consulted BEFORE
@@ -96,6 +104,26 @@ test('the gate in teardownLanes keys on errors, not on warnings', () => {
       'warnings.length is consulted before the row delete — it must only be reported after it');
   }
   assert.match(gate, /status = 'error'/, 'a failed teardown must keep the row for retry');
+});
+
+test('the single lane DELETE atomically hands the latest safe registration metadata to cleanup', () => {
+  const src = read(DEPLOYER);
+  const statement = src.match(/`WITH removed AS \([\s\S]*?SELECT lane_id FROM removed`/)?.[0];
+  assert.ok(statement, 'DELETE and outbox INSERT must share one database statement');
+  assert.match(statement, /DELETE FROM cybercore_lane[\s\S]*RETURNING lane_id, config/);
+  assert.match(statement, /INSERT INTO cybercore_wazuh_cleanup \(lane_id, registrations\)/);
+  assert.match(statement, /jsonb_each\(CASE[\s\S]*removed\.config->'wazuh_agent_jobs'/,
+    'handoff must use the deleted row rather than the initial teardown snapshot');
+  const selectedFields = [...statement.matchAll(/'([a-z_]+)', job\.value->>?'/g)].map(match => match[1]);
+  assert.deepStrictEqual(selectedFields, ['job_id', 'vm_id', 'manager', 'agent_id', 'agent_name'],
+    'outbox must retain only registration identity, never keys or unrelated lane configuration');
+  assert.match(statement, /registrations = cybercore_wazuh_cleanup\.registrations \|\| EXCLUDED\.registrations/);
+  assert.match(statement, /retain_until = GREATEST\(/);
+  const teardown = src.slice(src.indexOf('async function teardownLanes('));
+  assert.ok(teardown.indexOf('await wazuhCleanup.ensureSchema()') < teardown.indexOf("proxmoxAPI('GET'"),
+    'missing outbox schema must fail before infrastructure is touched');
+  assert.ok(teardown.indexOf('wazuh_teardown_started: true') < teardown.indexOf("proxmoxAPI('GET'"),
+    'new enrollment jobs must be blocked before VM teardown');
 });
 
 // ── the delegating routes ───────────────────────────────────────────────────

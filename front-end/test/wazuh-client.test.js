@@ -30,6 +30,7 @@ function harness(handler = () => emptyAgents, overrides = {}) {
         res.destroy = () => { state.destroyed++; };
         callback(res);
         if (res.statusCode < 200 || res.statusCode >= 300) return;
+        if (answer?.aborted) { res.emit('aborted'); return; }
         const payload = url.pathname === '/security/user/authenticate' && !answer?.authBody
           ? TOKEN : (answer?.authBody || answer?.body || answer);
         res.emit('data', Buffer.from(typeof payload === 'string' ? payload : JSON.stringify(payload)));
@@ -335,5 +336,141 @@ test('group assignment refuses invalid IDs and mismatched or malformed membershi
     const malformed = harness(() => ({ error: 0, data: { affected_items: [item], total_affected_items: 1 } }));
     await assert.rejects(malformed.client.ensureAgentGroup('001', 'StudentVM'), /WAZUH_AGENT_GROUP/);
     assert.equal(malformed.state.calls.some(call => call.opts.method === 'PUT'), false);
+  }
+});
+
+const CLEANUP_NAME = `cc-${'a'.repeat(32)}-610811-${'b'.repeat(32)}`;
+const cleanupRead = (id = '016', name = CLEANUP_NAME) => ({ error: 0, data: {
+  affected_items: [{ id, name }], total_affected_items: 1, total_failed_items: 0, failed_items: [],
+} });
+const cleanupMissing = (id = '016') => ({ error: 1, data: { affected_items: [], total_affected_items: 0,
+  total_failed_items: 1, failed_items: [{ error: { code: 1701, message: SECRET }, id: [id] }],
+} });
+const cleanupDeleted = (id = '016') => ({ error: 0, data: {
+  affected_items: [id], total_affected_items: 1, total_failed_items: 0, failed_items: [],
+} });
+
+test('registration cleanup reads exact identity, filters deletion by ID and name, then confirms absence', async () => {
+  let deleted = false;
+  const h = harness((url, opts, body) => {
+    if (url.pathname !== '/agents') return emptyAgents;
+    assert.equal(url.searchParams.get('agents_list'), '016');
+    if (opts.method === 'GET') {
+      assert.equal(url.searchParams.get('select'), 'id,name');
+      return deleted ? cleanupMissing() : cleanupRead();
+    }
+    assert.equal(opts.method, 'DELETE');
+    assert.equal(url.searchParams.get('name'), CLEANUP_NAME);
+    assert.equal(url.searchParams.get('status'), 'all');
+    assert.equal(url.searchParams.get('older_than'), '0s');
+    assert.equal(url.searchParams.has('purge'), false);
+    assert.equal(body, undefined);
+    deleted = true;
+    return cleanupDeleted();
+  });
+  assert.deepEqual(await h.client.deleteAgent('016', CLEANUP_NAME), { id: '016', name: CLEANUP_NAME, already_absent: false });
+  assert.deepEqual(h.state.calls.filter(call => call.url.pathname === '/agents').map(call => call.opts.method), ['GET', 'DELETE', 'GET']);
+});
+
+test('cleanup accepts only an exact missing-ID response as idempotent absence without deleting', async () => {
+  const h = harness(() => cleanupMissing());
+  assert.deepEqual(await h.client.deleteAgent('016', CLEANUP_NAME), { id: '016', name: CLEANUP_NAME, already_absent: true });
+  assert.equal(h.state.calls.some(call => call.opts.method === 'DELETE'), false);
+  for (const response of [cleanupMissing('999'), { ...cleanupMissing(), error: 2 }, emptyAgents,
+    { error: 1, data: { ...cleanupMissing().data, failed_items: [{ error: { code: 1701 }, id: ['016', '999'] }] } },
+    { error: 1, data: { ...cleanupMissing().data, failed_items: [{ error: { code: 4000 }, id: ['016'] }] } }]) {
+    const malformed = harness(() => response);
+    await assert.rejects(malformed.client.deleteAgent('016', CLEANUP_NAME), error => error.status === 502 && !error.message.includes(SECRET));
+    assert.equal(malformed.state.calls.some(call => call.opts.method === 'DELETE'), false);
+  }
+});
+
+test('cleanup refuses unsafe IDs, manager IDs and names outside the generated CyberCore identity format', async () => {
+  const h = harness();
+  for (const id of ['000', '0', '016,017', 'all', '../016', '016&name=other', '123456789', null]) {
+    await assert.rejects(h.client.deleteAgent(id, CLEANUP_NAME), { status: 400 });
+  }
+  for (const name of ['cc-test', '016', `${CLEANUP_NAME}*`, `${CLEANUP_NAME}&name=other`,
+    CLEANUP_NAME.replace('-610811-', '-0-'), CLEANUP_NAME.replace('-610811-', '-9007199254740992-'), undefined]) {
+    await assert.rejects(h.client.deleteAgent('016', name), { status: 400 });
+  }
+  assert.equal(h.state.calls.length, 0);
+});
+
+test('cleanup refuses reused IDs or mismatched, duplicate and partial identity responses before deletion', async () => {
+  for (const [answer, status] of [
+    [cleanupRead('016', `cc-${'c'.repeat(32)}-610811-${'d'.repeat(32)}`), 409],
+    [cleanupRead('999'), 502],
+    [{ error: 0, data: { ...cleanupRead().data, affected_items: [cleanupRead().data.affected_items[0], cleanupRead().data.affected_items[0]] } }, 502],
+    [{ error: 2, data: { ...cleanupRead().data, total_failed_items: 1, failed_items: [{ error: { code: 1701, message: SECRET }, id: ['999'] }] } }, 502],
+  ]) {
+    const h = harness(() => answer);
+    await assert.rejects(h.client.deleteAgent('016', CLEANUP_NAME), error => error.status === status && !error.message.includes(SECRET));
+    assert.equal(h.state.calls.some(call => call.opts.method === 'DELETE'), false);
+  }
+});
+
+test('the server-side name filter prevents deleting an identity replaced after the client preflight', async () => {
+  let deleted = false;
+  const replacement = `cc-${'c'.repeat(32)}-610811-${'d'.repeat(32)}`;
+  const h = harness((url, opts) => {
+    if (opts.method === 'DELETE') {
+      deleted = url.searchParams.get('name') === replacement;
+      return { error: 1, data: { affected_items: [], total_affected_items: 0,
+        total_failed_items: 1, failed_items: [{ error: { code: 1731, message: SECRET }, id: ['016'] }] } };
+    }
+    return cleanupRead();
+  });
+  await assert.rejects(h.client.deleteAgent('016', CLEANUP_NAME), { status: 502 });
+  assert.equal(deleted, false);
+  assert.equal(h.state.calls.filter(call => call.opts.method === 'DELETE').length, 1);
+});
+
+test('a lost deletion response is successful only when a fresh exact read confirms absence', async () => {
+  for (const lostResponse of [{ error: new Error(`lost response ${SECRET}`) }, { aborted: true }]) {
+    for (const after of [cleanupMissing(), cleanupRead(), cleanupRead('016', 'another-host')]) {
+      let reads = 0;
+      const h = harness((url, opts) => {
+        if (url.pathname !== '/agents') return emptyAgents;
+        if (opts.method === 'GET') return ++reads === 1 ? cleanupRead() : after;
+        return lostResponse;
+      });
+      if (after.error === 1) assert.equal((await h.client.deleteAgent('016', CLEANUP_NAME)).already_absent, false);
+      else await assert.rejects(h.client.deleteAgent('016', CLEANUP_NAME), error => !error.message.includes(SECRET));
+      assert.equal(reads, 2);
+      assert.equal(h.state.calls.filter(call => call.opts.method === 'DELETE').length, 1);
+    }
+  }
+});
+
+test('malformed or partial deletion responses fail closed without treating them as lost responses', async () => {
+  for (const response of [{ body: `invalid-json ${SECRET}` }, cleanupDeleted('999'),
+    { error: 0, data: { ...cleanupDeleted().data, affected_items: ['016', '017'], total_affected_items: 2 } },
+    { error: 2, data: { ...cleanupDeleted().data, total_failed_items: 1, failed_items: [{ error: { code: 1701, message: SECRET }, id: ['999'] }] } },
+    { error: 0, data: { affected_items: ['016'], total_affected_items: 1 } },
+    { statusCode: 403, body: SECRET }]) {
+    let reads = 0;
+    const h = harness((url, opts) => {
+      if (url.pathname !== '/agents') return emptyAgents;
+      if (opts.method === 'GET') { reads++; return reads === 1 ? cleanupRead() : cleanupMissing(); }
+      return response;
+    });
+    await assert.rejects(h.client.deleteAgent('016', CLEANUP_NAME), error => error.status === 502 && !error.message.includes(SECRET));
+    assert.equal(reads, 1);
+    assert.equal(h.state.calls.filter(call => call.opts.method === 'DELETE').length, 1);
+  }
+});
+
+test('a successful deletion response still requires a fresh read and never deletes a replacement identity', async () => {
+  for (const replacement of [cleanupRead(), cleanupRead('016', 'another-host')]) {
+    let reads = 0;
+    const h = harness((url, opts) => {
+      if (url.pathname !== '/agents') return emptyAgents;
+      if (opts.method === 'GET') return ++reads === 1 ? cleanupRead() : replacement;
+      return cleanupDeleted();
+    });
+    await assert.rejects(h.client.deleteAgent('016', CLEANUP_NAME));
+    assert.equal(reads, 2);
+    assert.equal(h.state.calls.filter(call => call.opts.method === 'DELETE').length, 1);
   }
 });

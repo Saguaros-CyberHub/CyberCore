@@ -34,6 +34,8 @@ const calls = {
   configs: [],       // { vmid, body }
   starts: [],        // vmid
   deletes: [],       // vmid
+  cleanup: [],       // durable Wazuh cleanup snapshots, after VM teardown
+  cleanupWakeups: [],
   dnsmasqFiles: [],  // { gatewayVmid, path, content }
   pctExecs: [],      // { gatewayVmid, script }
 };
@@ -41,6 +43,11 @@ let gatewayAccessShouldFail = false;
 let dnsmasqShouldBeDown = false;   // model a gateway whose dnsmasq refused to start
 let cloudInitDriveOnClone = false; // model a template that actually ships a cloud-init drive
 let agentIpOverride = null;   // force the guest-agent IP, to model a bad DHCP lease
+let cleanupSchemaFailure = false;
+let cleanupInsertFailure = false;
+let cleanupWakeFailure = false;
+let teardownVmDeleteFailure = null;
+let afterVmDelete = null;
 
 /** Poll until `fn()` is true or the budget expires — the IP confirm is detached. */
 async function waitFor(fn, ms = 2000) {
@@ -84,7 +91,12 @@ stubModule('proxmox.js', {
       return 'UPID:node1:clone';
     }
     if (method === 'POST' && url.endsWith('/status/start')) { calls.starts.push(vmid); return 'UPID:node1:start'; }
-    if (method === 'DELETE') { calls.deletes.push(vmid); macByVmid.delete(vmid); vmMeta.delete(vmid); return null; }
+    if (method === 'DELETE') {
+      if (vmid === teardownVmDeleteFailure) throw new Error('fixture VM delete refused');
+      calls.deletes.push(vmid); macByVmid.delete(vmid); vmMeta.delete(vmid);
+      if (afterVmDelete) afterVmDelete(vmid);
+      return null;
+    }
     if (url.includes('/agent/network-get-interfaces')) {
       const mac = macByVmid.get(vmid);
       if (!mac && !agentIpOverride) throw new Error('no agent');
@@ -140,7 +152,7 @@ stubModule('cybercore-db.js', {
       return { rows: [] };
     }
     if (/SELECT lane_id, vxlan_id, status, config FROM cybercore_lane/.test(sql)) {
-      return { rows: args[0].map(id => lanes.get(id)).filter(Boolean) };
+      return { rows: args[0].map(id => lanes.get(id)).filter(Boolean).map(row => structuredClone(row)) };
     }
     if (/INSERT INTO cybercore_resource/.test(sql)) {
       return { rows: [{ resource_id: `res-${Math.random().toString(16).slice(2, 8)}` }] };
@@ -153,6 +165,18 @@ stubModule('cybercore-db.js', {
     }
     if (/SELECT DISTINCT vxlan_id FROM cybercore_lane/.test(sql)) return { rows: [] };
     if (/DELETE FROM cybercore_lane/.test(sql)) {
+      assert.match(sql, /WITH removed AS \([\s\S]*RETURNING lane_id, config/);
+      assert.match(sql, /INSERT INTO cybercore_wazuh_cleanup[\s\S]*FROM removed/);
+      assert.strictEqual(args.length, 1, 'cleanup must read DELETE RETURNING, not receive an earlier config snapshot');
+      if (cleanupInsertFailure) throw new Error('fixture outbox INSERT failed');
+      for (const id of args[0]) {
+        const lane = lanes.get(id);
+        if (!lane) continue;
+        const registrations = Object.values(lane.config.wazuh_agent_jobs || {}).filter(value => value && typeof value === 'object')
+          .map(job => Object.fromEntries(['job_id', 'vm_id', 'manager', 'agent_id', 'agent_name']
+            .filter(key => job[key] != null).map(key => [key, job[key]])));
+        calls.cleanup.push({ lane_id: id, registrations });
+      }
       for (const id of args[0]) lanes.delete(id);
       return { rowCount: args[0].length, rows: [] };
     }
@@ -215,6 +239,13 @@ stubModule('site-config.js', {
 stubModule('guacamole.js', { guacAPI: async () => ({ identifier: `guac-${Math.random().toString(16).slice(2, 8)}` }) });
 stubModule('guac-credentials.js', { ensureGuacUser: async () => true, getGuacCredentials: async () => null });
 stubModule('tailscale.js', { deleteLaneDevices: async () => 0, isEnabled: () => false });
+stubModule('wazuh-agent-cleanup.js', {
+  ensureSchema: async () => { if (cleanupSchemaFailure) throw new Error('fixture cleanup schema unavailable'); },
+  kickWorker: async () => {
+    calls.cleanupWakeups.push(true);
+    if (cleanupWakeFailure) throw new Error('fixture Wazuh unavailable');
+  },
+});
 
 // lane-networking is mostly pure maths we want to exercise for real; only the
 // Tailscale call reaches the network.
@@ -265,6 +296,11 @@ function reset() {
   dnsmasqShouldBeDown = false;
   cloudInitDriveOnClone = false;
   agentIpOverride = null;
+  cleanupSchemaFailure = false;
+  cleanupInsertFailure = false;
+  cleanupWakeFailure = false;
+  teardownVmDeleteFailure = null;
+  afterVmDelete = null;
 }
 
 /** The cloud-init PUT for a workstation (the one carrying ciuser/cipassword). */
@@ -508,6 +544,76 @@ test('teardown destroys every slot, including allocated VMIDs', async () => {
   for (const vmid of slotVmids) {
     assert.ok(calls.deletes.includes(vmid), `slot VMID ${vmid} was never destroyed`);
   }
+  assert.strictEqual(lanes.has(lane.lane_id), false);
+  assert.deepStrictEqual(calls.cleanup, [{ lane_id: lane.lane_id, registrations: [] }],
+    'an ordinary lane needs no Wazuh credentials to finish teardown');
+});
+
+test('teardown captures the latest Wazuh identity atomically and finishes during a Wazuh outage', async () => {
+  reset();
+  await laneDeployer.deployLanes({ users: USERS, template: WIN, vxlanBlock: BLOCK });
+  const lane = [...lanes.values()][0];
+  const job = { job_id: 'enrollment-job', vm_id: 610000, manager: '100.100.20.10', agent_name: 'cc-fixture',
+    agent_key: 'DO-NOT-RETAIN', password: 'DO-NOT-RETAIN', status: 'running' };
+  lane.config.wazuh_agent_jobs = { 610000: job };
+  afterVmDelete = () => {
+    assert.strictEqual(lane.config.wazuh_teardown_started, true, 'block new jobs before guest mutation');
+    job.agent_id = '014'; // An already-running API create finishes after teardown's initial read.
+  };
+  cleanupWakeFailure = true;
+  const result = await laneDeployer.teardownLanes([lane.lane_id]);
+  assert.strictEqual(result.lanes_deleted, 1);
+  assert.strictEqual(result.lanes_kept_for_retry, 0);
+  assert.deepStrictEqual(calls.cleanup, [{ lane_id: lane.lane_id, registrations: [{
+    job_id: job.job_id, vm_id: job.vm_id, manager: job.manager, agent_id: '014', agent_name: job.agent_name,
+  }] }]);
+  assert.strictEqual(calls.cleanupWakeups.length, 1);
+  assert.ok(!JSON.stringify(calls.cleanup).includes('DO-NOT-RETAIN'));
+});
+
+test('cleanup schema failure preserves the lane and all VMs before teardown starts', async () => {
+  reset();
+  await laneDeployer.deployLanes({ users: USERS, template: WIN, vxlanBlock: BLOCK });
+  const lane = [...lanes.values()][0];
+  cleanupSchemaFailure = true;
+  await assert.rejects(laneDeployer.teardownLanes([lane.lane_id]), /schema unavailable/);
+  assert.strictEqual(lanes.has(lane.lane_id), true);
+  assert.strictEqual(calls.deletes.length, 0);
+  assert.strictEqual(calls.cleanup.length, 0);
+  assert.strictEqual(calls.cleanupWakeups.length, 0);
+});
+
+test('outbox INSERT failure cannot discard the lane registration after VM destruction', async () => {
+  reset();
+  await laneDeployer.deployLanes({ users: USERS, template: WIN, vxlanBlock: BLOCK });
+  const lane = [...lanes.values()][0];
+  lane.config.wazuh_agent_jobs = { 610000: { agent_name: 'cc-retained' } };
+  cleanupInsertFailure = true;
+  await assert.rejects(laneDeployer.teardownLanes([lane.lane_id]), /outbox INSERT failed/);
+  assert.ok(calls.deletes.includes(610000));
+  assert.strictEqual(lanes.get(lane.lane_id).config.wazuh_agent_jobs[610000].agent_name, 'cc-retained');
+  assert.strictEqual(calls.cleanup.length, 0);
+  assert.strictEqual(calls.cleanupWakeups.length, 0);
+});
+
+test('failed VM teardown keeps Wazuh registration on the lane and never queues cleanup', async () => {
+  reset();
+  await laneDeployer.deployLanes({ users: USERS, template: WIN, vxlanBlock: BLOCK });
+  const lane = [...lanes.values()][0];
+  lane.config.wazuh_agent_jobs = { 610000: { agent_name: 'cc-surviving' } };
+  teardownVmDeleteFailure = 610000;
+  const originalSetTimeout = global.setTimeout;
+  let result;
+  try {
+    global.setTimeout = (fn, ms, ...args) => originalSetTimeout(fn, ms === 8000 ? 0 : ms, ...args);
+    result = await laneDeployer.teardownLanes([lane.lane_id]);
+  } finally { global.setTimeout = originalSetTimeout; }
+  assert.strictEqual(result.lanes_deleted, 0);
+  assert.strictEqual(result.lanes_kept_for_retry, 1);
+  assert.strictEqual(lanes.get(lane.lane_id).status, 'error');
+  assert.strictEqual(lanes.get(lane.lane_id).config.wazuh_agent_jobs[610000].agent_name, 'cc-surviving');
+  assert.strictEqual(calls.cleanup.length, 0);
+  assert.strictEqual(calls.cleanupWakeups.length, 0);
 });
 
 // ── 6b. a reallocated slot VMID is not destroyed out from under its new owner ─

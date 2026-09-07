@@ -26,12 +26,14 @@ function harness(options = {}) {
     assert.match(sql, /jsonb_set\(config, '\{wazuh_agent_jobs\}'/);
     if (sql.includes("NOT IN ('running', 'queued')")) {
       assert.match(sql, /internet_enabled' IS DISTINCT FROM 'false'::jsonb/);
+      assert.match(sql, /wazuh_teardown_started' IS DISTINCT FROM 'true'::jsonb/);
       assert.match(sql, /job_id' IS NOT DISTINCT FROM \$6::text/);
       assert.match(sql, /status = 'active' OR \(status = 'suspended'/);
       assert.doesNotMatch(sql, /course_id/);
       const [laneId, jobJson, vmId, cutoff, queueCutoff, priorId] = args;
       const previous = state.lane?.config.wazuh_agent_jobs?.[vmId];
       if (!eligible(state.lane) || state.lane.lane_id !== laneId || state.lane.config.internet_enabled === false
+        || state.lane.config.wazuh_teardown_started === true
         || (previous?.job_id || null) !== priorId
         || (previous?.status === 'running' && !(previous.started_at < cutoff))
         || (previous?.status === 'queued' && !(previous.started_at < queueCutoff))) return { rows: [] };
@@ -198,6 +200,7 @@ for (const [label, mutate] of [
   ['suspended lane', state => { state.lane.status = 'suspended'; }],
   ['removed VM', state => { state.lane.config.vms = []; }],
   ['disabled Internet', state => { state.lane.config.internet_enabled = false; }],
+  ['lane destruction', state => { state.lane.config.wazuh_teardown_started = true; }],
   ['stopped guest', state => { state.resources[0].status = 'stopped'; }],
   ['replaced job', state => { state.lane.config.wazuh_agent_jobs['901'].job_id = OTHER_ID; }],
 ]) {
@@ -228,6 +231,26 @@ test('gateway access is prepared before enrollment and installation, and failure
   assert.match(blocked.job().error, /TCP 1514/);
   assert.equal(blocked.state.creates, 0);
   assert.equal(blocked.state.scripts.length, 0);
+});
+
+test('lane destruction disables inventory targets and blocks claims before infrastructure access', async () => {
+  const h = harness();
+  h.state.lane.config.wazuh_teardown_started = true;
+  await assert.rejects(h.start(), /being destroyed/);
+  assert.equal(h.state.scheduled.length, 0);
+  assert.equal(h.state.sql.length, 0);
+  const status = await h.service.status([h.state.lane]);
+  assert.equal(status.lanes[0].runnable, false);
+});
+
+test('destruction during registration preserves the identity for cleanup and prevents guest execution', async () => {
+  const h = harness({ createHook: state => { state.lane.config.wazuh_teardown_started = true; } });
+  await h.start(); await h.run();
+  assert.equal(h.state.creates, 1);
+  assert.equal(h.job().agent_id, '001');
+  assert.equal(h.job().status, 'failed');
+  assert.match(h.job().error, /being destroyed/);
+  assert.equal(h.state.calls.some(call => call[0] === 'windows'), false);
 });
 
 for (const [label, mutate] of [

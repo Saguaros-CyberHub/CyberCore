@@ -335,7 +335,9 @@ function Assert-WazuhOwnership {
   $document = Read-WazuhConfiguration
   $addresses = @($document.SelectNodes('//client/server/address | //client/server-ip | //client/enrollment/manager_address') | ForEach-Object { $_.InnerText.Trim() })
   foreach ($address in $addresses) {
-    $placeholder = $keys.Count -eq 0 -and $address -cin @('', 'MANAGER_IP', 'MANAGER_IP_ADDRESS', 'WAZUH_MANAGER')
+    # The official Windows MSI ships 0.0.0.0 before enrollment; it is a
+    # placeholder only while client.keys contains no agent registration.
+    $placeholder = $keys.Count -eq 0 -and $address -cin @('', '0.0.0.0', 'MANAGER_IP', 'MANAGER_IP_ADDRESS', 'WAZUH_MANAGER')
     if (-not $placeholder -and $address -ine $manager) { Stop-WazuhInstall 'manager-conflict' }
   }
   if ($keys.Count -gt 0 -and $addresses -inotcontains $manager) { Stop-WazuhInstall 'manager-conflict' }

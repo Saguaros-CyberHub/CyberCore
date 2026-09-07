@@ -8,6 +8,7 @@ const REQUEST_TIMEOUT_MS = 15000;
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 const PAGE_SIZE = 500;
 function failure(status, message) { return Object.assign(new Error(message), { status, safe: true }); }
+function transportFailure(status, message) { return Object.assign(failure(status, message), { transportFailure: true }); }
 
 function httpsUrl(value, originOnly = true) {
   let url;
@@ -90,13 +91,13 @@ function createClient(options, deps = {}) {
               res.destroy();
             } else chunks.push(Buffer.from(chunk));
           });
-          res.on('error', () => finish(failure(502, 'Could not read the Wazuh API response.')));
-          res.on('aborted', () => finish(failure(502, 'The Wazuh API response was interrupted.')));
+          res.on('error', () => finish(transportFailure(502, 'Could not read the Wazuh API response.')));
+          res.on('aborted', () => finish(transportFailure(502, 'The Wazuh API response was interrupted.')));
           res.on('end', () => finish(null, Buffer.concat(chunks).toString('utf8')));
         });
-        req.on('error', () => finish(failure(503, 'Could not connect securely to the Wazuh API. Check connectivity and its TLS certificate.')));
+        req.on('error', () => finish(transportFailure(503, 'Could not connect securely to the Wazuh API. Check connectivity and its TLS certificate.')));
         timer = setTimeout(() => {
-          finish(failure(504, 'The Wazuh API request timed out.'));
+          finish(transportFailure(504, 'The Wazuh API request timed out.'));
           req.destroy();
         }, deps.timeoutMs || REQUEST_TIMEOUT_MS);
         req.end(payload || undefined);
@@ -129,7 +130,7 @@ function createClient(options, deps = {}) {
     return authenticating;
   }
 
-  async function api(method, path, body) {
+  async function apiResponse(method, path, body) {
     let raw;
     for (let attempt = 0; attempt < 2; attempt++) {
       const credential = await authenticate();
@@ -142,6 +143,11 @@ function createClient(options, deps = {}) {
     let result;
     try { result = JSON.parse(raw); }
     catch (_) { throw failure(502, 'The Wazuh API returned an invalid response.'); }
+    return result;
+  }
+
+  async function api(method, path, body) {
+    const result = await apiResponse(method, path, body);
     if (result?.error || !result?.data || result.data.total_failed_items > 0) {
       throw failure(502, 'The Wazuh API could not complete the request. Check API permissions and agent state.');
     }
@@ -181,6 +187,55 @@ function createClient(options, deps = {}) {
       throw failure(502, 'The Wazuh API returned an invalid agent registration.');
     }
     return { id: String(item.id), key: typeof item.key === 'string' ? item.key : null };
+  }
+
+  async function deleteAgent(value, expectedName) {
+    const id = String(value);
+    const nameParts = typeof expectedName === 'string'
+      && expectedName.match(/^cc-[a-f0-9]{32}-([1-9][0-9]{0,15})-[a-f0-9]{32}$/);
+    if (!/^[0-9]{3,8}$/.test(id) || Number(id) === 0 || !nameParts || !Number.isSafeInteger(Number(nameParts[1]))) {
+      throw failure(400, 'Provide the exact saved CyberCore Wazuh agent ID and managed name for cleanup.');
+    }
+    const invalidResponse = () => failure(502, 'The Wazuh API returned an invalid cleanup response. Registration removal was not confirmed.');
+    const readRegistration = async () => {
+      const response = await apiResponse('GET', `/agents?agents_list=${id}&select=id,name`);
+      const data = response?.data;
+      if (!data || !Array.isArray(data.affected_items) || !Array.isArray(data.failed_items)) throw invalidResponse();
+      // Exact missing-agent errors are distinct from forbidden or incomplete
+      // inventory results; they alone confirm an absent registration here.
+      if (response.error === 1 && data.total_affected_items === 0 && data.affected_items.length === 0
+        && data.total_failed_items === 1 && data.failed_items.length === 1
+        && data.failed_items[0]?.error?.code === 1701
+        && Array.isArray(data.failed_items[0]?.id) && data.failed_items[0].id.length === 1
+        && data.failed_items[0].id[0] === id) return null;
+      if (response.error !== 0 || data.total_failed_items !== 0 || data.failed_items.length !== 0
+        || data.total_affected_items !== 1 || data.affected_items.length !== 1
+        || data.affected_items[0]?.id !== id || typeof data.affected_items[0]?.name !== 'string') throw invalidResponse();
+      if (data.affected_items[0].name !== expectedName) {
+        throw failure(409, 'The saved Wazuh agent ID belongs to a different identity. Its registration was not removed.');
+      }
+      return data.affected_items[0];
+    };
+    if (!await readRegistration()) return { id, name: expectedName, already_absent: true };
+    const path = `/agents?agents_list=${id}&name=${encodeURIComponent(expectedName)}&status=all&older_than=0s`;
+    let response;
+    try {
+      // The API applies both ID and exact name as server-side eligibility
+      // filters. Wazuh does not expose an atomic identity compare-and-delete.
+      response = await apiResponse('DELETE', path);
+    } catch (error) {
+      // Only a lost transport response may have hidden a completed deletion.
+      // Malformed JSON, rejected requests and partial results fail closed.
+      if (error.transportFailure !== true) throw error;
+      if (await readRegistration()) throw error;
+      return { id, name: expectedName, already_absent: false };
+    }
+    const data = response?.data;
+    if (response?.error !== 0 || !data || data.total_affected_items !== 1 || !Array.isArray(data.affected_items)
+      || data.affected_items.length !== 1 || data.affected_items[0] !== id || data.total_failed_items !== 0
+      || !Array.isArray(data.failed_items) || data.failed_items.length !== 0) throw invalidResponse();
+    if (await readRegistration()) throw failure(502, 'Wazuh still reports the registration after cleanup. Retry after checking the API.');
+    return { id, name: expectedName, already_absent: false };
   }
 
   async function assertGroupExists(value) {
@@ -226,7 +281,7 @@ function createClient(options, deps = {}) {
       throw failure(502, 'Could not assign the agent to WAZUH_AGENT_GROUP. Check that the group exists and the API account can read agents and modify group assignments, then retry.');
     }
   }
-  return { listAgents, createAgent, getAgentKey, assertGroupExists, ensureAgentGroup };
+  return { listAgents, createAgent, getAgentKey, deleteAgent, assertGroupExists, ensureAgentGroup };
 }
 
 function defaultSettings(env = process.env) {

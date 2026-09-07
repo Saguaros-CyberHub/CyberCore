@@ -968,6 +968,17 @@ async function start() {
     // terms as the audit log: no ticket system beats no server.
     await require('./utils/tickets').ensureTicketTables();
 
+    // Keep exact Wazuh registration cleanup durable after a lane row is gone.
+    // The migrations directory has no runner, so existing installs need this.
+    try {
+      const wazuhCleanup = require('./utils/wazuh-agent-cleanup');
+      // Start the retry loop even if the initial database/schema check fails.
+      wazuhCleanup.startWorker();
+      await wazuhCleanup.ensureSchema();
+    } catch (_) {
+      console.error('[Wazuh cleanup] Initialization failed. Check the cleanup table and database permissions; pending removals remain queued.');
+    }
+
     // Schema and crash recovery for persistent malware isolation operations.
     // If unavailable, analysis requests fail; other course tooling stays usable.
     try { await require('./utils/malware-analysis').getService().initialize(); }

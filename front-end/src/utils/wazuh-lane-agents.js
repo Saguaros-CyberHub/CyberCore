@@ -115,6 +115,9 @@ function createService(deps = {}) {
     if (!laneEligible(lane) || !targetsFor(lane).some(t => t.vm_id === vmId)) {
       throw failure(409, 'The selected VM is no longer in an available lane.');
     }
+    if (object(lane.config).wazuh_teardown_started === true) {
+      throw failure(409, 'This lane is being destroyed. Wazuh installation is no longer available.');
+    }
     if (object(lane.config).internet_enabled === false) {
       throw failure(409, 'Lane internet access is disabled. Enable Internet for this lane before installing a Wazuh agent.');
     }
@@ -164,7 +167,8 @@ function createService(deps = {}) {
           const agent = job?.manager === config?.manager && agents.find(item => item.name === job.agent_name
             && (!job.agent_id || String(item.id) === String(job.agent_id)));
           return { vm_id: target.vm_id, name: target.name, platform: target.platform, type: target.type,
-            power_state: live?.status || 'unknown', runnable: laneEligible(lane) && runnableGuest(live) && !isMalwareLane(cfg),
+            power_state: live?.status || 'unknown', runnable: laneEligible(lane) && runnableGuest(live)
+              && !isMalwareLane(cfg) && cfg.wazuh_teardown_started !== true,
             agent: agent ? publicAgent(agent) : null };
         });
         const targetIds = new Set(targets.map(target => target.vm_id));
@@ -319,6 +323,7 @@ function createService(deps = {}) {
       COALESCE(config->'wazuh_agent_jobs', '{}'::jsonb) || jsonb_build_object($3::text, $2::jsonb)), updated_at = NOW()
       WHERE lane_id = $1 AND ${eligibleLaneSql()}
         AND config->'internet_enabled' IS DISTINCT FROM 'false'::jsonb
+        AND config->'wazuh_teardown_started' IS DISTINCT FROM 'true'::jsonb
         AND (${vmJob})->>'job_id' IS NOT DISTINCT FROM $6::text
         AND (COALESCE((${vmJob})->>'status', '') NOT IN ('running', 'queued')
           OR ((${vmJob})->>'status' = 'running' AND (${vmJob})->>'started_at' < $4)

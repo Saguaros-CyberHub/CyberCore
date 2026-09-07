@@ -181,7 +181,7 @@ const initialConfig = manager => `<!-- fixture collector comment -->
 <localfile><log_format>syslog</log_format><location>/var/log/auth.log</location></localfile></ossec_config>
 <ossec_config><syscheck><disabled>no</disabled><directories>/etc</directories></syscheck></ossec_config>`;
 
-function fixture(t, platform, manager, key = record) {
+function fixture(t, platform, manager, key = record, sourceConfig) {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'wazuh-config-test-'));
   t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
   const configDirectory = platform === 'linux' ? path.join(temporary, 'etc') : temporary;
@@ -191,15 +191,15 @@ function fixture(t, platform, manager, key = record) {
     fs.writeFileSync(path.join(temporary, 'bin', 'manage_agents'), 'fixture-only; never execute');
   }
   const configFile = path.join(configDirectory, 'ossec.conf');
-  fs.writeFileSync(configFile, initialConfig(manager));
+  fs.writeFileSync(configFile, sourceConfig ?? initialConfig(manager));
   fs.writeFileSync(path.join(configDirectory, 'client.keys'), key ? key + '\n' : '');
   return { temporary, configFile };
 }
 
 // Only configuration helper definitions run here. No main entry point, package
 // installer, download, key-import process, host service or prevention setting.
-function runConfigurationHelpers(t, platform, { manager = options.manager, key = record, action = 'configure' } = {}) {
-  const { temporary, configFile } = fixture(t, platform, manager, key);
+function runConfigurationHelpers(t, platform, { manager = options.manager, key = record, action = 'configure', sourceConfig } = {}) {
+  const { temporary, configFile } = fixture(t, platform, manager, key, sourceConfig);
   let result;
   if (platform === 'linux') {
     const code = pythonSource.split("if __name__ == '__main__':")[0].replace('import fcntl', 'fcntl = None') + `
@@ -249,6 +249,50 @@ try {
   }
   return { result, config: fs.readFileSync(configFile, 'utf8') };
 }
+
+// Client stanza and event-channel settings from the official Windows 4.14.1
+// default: https://github.com/wazuh/wazuh/blob/v4.14.1/src/win32/ossec.conf
+const windowsDefaultConfig = `<ossec_config>
+  <client>
+    <server>
+      <address>0.0.0.0</address>
+      <port>1514</port>
+      <protocol>tcp</protocol>
+    </server>
+    <crypto_method>aes</crypto_method>
+    <notify_time>20</notify_time>
+    <time-reconnect>60</time-reconnect>
+    <auto_restart>yes</auto_restart>
+  </client>
+  <localfile><location>Application</location><log_format>eventchannel</log_format></localfile>
+  <localfile><location>System</location><log_format>eventchannel</log_format></localfile>
+</ossec_config>`;
+
+test('Windows configures the actual unregistered MSI default and preserves event collection', { skip: !powershell }, t => {
+  const { result, config } = runConfigurationHelpers(t, 'windows', { key: '', sourceConfig: windowsDefaultConfig });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.doesNotMatch(config, /<address>0\.0\.0\.0<\/address>/);
+  assert.match(config, /<address>wazuh\.example\.test<\/address>/);
+  assert.match(config, /<enabled>no<\/enabled>/);
+  for (const value of ['<notify_time>20</notify_time>', '<time-reconnect>60</time-reconnect>',
+    '<auto_restart>yes</auto_restart>', '<location>Application</location>', '<location>System</location>']) {
+    assert.ok(config.includes(value), value);
+  }
+  assert.equal((config.match(/<log_format>eventchannel<\/log_format>/g) || []).length, 2);
+});
+
+test('Windows default-manager exception cannot take over an existing identity or real manager', { skip: !powershell }, t => {
+  for (const [key, sourceConfig, expected] of [
+    [record, windowsDefaultConfig, 'manager-conflict'],
+    [record.replace('001 ', '002 '), windowsDefaultConfig, 'identity-conflict'],
+    ['', windowsDefaultConfig.replace('0.0.0.0', 'lane-siem.example.test'), 'manager-conflict'],
+  ]) {
+    const { result, config } = runConfigurationHelpers(t, 'windows', { key, sourceConfig });
+    assert.equal(result.status, 2, result.stdout + result.stderr);
+    assert.match(result.stdout, new RegExp(expected));
+    assert.equal(config, sourceConfig);
+  }
+});
 
 for (const platform of ['linux', 'windows']) {
   const skip = platform === 'linux' ? !python : !powershell;

@@ -2584,6 +2584,19 @@ async function teardownLanes(laneIds, {
     return { lanes_deleted: 0, vms_destroyed: 0, orphan_disks_swept: 0, errors };
   }
 
+  // Establish durable cleanup before touching the guests. This is a local DB
+  // operation; a Wazuh outage never holds up VM destruction. Stop new agent
+  // jobs from racing teardown while preserving existing registrations for the
+  // final atomic handoff, including an enrollment already in flight.
+  const wazuhCleanup = require('./wazuh-agent-cleanup');
+  await wazuhCleanup.ensureSchema();
+  await cybercoreQuery(
+    `UPDATE cybercore_lane
+        SET config = COALESCE(config, '{}'::jsonb) || $2::jsonb, updated_at = NOW()
+      WHERE lane_id = ANY($1::uuid[])`,
+    [laneIds, JSON.stringify({ wazuh_teardown_started: true })]
+  );
+
   // A VXLAN id is only free-for-reuse while no LIVE lane holds it — an 'error'
   // or 'deleted' lane releases it (allocateVxlanIds and the
   // ux_cybercore_lane_vxlan_active partial index both say so). So two rows can
@@ -3062,10 +3075,47 @@ async function teardownLanes(laneIds, {
   let deleted = 0;
   if (errors.length === 0) {
     const del = await cybercoreQuery(
-      `DELETE FROM cybercore_lane WHERE lane_id = ANY($1::uuid[])`,
+      `WITH removed AS (
+         DELETE FROM cybercore_lane WHERE lane_id = ANY($1::uuid[])
+         RETURNING lane_id, config
+       ), queued AS (
+         INSERT INTO cybercore_wazuh_cleanup (lane_id, registrations)
+         SELECT removed.lane_id,
+                COALESCE((
+                  SELECT jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+                    'job_id', job.value->>'job_id',
+                    'vm_id', job.value->'vm_id',
+                    'manager', job.value->>'manager',
+                    'agent_id', job.value->>'agent_id',
+                    'agent_name', job.value->>'agent_name'
+                  )))
+                  FROM jsonb_each(CASE
+                    WHEN jsonb_typeof(removed.config->'wazuh_agent_jobs') = 'object'
+                      THEN removed.config->'wazuh_agent_jobs'
+                    ELSE '{}'::jsonb
+                  END) AS job
+                  WHERE jsonb_typeof(job.value) = 'object'
+                ), '[]'::jsonb)
+           FROM removed
+          WHERE true
+         ON CONFLICT (lane_id) DO UPDATE
+           SET registrations = cybercore_wazuh_cleanup.registrations || EXCLUDED.registrations,
+               retain_until = GREATEST(cybercore_wazuh_cleanup.retain_until, EXCLUDED.retain_until),
+               next_attempt_at = NOW(), lease_token = NULL, lease_until = NULL
+         RETURNING lane_id
+       )
+       SELECT lane_id FROM removed`,
       [laneIds]
     );
     deleted = del.rowCount;
+    // The DELETE and outbox INSERT share one statement: either both commit or
+    // neither does. Read the deleted row's current config, never laneRows'
+    // earlier snapshot, so a late enrollment ID is retained without its key.
+    // Only wake the worker here; its retries and API latency are independent of
+    // teardown, and the retained tombstone catches delayed create responses.
+    Promise.resolve().then(() => wazuhCleanup.kickWorker()).catch(() => {
+      console.warn(`${LOG} Wazuh cleanup remains queued for the background worker.`);
+    });
     if (warnings.length > 0) {
       console.warn(
         `${LOG} Teardown removed everything on the cluster but left ${warnings.length} ` +
