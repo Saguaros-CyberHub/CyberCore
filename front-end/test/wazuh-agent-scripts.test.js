@@ -14,6 +14,13 @@ const agentKey = Buffer.from(record).toString('base64');
 const options = { platform: 'linux', manager: 'wazuh.example.test', version: '4.14.7-1', agentName, agentKey };
 const linux = buildInstallScript(options);
 const windows = buildInstallScript({ ...options, platform: 'windows' });
+const previousAgentName = 'cc-11111111222243338444555555555555-100-0123456789abcdef0123456789abcdef';
+const previousRecord = '016 ' + previousAgentName + ' any ' + 'b'.repeat(64);
+const previousAgentKey = Buffer.from(previousRecord).toString('base64');
+const readableAgentName = 'cle-cybr400-Windows11-vm-100';
+const readableRecord = '017 ' + readableAgentName + ' any ' + 'c'.repeat(64);
+const readableAgentKey = Buffer.from(readableRecord).toString('base64');
+const migrationOptions = { ...options, agentName: readableAgentName, agentKey: readableAgentKey, previousAgentName, previousAgentKey };
 
 test('installer rejects malformed, mismatched and shell-bearing arguments', () => {
   const invalid = {
@@ -37,6 +44,56 @@ test('installer rejects malformed, mismatched and shell-bearing arguments', () =
   }
   for (const manager of ['10.0.0.5', '2001:db8::1', 'wazuh', 'wazuh.example.test']) {
     assert.doesNotThrow(() => buildInstallScript({ ...options, manager }));
+  }
+});
+
+test('readable agent names work and legacy replacement requires an exact valid pair for the same VM', () => {
+  for (const platform of ['linux', 'windows']) {
+    assert.doesNotThrow(() => buildInstallScript({ ...migrationOptions, platform }));
+    assert.doesNotThrow(() => buildInstallScript({ ...options, platform, agentName: readableAgentName, agentKey: readableAgentKey }));
+    const invalid = [
+      { previousAgentName: undefined }, { previousAgentKey: undefined },
+      { previousAgentName: null }, { previousAgentKey: null },
+      { previousAgentName: agentName }, { previousAgentName: readableAgentName },
+      { previousAgentName: previousAgentName.replace('-100-', '-101-') },
+      { previousAgentName: previousAgentName.replace('-100-', '-9007199254740992-') },
+      { previousAgentKey: previousAgentKey + '=' },
+      { previousAgentKey: previousAgentKey + '\n' },
+      ...[
+        previousRecord.replace('016 ', '000 '),
+        previousRecord.replace(previousAgentName, 'cc-unrelated'),
+        previousRecord.replace(' any ', ' 10.0.0.1 '),
+        previousRecord.replace(/b$/, 'x'),
+        previousRecord + '\n',
+      ].map(value => ({ previousAgentKey: Buffer.from(value).toString('base64') })),
+    ];
+    for (const change of invalid) {
+      assert.throws(() => buildInstallScript({ ...migrationOptions, platform, ...change }), TypeError);
+    }
+  }
+});
+
+function maximumWindowsMigrationScripts() {
+  const manager = ['a'.repeat(63), 'b'.repeat(63), 'c'.repeat(63), 'd'.repeat(61)].join('.');
+  assert.equal(manager.length, 253);
+  return [610811, Number.MAX_SAFE_INTEGER].map(vmId => {
+    const suffix = '-vm-' + vmId;
+    const name = 'a'.repeat(128 - suffix.length) + suffix;
+    const previousName = 'cc-' + 'a'.repeat(32) + '-' + vmId + '-' + 'b'.repeat(32);
+    const script = buildInstallScript({ ...migrationOptions, platform: 'windows', manager, version: '4.99.999-999', agentName: name,
+      agentKey: Buffer.from('99999999 ' + name + ' any ' + 'c'.repeat(64)).toString('base64'),
+      previousAgentName: previousName,
+      previousAgentKey: Buffer.from('99999998 ' + previousName + ' any ' + 'd'.repeat(64)).toString('base64') });
+    assert.equal(name.length, 128);
+    return script;
+  });
+}
+
+test('Windows migration remains within the guest command limit at maximum accepted argument lengths', () => {
+  for (const script of maximumWindowsMigrationScripts()) {
+    const command = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand '
+      + Buffer.from(script, 'utf16le').toString('base64');
+    assert.ok(command.length < 32000, `Windows command contains ${command.length} characters`);
   }
 });
 
@@ -119,8 +176,8 @@ print(json.dumps({'requested': requested, 'error': error}))
 
 test('Windows downloads the published checksum path and rejects a corrupted MSI', { skip: !powershell }, t => {
   const script = buildInstallScript({ ...options, platform: 'windows', version: '4.14.1-1' });
-  const downloadSection = script.slice(script.indexOf("    $package = Join-Path $workDir"), script.indexOf("    $script:stage = 'package-install-failed'"));
-  const helpers = script.split('\ntry {\n  $identity =')[0];
+  const downloadSection = script.slice(script.indexOf("$package = Join-Path $workDir"), script.indexOf("$script:stage = 'package-install-failed'"));
+  const helpers = script.split('\ntry {\n$identity =')[0];
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'wazuh-download-test-'));
   t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
   for (const corrupt of [false, true]) {
@@ -168,12 +225,14 @@ test('generated Windows script parses in PowerShell without execution', { skip: 
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'wazuh-syntax-test-'));
   t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
   const scriptFile = path.join(temporary, 'installer.ps1');
-  fs.writeFileSync(scriptFile, windows);
-  const result = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-Command',
-    '$tokens=$null; $errors=$null; $null=[Management.Automation.Language.Parser]::ParseFile($env:WAZUH_TEST_SCRIPT,[ref]$tokens,[ref]$errors); if($errors.Count) { $errors | ForEach-Object { $_.Message }; exit 1 }'], {
-    encoding: 'utf8', timeout: 10000, env: { ...process.env, WAZUH_TEST_SCRIPT: scriptFile },
-  });
-  assert.equal(result.status, 0, result.stdout + result.stderr);
+  for (const script of [windows, ...maximumWindowsMigrationScripts()]) {
+    fs.writeFileSync(scriptFile, script);
+    const result = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-Command',
+      '$tokens=$null; $errors=$null; $null=[Management.Automation.Language.Parser]::ParseFile($env:WAZUH_TEST_SCRIPT,[ref]$tokens,[ref]$errors); if($errors.Count) { $errors | ForEach-Object { $_.Message }; exit 1 }'], {
+      encoding: 'utf8', timeout: 10000, env: { ...process.env, WAZUH_TEST_SCRIPT: scriptFile },
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+  }
 });
 
 const initialConfig = manager => `<!-- fixture collector comment -->
@@ -221,7 +280,7 @@ except InstallError as error:
     result = spawnSync(python, ['-'], { input: code, encoding: 'utf8', timeout: 10000,
       env: { ...process.env, WAZUH_TEST_DIRECTORY: temporary, WAZUH_TEST_ACTION: action } });
   } else {
-    const helpers = windows.split('\ntry {\n  $identity =')[0];
+    const helpers = windows.split('\ntry {\n$identity =')[0];
     const code = helpers + `
 $agentDir = $env:WAZUH_TEST_DIRECTORY
 $configFile = Join-Path $agentDir 'ossec.conf'
@@ -248,6 +307,86 @@ try {
     });
   }
   return { result, config: fs.readFileSync(configFile, 'utf8') };
+}
+
+// Execute the generated ownership, configuration and key-import code, replacing
+// only the external manage_agents process with an exact stdin protocol fixture.
+// No package installer, download or host service is invoked.
+function runMigrationFixture(t, platform, { manager = options.manager, legacyRecord = previousRecord, replacementRecord = readableRecord,
+  key = legacyRecord, allowPrevious = true, importSucceeds = true } = {}) {
+  const { temporary, configFile } = fixture(t, platform, manager, key);
+  const scriptOptions = { ...migrationOptions, platform, agentKey: Buffer.from(replacementRecord).toString('base64'),
+    previousAgentKey: Buffer.from(legacyRecord).toString('base64') };
+  if (!allowPrevious) {
+    delete scriptOptions.previousAgentName;
+    delete scriptOptions.previousAgentKey;
+  }
+  const script = buildInstallScript(scriptOptions);
+  let result;
+  if (platform === 'linux') {
+    const source = script.split("exec python3 - <<'CYBERCORE_WAZUH_PY'\n")[1].split('\nCYBERCORE_WAZUH_PY\n')[0];
+    const section = source.slice(source.indexOf("        STAGE = 'configuration-failed'"), source.indexOf("        STAGE = 'service-start-failed'"));
+    assert.ok(section.includes('manage_agents'));
+    const code = source.split("if __name__ == '__main__':")[0].replace('import fcntl', 'fcntl = None') + `
+import json, textwrap
+AGENT_DIR = Path(os.environ['WAZUH_TEST_DIRECTORY'])
+os.chown = lambda *args: None
+imports = 0
+def run(args, timeout=60, input_data=None, env=None):
+    global imports
+    assert args == [str(AGENT_DIR / 'bin/manage_agents')]
+    assert timeout == 30
+    assert input_data == ('I\\n' + AGENT_KEY + '\\ny\\nQ\\n').encode('ascii')
+    imports += 1
+    if ${importSucceeds ? 'True' : 'False'}:
+        (AGENT_DIR / 'etc/client.keys').write_text(' '.join(EXPECTED_RECORD) + '\\n')
+error = None
+try:
+    for attempt in range(2):
+        check_existing()
+        exec(textwrap.dedent(${JSON.stringify(section)}))
+        check_existing()
+except InstallError as exception:
+    error = str(exception)
+print(json.dumps({'imports': imports, 'error': error}))
+`;
+    result = spawnSync(python, ['-'], { input: code, encoding: 'utf8', timeout: 10000,
+      env: { ...process.env, WAZUH_TEST_DIRECTORY: temporary } });
+  } else {
+    const section = script.slice(script.indexOf("$script:stage = 'configuration-failed'"), script.indexOf("$script:stage = 'service-start-failed'"));
+    assert.ok(section.includes('manage_agents.exe'));
+    const code = script.split('\ntry {\n$identity =')[0] + `
+$agentDir = $env:WAZUH_TEST_DIRECTORY
+$configFile = Join-Path $agentDir 'ossec.conf'
+$script:imports = 0
+function Invoke-WazuhProcess([string]$FilePath, [string]$Arguments, [string]$InputText, [int]$Timeout = 60) {
+  if ($FilePath -cne (Join-Path $agentDir 'manage_agents.exe') -or $Arguments -or $Timeout -ne 30) { throw 'unexpected key import invocation' }
+  $expectedInput = 'I' + [Environment]::NewLine + $agentKey + [Environment]::NewLine + 'y' + [Environment]::NewLine + 'Q' + [Environment]::NewLine
+  if ($InputText -cne $expectedInput) { throw 'unexpected key import input' }
+  $script:imports += 1
+  if ($${importSucceeds}) { [IO.File]::WriteAllText((Join-Path $agentDir 'client.keys'), $expectedRecord + [Environment]::NewLine) }
+  return 0
+}
+try {
+  foreach ($attempt in 1..2) {
+    Assert-WazuhOwnership
+${section}
+    Assert-WazuhOwnership
+  }
+} catch { if (-not $script:publicError) { throw } }
+@{ imports = $script:imports; error = $script:publicError } | ConvertTo-Json -Compress
+`;
+    const scriptFile = path.join(temporary, 'migration-fixture.ps1');
+    fs.writeFileSync(scriptFile, code);
+    result = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptFile], {
+      encoding: 'utf8', timeout: 15000, env: { ...process.env, WAZUH_TEST_DIRECTORY: temporary },
+    });
+  }
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.ok(!result.stdout.includes(scriptOptions.agentKey));
+  if (allowPrevious) assert.ok(!result.stdout.includes(scriptOptions.previousAgentKey));
+  const keyFile = path.join(temporary, platform === 'linux' ? 'etc/client.keys' : 'client.keys');
+  return { ...JSON.parse(result.stdout), config: fs.readFileSync(configFile, 'utf8'), key: fs.readFileSync(keyFile, 'utf8').trim() };
 }
 
 // Client stanza and event-channel settings from the official Windows 4.14.1
@@ -296,6 +435,62 @@ test('Windows default-manager exception cannot take over an existing identity or
 
 for (const platform of ['linux', 'windows']) {
   const skip = platform === 'linux' ? !python : !powershell;
+  test(`${platform} replaces only the verified legacy key and retains collectors across a retry`, { skip }, t => {
+    const result = runMigrationFixture(t, platform);
+    assert.equal(result.error, null);
+    assert.equal(result.imports, 1, 'second attempt must recognize the new key');
+    assert.equal(result.key, readableRecord);
+    assert.match(result.config, /fixture collector comment/);
+    assert.match(result.config, /<location>\/var\/log\/auth.log<\/location>/);
+    assert.match(result.config, /<directories>\/etc<\/directories>/);
+    assert.equal((result.config.match(/<ossec_config>/g) || []).length, 2);
+    assert.match(result.config, /<enabled>no<\/enabled>/);
+  });
+
+  test(`${platform} resumes a migration already using the new key without importing it again`, { skip }, t => {
+    const result = runMigrationFixture(t, platform, { key: readableRecord });
+    assert.equal(result.error, null);
+    assert.equal(result.imports, 0);
+    assert.equal(result.key, readableRecord);
+  });
+
+  test(`${platform} preserves mixed-case key strings and refuses a case-only credential mismatch`, { skip }, t => {
+    const legacyRecord = previousRecord.replace(/b{64}$/, 'aBcD'.repeat(16));
+    const replacementRecord = readableRecord.replace(/c{64}$/, 'eF01'.repeat(16));
+    const migrated = runMigrationFixture(t, platform, { legacyRecord, replacementRecord });
+    assert.equal(migrated.error, null);
+    assert.equal(migrated.imports, 1);
+    assert.equal(migrated.key, replacementRecord);
+    const wrongCase = runMigrationFixture(t, platform, { legacyRecord, replacementRecord, key: legacyRecord.toLowerCase() });
+    assert.equal(wrongCase.error, 'identity-conflict');
+    assert.equal(wrongCase.imports, 0);
+    assert.equal(wrongCase.config, initialConfig(options.manager));
+  });
+
+  test(`${platform} refuses unverified legacy keys, third identities and another manager before mutation`, { skip }, t => {
+    for (const [change, error] of [
+      [{ allowPrevious: false }, 'identity-conflict'],
+      [{ key: previousRecord.replace('016 ', '018 ') }, 'identity-conflict'],
+      [{ key: previousRecord.replace(/b$/, 'd') }, 'identity-conflict'],
+      [{ key: previousRecord + '\n' + readableRecord }, 'identity-conflict'],
+      [{ manager: 'lane-siem.example.test' }, 'manager-conflict'],
+      [{ manager: '0.0.0.0' }, 'manager-conflict'],
+    ]) {
+      const result = runMigrationFixture(t, platform, change);
+      assert.equal(result.error, error);
+      assert.equal(result.imports, 0);
+      assert.equal(result.key, change.key ?? previousRecord);
+      assert.equal(result.config, initialConfig(change.manager ?? options.manager));
+    }
+  });
+
+  test(`${platform} requires the imported replacement key to match before reporting success`, { skip }, t => {
+    const result = runMigrationFixture(t, platform, { importSucceeds: false });
+    assert.equal(result.error, 'key-import-failed');
+    assert.equal(result.imports, 1);
+    assert.equal(result.key, previousRecord);
+  });
+
   test(`${platform} retains collection settings and safely reconciles the same key on retries`, { skip }, t => {
     const { result, config } = runConfigurationHelpers(t, platform);
     assert.equal(result.status, 0, result.stdout + result.stderr);

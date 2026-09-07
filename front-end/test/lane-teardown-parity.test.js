@@ -115,8 +115,11 @@ test('the single lane DELETE atomically hands the latest safe registration metad
   assert.match(statement, /jsonb_each\(CASE[\s\S]*removed\.config->'wazuh_agent_jobs'/,
     'handoff must use the deleted row rather than the initial teardown snapshot');
   const selectedFields = [...statement.matchAll(/'([a-z_]+)', job\.value->>?'/g)].map(match => match[1]);
-  assert.deepStrictEqual(selectedFields, ['job_id', 'vm_id', 'manager', 'agent_id', 'agent_name'],
-    'outbox must retain only registration identity, never keys or unrelated lane configuration');
+  assert.deepStrictEqual(selectedFields, [
+    'job_id', 'vm_id', 'manager', 'agent_id', 'agent_name',
+    'name_version', 'registration_owner', 'registration_key_hashes',
+    'previous_agent_name', 'previous_agent_id', 'previous_agent_key_hash',
+  ], 'outbox must retain only registration identity and key fingerprints, never raw keys or unrelated lane configuration');
   assert.match(statement, /registrations = cybercore_wazuh_cleanup\.registrations \|\| EXCLUDED\.registrations/);
   assert.match(statement, /retain_until = GREATEST\(/);
   const teardown = src.slice(src.indexOf('async function teardownLanes('));

@@ -5,6 +5,7 @@ const crypto = require('node:crypto');
 const { targetsFor, laneEligible, eligibleLaneSql, seenAt } = require('./caldera-lane-agents');
 const { defaultSettings } = require('./wazuh-client');
 const { isMalwareLane } = require('./malware-analysis-state');
+const { readableAgentName, keyFingerprint, rawKeyFingerprint } = require('./wazuh-agent-identity');
 
 const JOB_TIMEOUT_MS = 15 * 60 * 1000;
 const QUEUE_TIMEOUT_MS = 4 * 60 * 60 * 1000;
@@ -12,7 +13,19 @@ const MAX_BATCH_TARGETS = 200;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const object = value => typeof value === 'string' ? JSON.parse(value) : (value || {});
 const jobForVm = (config, vmId) => object(config).wazuh_agent_jobs?.[String(vmId)] || null;
-const agentNameFor = (laneId, vmId, jobId) => `cc-${laneId.replaceAll('-', '')}-${vmId}-${jobId.replaceAll('-', '')}`;
+const agentNameFor = (name, vmId) => readableAgentName(name, vmId);
+function legacyNameForLane(name, laneId, vmId) {
+  const prefix = `cc-${laneId.replaceAll('-', '')}-${vmId}-`;
+  return typeof name === 'string' && name.startsWith(prefix) && /^[a-f0-9]{32}$/.test(name.slice(prefix.length));
+}
+function targetDisplayName(lane, live, vmId) {
+  const cfg = object(lane.config);
+  const recorded = [...(cfg.vms || []), ...(cfg.workstations || []),
+    ...(cfg.attached_modules || []).flatMap(module => module.vms || [])]
+    .find(vm => Number(vm.vm_id || vm.vmid) === vmId);
+  return recorded?.proxmox_name || recorded?.hostname || live.name
+    || targetsFor(lane).find(target => target.vm_id === vmId)?.name || lane.name || 'VM';
+}
 function failure(status, message) { return Object.assign(new Error(message), { status, safe: true }); }
 function runnableGuest(vm) {
   return !!vm && vm.type === 'qemu' && !vm.template && vm.status === 'running'
@@ -201,26 +214,73 @@ function createService(deps = {}) {
       : agents.find(agent => agent.name === job.agent_name);
     if (prior && prior.name !== job.agent_name) throw failure(409, 'The saved Wazuh agent ID belongs to a different identity. Review the registration before retrying.');
     if (job.agent_id && !prior) throw failure(409, 'The saved Wazuh agent registration is missing. Review the registration before retrying.');
+    let previousKey;
+    const groups = new Set(config.agentGroup ? [config.agentGroup] : []);
+    if (job.previous_agent_name) {
+      if (!legacyNameForLane(job.previous_agent_name, laneId, job.vm_id)) {
+        throw failure(409, 'The previous Wazuh identity does not belong to this lane and VM.');
+      }
+      const old = job.previous_agent_id ? agents.find(agent => String(agent.id) === String(job.previous_agent_id))
+        : agents.find(agent => agent.name === job.previous_agent_name);
+      if (old && old.name !== job.previous_agent_name) {
+        throw failure(409, 'The previous Wazuh registration ID belongs to a different identity.');
+      }
+      if (old) {
+        job.previous_agent_id = String(old.id);
+        await saveOwned(laneId, job);
+        previousKey = await config.client.getAgentKey(job.previous_agent_id);
+        keyFingerprint(previousKey, { name: job.previous_agent_name, id: job.previous_agent_id });
+        if (old.group !== undefined && (!Array.isArray(old.group) || old.group.some(group => typeof group !== 'string'))) {
+          throw failure(502, 'Wazuh did not return valid group membership for the previous registration.');
+        }
+        for (const group of old.group || []) if (group !== 'default') groups.add(group);
+      } else if (!prior && job.previous_agent_id) {
+        throw failure(409, 'The previous Wazuh registration is missing. Review the guest identity before renaming it.');
+      } else if (!job.previous_agent_id) {
+        // Legacy jobs saved a name before their first enrollment attempt. No
+        // registration means this is a fresh install, with normal guest guards.
+        delete job.previous_agent_name;
+      }
+    }
+    const readable = job.name_version === 2;
+    if (readable && (!UUID.test(job.registration_owner || '') || !Array.isArray(job.registration_key_hashes)
+      || job.registration_key_hashes.length > 64
+      || job.registration_key_hashes.some(hash => !/^[a-f0-9]{64}$/.test(hash)))) {
+      throw failure(409, 'The saved Wazuh registration ownership could not be verified.');
+    }
     let key;
     if (prior) {
+      key = await config.client.getAgentKey(String(prior.id));
+      if (readable && !job.registration_key_hashes.includes(keyFingerprint(key, { name: job.agent_name, id: String(prior.id) }))) {
+        throw failure(409, 'This readable Wazuh name is already registered to another identity. Its registration was not changed.');
+      }
       job.agent_id = String(prior.id);
       await saveOwned(laneId, job);
-      key = await config.client.getAgentKey(job.agent_id);
     } else {
-      // The unique name was persisted before this request, allowing a retry to
-      // recover the registration even if the response or following DB save fails.
+      // Authorize the random key BEFORE creating a readable registration. A
+      // later retry can prove ownership even if the API response was lost.
+      let rawKey;
+      if (readable) {
+        if (job.registration_key_hashes.length >= 64) throw failure(409, 'This registration has too many interrupted attempts. Review it before retrying.');
+        rawKey = crypto.randomBytes(32).toString('hex');
+        job.registration_key_hashes.push(rawKeyFingerprint(rawKey));
+        await saveOwned(laneId, job);
+      }
       await revalidate(laneId, job);
-      const created = await config.client.createAgent(job.agent_name);
+      const created = await config.client.createAgent(job.agent_name, rawKey ? { key: rawKey } : undefined);
       job.agent_id = String(created.id);
       await saveOwned(laneId, job);
       key = created.key || await config.client.getAgentKey(job.agent_id);
     }
     if (typeof key !== 'string' || !key) throw failure(502, 'Wazuh did not return an enrollment key.');
-    if (config.agentGroup) {
-      await revalidate(laneId, job);
-      await config.client.ensureAgentGroup(job.agent_id, config.agentGroup);
+    if (readable && !job.registration_key_hashes.includes(keyFingerprint(key, { name: job.agent_name, id: job.agent_id }))) {
+      throw failure(502, 'Wazuh did not confirm the authorized registration key.');
     }
-    return key;
+    for (const group of groups) {
+      await revalidate(laneId, job);
+      await config.client.ensureAgentGroup(job.agent_id, group);
+    }
+    return { key, previousKey };
   }
 
   async function execute(laneId, config, job) {
@@ -245,9 +305,10 @@ function createService(deps = {}) {
       await ensureGatewayAccess({ lane: await readAuthorizedLane(), vmId: job.vm_id, manager: config.manager },
         { proxmox, readLane: readAuthorizedLane });
       await revalidate(laneId, job);
-      const key = await enrollment(laneId, config, job);
+      const { key, previousKey } = await enrollment(laneId, config, job);
       const script = buildScript({ platform: job.platform, manager: config.manager, version: config.version,
-        agentName: job.agent_name, agentKey: key });
+        agentName: job.agent_name, agentKey: key,
+        ...(previousKey ? { previousAgentName: job.previous_agent_name, previousAgentKey: previousKey } : {}) });
       job.message = 'Installing and starting the Wazuh agent.';
       await saveOwned(laneId, job);
       // Recheck power, lane membership and ownership after all enrollment/guest
@@ -274,6 +335,14 @@ function createService(deps = {}) {
         const agent = agents.find(item => String(item.id) === job.agent_id && item.name === job.agent_name
           && item.status === 'active' && seenAt(item.lastKeepAlive) > Date.parse(job.dispatched_at));
         if (agent) {
+          if (job.previous_agent_id && job.previous_agent_name) {
+            job.message = 'The renamed agent is active. Removing its previous registration.';
+            await saveOwned(laneId, job);
+            await revalidate(laneId, job);
+            await config.client.deleteAgent(job.previous_agent_id, job.previous_agent_name);
+            delete job.previous_agent_id;
+            delete job.previous_agent_name;
+          }
           job.status = 'completed'; job.message = 'Agent is active and sent a fresh Wazuh check-in.';
           job.finished_at = new Date(now()).toISOString();
           await saveOwned(laneId, job);
@@ -312,9 +381,19 @@ function createService(deps = {}) {
       throw failure(409, 'This VM has a saved registration for another Wazuh manager. Review it before changing managers.');
     }
     const jobId = crypto.randomUUID();
+    const renameLegacy = legacyNameForLane(previous?.agent_name, lane.lane_id, input.vm_id);
+    const readable = !previous?.agent_name || renameLegacy || previous.name_version === 2;
     const job = { job_id: jobId, status: 'queued', vm_id: input.vm_id, platform: input.platform,
-      manager: config.manager, agent_name: previous?.agent_name || agentNameFor(lane.lane_id, input.vm_id, jobId),
-      ...(previous?.agent_id ? { agent_id: previous.agent_id } : {}),
+      manager: config.manager, agent_name: (!renameLegacy && previous?.agent_name)
+        || agentNameFor(targetDisplayName(current, live, input.vm_id), input.vm_id),
+      ...(!renameLegacy && previous?.agent_id ? { agent_id: previous.agent_id } : {}),
+      ...(readable ? { name_version: 2,
+        registration_owner: !renameLegacy && previous?.registration_owner || crypto.randomUUID(),
+        registration_key_hashes: !renameLegacy && previous?.registration_key_hashes ? [...previous.registration_key_hashes] : [] } : {}),
+      ...(renameLegacy ? { previous_agent_name: previous.agent_name,
+        ...(previous.agent_id ? { previous_agent_id: previous.agent_id } : {}) }
+        : previous?.previous_agent_name ? { previous_agent_name: previous.previous_agent_name,
+          ...(previous.previous_agent_id ? { previous_agent_id: previous.previous_agent_id } : {}) } : {}),
       started_at: new Date(now()).toISOString(), message: 'Installation queued.' };
     const vmJob = "COALESCE(config->'wazuh_agent_jobs'->$3::text, '{}'::jsonb)";
     // Atomic claim across app workers, preserving unrelated lane fields and jobs.

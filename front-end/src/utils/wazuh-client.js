@@ -3,6 +3,7 @@
 const https = require('node:https');
 const fs = require('node:fs');
 const net = require('node:net');
+const { isAgentName, keyFingerprint, rawKeyFingerprint } = require('./wazuh-agent-identity');
 
 const REQUEST_TIMEOUT_MS = 15000;
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
@@ -157,7 +158,7 @@ function createClient(options, deps = {}) {
   async function listAgents() {
     const agents = [];
     for (let offset = 0; offset < 100000; offset += PAGE_SIZE) {
-      const data = await api('GET', `/agents?offset=${offset}&limit=${PAGE_SIZE}&select=id,name,status,lastKeepAlive&sort=%2Bid`);
+      const data = await api('GET', `/agents?offset=${offset}&limit=${PAGE_SIZE}&select=id,name,status,lastKeepAlive,group&sort=%2Bid`);
       if (!Array.isArray(data.affected_items) || !Number.isSafeInteger(data.total_affected_items) || data.total_affected_items < 0) {
         throw failure(502, 'The Wazuh API returned an invalid agent list.');
       }
@@ -179,23 +180,51 @@ function createClient(options, deps = {}) {
     return key;
   }
 
-  async function createAgent(name) {
-    if (!/^cc-[A-Za-z0-9][A-Za-z0-9._-]{0,124}$/.test(name)) throw failure(400, 'Invalid managed Wazuh agent name.');
-    const data = await api('POST', '/agents', { name, ip: 'any' });
+  async function createAgent(name, enrollment = {}) {
+    if (!isAgentName(name) || !enrollment || typeof enrollment !== 'object' || Array.isArray(enrollment)) {
+      throw failure(400, 'Invalid managed Wazuh agent name or enrollment settings.');
+    }
+    const suppliedKey = enrollment.key;
+    let expectedHash;
+    if (suppliedKey !== undefined) {
+      try { expectedHash = rawKeyFingerprint(suppliedKey); }
+      catch (_) { throw failure(400, 'Provide a valid generated Wazuh enrollment key.'); }
+    } else if (!/^cc-[A-Za-z0-9][A-Za-z0-9._-]{0,124}$/.test(name) || /-vm-[1-9][0-9]*$/.test(name)) {
+      throw failure(400, 'Readable Wazuh agent names require a generated enrollment key with saved ownership proof.');
+    }
+    const data = suppliedKey === undefined
+      ? await api('POST', '/agents', { name, ip: 'any' })
+      : await api('POST', '/agents/insert', { name, ip: 'any', key: suppliedKey, force: { enabled: false } });
     const item = data;
     if (!item || !/^[0-9]{1,8}$/.test(String(item.id)) || Number(item.id) === 0) {
       throw failure(502, 'The Wazuh API returned an invalid agent registration.');
     }
+    if (expectedHash && item.key != null) {
+      let actualHash;
+      try { actualHash = keyFingerprint(item.key, { id: String(item.id), name }); }
+      catch (_) { throw failure(502, 'The Wazuh API returned an invalid enrollment key.'); }
+      if (actualHash !== expectedHash) throw failure(502, 'The Wazuh API returned a different enrollment key than requested.');
+    }
     return { id: String(item.id), key: typeof item.key === 'string' ? item.key : null };
   }
 
-  async function deleteAgent(value, expectedName) {
+  async function deleteAgent(value, expectedName, ownership = {}) {
     const id = String(value);
     const nameParts = typeof expectedName === 'string'
       && expectedName.match(/^cc-[a-f0-9]{32}-([1-9][0-9]{0,15})-[a-f0-9]{32}$/);
-    if (!/^[0-9]{3,8}$/.test(id) || Number(id) === 0 || !nameParts || !Number.isSafeInteger(Number(nameParts[1]))) {
+    const legacyName = !!nameParts && Number.isSafeInteger(Number(nameParts[1]));
+    const readableName = isAgentName(expectedName) && /-vm-[1-9][0-9]*$/.test(expectedName);
+    if (!/^[0-9]{3,8}$/.test(id) || Number(id) === 0 || (!legacyName && !readableName)
+      || !ownership || typeof ownership !== 'object' || Array.isArray(ownership)) {
       throw failure(400, 'Provide the exact saved CyberCore Wazuh agent ID and managed name for cleanup.');
     }
+    const hashes = ownership.keyHashes;
+    if ((!legacyName && hashes === undefined) || (hashes !== undefined
+      && (!Array.isArray(hashes) || !hashes.length || hashes.length > 64 || hashes.some(hash => typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash))))) {
+      throw failure(400, 'Readable Wazuh cleanup requires saved enrollment key fingerprints.');
+    }
+    const changed = Symbol('ownership changed');
+    const changedResult = () => ({ id, name: expectedName, already_absent: true, ownership_changed: true });
     const invalidResponse = () => failure(502, 'The Wazuh API returned an invalid cleanup response. Registration removal was not confirmed.');
     const readRegistration = async () => {
       const response = await apiResponse('GET', `/agents?agents_list=${id}&select=id,name`);
@@ -212,11 +241,21 @@ function createClient(options, deps = {}) {
         || data.total_affected_items !== 1 || data.affected_items.length !== 1
         || data.affected_items[0]?.id !== id || typeof data.affected_items[0]?.name !== 'string') throw invalidResponse();
       if (data.affected_items[0].name !== expectedName) {
+        if (hashes) return changed;
         throw failure(409, 'The saved Wazuh agent ID belongs to a different identity. Its registration was not removed.');
+      }
+      if (hashes) {
+        const key = await getAgentKey(id);
+        let fingerprint;
+        try { fingerprint = keyFingerprint(key, { name: expectedName, id }); }
+        catch (_) { throw invalidResponse(); }
+        if (!hashes.includes(fingerprint)) return changed;
       }
       return data.affected_items[0];
     };
-    if (!await readRegistration()) return { id, name: expectedName, already_absent: true };
+    const existing = await readRegistration();
+    if (existing === changed) return changedResult();
+    if (!existing) return { id, name: expectedName, already_absent: true };
     const path = `/agents?agents_list=${id}&name=${encodeURIComponent(expectedName)}&status=all&older_than=0s`;
     let response;
     try {
@@ -227,14 +266,18 @@ function createClient(options, deps = {}) {
       // Only a lost transport response may have hidden a completed deletion.
       // Malformed JSON, rejected requests and partial results fail closed.
       if (error.transportFailure !== true) throw error;
-      if (await readRegistration()) throw error;
+      const remaining = await readRegistration();
+      if (remaining === changed) return changedResult();
+      if (remaining) throw error;
       return { id, name: expectedName, already_absent: false };
     }
     const data = response?.data;
     if (response?.error !== 0 || !data || data.total_affected_items !== 1 || !Array.isArray(data.affected_items)
       || data.affected_items.length !== 1 || data.affected_items[0] !== id || data.total_failed_items !== 0
       || !Array.isArray(data.failed_items) || data.failed_items.length !== 0) throw invalidResponse();
-    if (await readRegistration()) throw failure(502, 'Wazuh still reports the registration after cleanup. Retry after checking the API.');
+    const remaining = await readRegistration();
+    if (remaining === changed) return changedResult();
+    if (remaining) throw failure(502, 'Wazuh still reports the registration after cleanup. Retry after checking the API.');
     return { id, name: expectedName, already_absent: false };
   }
 

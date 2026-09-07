@@ -5,12 +5,17 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const cleanup = require('../src/utils/wazuh-agent-cleanup');
+const identity = require('../src/utils/wazuh-agent-identity');
 
 const laneId = '11111111-1111-4111-8111-111111111111';
 const jobId = '22222222-2222-4222-8222-222222222222';
 const manager = '100.100.20.10';
 const agentName = `cc-${laneId.replaceAll('-', '')}-610811-${jobId.replaceAll('-', '')}`;
 const registration = { job_id: jobId, vm_id: 610811, manager, agent_id: '013', agent_name: agentName };
+const rawKey = 'a'.repeat(64);
+const readableName = identity.readableAgentName('cle-cybr400-inperson-10811', 610811);
+const readableRegistration = { ...registration, agent_name: readableName, name_version: 2,
+  registration_owner: '33333333-3333-4333-8333-333333333333', registration_key_hashes: [identity.rawKeyFingerprint(rawKey)] };
 const copy = value => structuredClone(value);
 
 // A shared atomic statement model exercises worker claims/acknowledgements,
@@ -56,10 +61,18 @@ function environment() {
   }
   const client = {
     listAgents: async () => { calls.push(['list']); return [...agents.values()].map(copy); },
-    deleteAgent: async (id, name) => {
-      calls.push(['delete', id, name]);
+    getAgentKey: async id => {
+      calls.push(['key', id]); const agent = agents.get(id);
+      if (!agent) throw new Error('Missing key');
+      return Buffer.from(`${id} ${agent.name} any ${agent.key || rawKey}`).toString('base64');
+    },
+    deleteAgent: async (id, name, options) => {
+      calls.push(['delete', id, name, ...(options ? [options] : [])]);
       const agent = agents.get(id);
       if (agent && agent.name !== name) throw new Error('Identity mismatch');
+      if (agent && options?.keyHashes && !options.keyHashes.includes(identity.rawKeyFingerprint(agent.key || rawKey))) {
+        return { id, name, already_absent: true, ownership_changed: true };
+      }
       agents.delete(id);
       return { id, name, already_absent: !agent };
     },
@@ -104,6 +117,85 @@ test('installation retries retain their original enrollment identity despite a n
   e.agents.set('013', { id: '013', name: agentName });
   assert.equal((await e.factory().processPending()).removed, 1);
   assert.deepEqual(e.calls, [['list'], ['delete', '013', agentName]]);
+});
+
+test('readable registrations require a matching key fingerprint and pass the proof to client deletion', async () => {
+  const e = environment(); e.add([readableRegistration]); e.agents.set('013', { id: '013', name: readableName, key: rawKey });
+  assert.equal((await e.factory().processPending()).removed, 1);
+  assert.deepEqual(e.calls, [['list'], ['key', '013'], ['delete', '013', readableName,
+    { keyHashes: readableRegistration.registration_key_hashes }]]);
+});
+
+test('future lanes reusing both readable name and numeric ID have a different key and are preserved', async () => {
+  for (const foreignKey of ['b'.repeat(64), rawKey.toUpperCase()]) {
+    const e = environment(); e.add([readableRegistration]);
+    e.agents.set('013', { id: '013', name: readableName, key: foreignKey });
+    e.advance(cleanup.GRACE_MS + 1);
+    assert.equal((await e.factory().processPending()).completed, 1);
+    assert.equal(e.agents.size, 1); assert.deepEqual(e.calls, [['list'], ['key', '013']]);
+  }
+});
+
+test('lost readable creation responses recover only a fingerprint authorized before creation', async () => {
+  const missingId = { ...readableRegistration }; delete missingId.agent_id;
+  const e = environment(); e.add([missingId]); e.agents.set('014', { id: '014', name: readableName, key: rawKey });
+  assert.equal((await e.factory().processPending()).removed, 1);
+  assert.deepEqual(e.calls.at(-1), ['delete', '014', readableName, { keyHashes: readableRegistration.registration_key_hashes }]);
+  const foreign = environment(); foreign.add([missingId]);
+  foreign.agents.set('014', { id: '014', name: readableName, key: 'b'.repeat(64) });
+  assert.equal((await foreign.factory().processPending()).removed, 0);
+  assert.equal(foreign.calls.some(call => call[0] === 'delete'), false);
+});
+
+test('unattempted readable names need no API while invalid or missing ownership proof remains pending', async () => {
+  const unattempted = { ...readableRegistration, registration_key_hashes: [] }; delete unattempted.agent_id;
+  const e = environment(); e.add([unattempted]); e.advance(cleanup.GRACE_MS + 1);
+  assert.equal((await e.factory().processPending()).completed, 1);
+  assert.equal(e.settingsCalls(), 0); assert.equal(e.calls.length, 0);
+  for (const invalid of [
+    { registration_key_hashes: [] }, { registration_owner: null }, { registration_key_hashes: ['not-a-hash'] },
+    { registration_key_hashes: Array(65).fill('a'.repeat(64)) }, { agent_name: 'other-vm-610812' }, { name_version: 3 },
+  ]) {
+    const bad = environment(); bad.add([{ ...readableRegistration, ...invalid }]);
+    assert.equal((await bad.factory().processPending()).failed, 1);
+    assert.equal(bad.calls.length, 0); assert.equal(bad.rows.size, 1);
+  }
+});
+
+test('cleanup preserves and removes both current readable and previous legacy migration identities', async () => {
+  const migrating = { ...readableRegistration, agent_id: '014', previous_agent_name: agentName, previous_agent_id: '013',
+    previous_agent_key_hash: identity.rawKeyFingerprint('c'.repeat(64)) };
+  const normalized = cleanup.registrationsFor(laneId, [migrating]);
+  assert.deepEqual(normalized.map(item => item.agent_name), [readableName, agentName]);
+  assert.deepEqual(normalized[1].registration_key_hashes, [migrating.previous_agent_key_hash]);
+  const e = environment(); e.add([migrating]);
+  e.agents.set('014', { id: '014', name: readableName, key: rawKey });
+  e.agents.set('013', { id: '013', name: agentName, key: 'c'.repeat(64) });
+  assert.equal((await e.factory().processPending()).removed, 2); assert.equal(e.agents.size, 0);
+  const notAttempted = { ...migrating, registration_key_hashes: [] }; delete notAttempted.agent_id;
+  assert.deepEqual(cleanup.registrationsFor(laneId, [notAttempted]).map(item => item.agent_name), [agentName]);
+});
+
+test('readable snapshot merging preserves attempted key history and refuses different owners', () => {
+  const second = identity.rawKeyFingerprint('b'.repeat(64));
+  const merged = cleanup.registrationsFor(laneId, [readableRegistration,
+    { ...readableRegistration, registration_key_hashes: [second] }]);
+  assert.deepEqual(merged[0].registration_key_hashes, [...readableRegistration.registration_key_hashes, second]);
+  assert.throws(() => cleanup.registrationsFor(laneId, [readableRegistration,
+    { ...readableRegistration, registration_owner: '44444444-4444-4444-8444-444444444444' }]), /conflict/);
+});
+
+test('malformed key responses cannot prove foreign ownership and client rechecks a racing key change', async () => {
+  const malformed = environment(); malformed.add([readableRegistration]); malformed.agents.set('013', { id: '013', name: readableName });
+  malformed.client.getAgentKey = async () => 'SECRET invalid key';
+  assert.equal((await malformed.factory().processPending()).failed, 1);
+  assert.equal(malformed.calls.some(call => call[0] === 'delete'), false);
+  assert.doesNotMatch(malformed.rows.get(laneId).last_error, /SECRET/);
+  const racing = environment(); racing.add([readableRegistration]); racing.agents.set('013', { id: '013', name: readableName, key: rawKey });
+  const remove = racing.client.deleteAgent;
+  racing.client.deleteAgent = async (...args) => { racing.agents.get('013').key = 'b'.repeat(64); return remove(...args); };
+  assert.equal((await racing.factory().processPending()).removed, 0);
+  assert.equal(racing.agents.size, 1);
 });
 
 test('outages retain cleanup across restarts with bounded increasing backoff and no secret error text', async () => {

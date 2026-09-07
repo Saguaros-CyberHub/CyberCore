@@ -175,12 +175,28 @@ manager API password.
 
 ## Existing agents and telemetry
 
-Agent identities include the lane and VM identity, so repeated hostnames and
-overlapping lane IP ranges do not combine different machines into one agent.
-Retries reuse the stored managed identity where available. An existing enrolled
-agent with a different manager or identity is reported as a conflict instead of
-being reassigned by this batch action. Plan migration of existing lane-local SIEM
-agents separately.
+New agents use the deployed VM display name followed by `-vm-<VMID>`, for example
+`cle-cybr400-inperson-10811-vm-610811`. Names use Wazuh-compatible characters and
+are capped at 128 characters, preserving the VMID suffix. CyberCore prefers the
+recorded deployed hostname, then the current Proxmox name. Retries retain that
+saved name even if the VM display name is later edited.
+
+Ownership stays in lane metadata. Before requesting a new registration, CyberCore
+saves a fingerprint of a randomly generated enrollment key; the key itself is
+never stored in lane configuration. A matching display name alone cannot cause
+another registration to be adopted or deleted, including after a VMID is reused.
+
+For an existing CyberCore agent with an opaque `cc-...` name, select that VM and
+run **Install selected agents** again. CyberCore creates a readable registration,
+copies the previous groups, and authorizes the installer to replace only the
+verified previous key for that same lane and VM. It removes the old registration
+after the new one reports a fresh active check-in. Interrupted migrations retain
+both identities for retry and lane cleanup. This assigns a new Wazuh agent ID;
+historical indexed alerts retain their original name and ID.
+
+An existing enrolled agent with a different manager or unrelated identity is
+reported as a conflict instead of being reassigned by this batch action. Plan
+migration of existing lane-local SIEM agents separately.
 
 Installations create a persistent Wazuh service. They do not change Defender
 settings. Configure log collection, Windows audit policy, Sysmon and Linux audit
@@ -200,8 +216,9 @@ table in the same database statement that deletes the lane. New installations
 are refused once teardown starts. If VM teardown fails, the lane and its agent
 registrations remain available for the teardown retry.
 
-The cleanup worker verifies the saved manager, unique lane/VM agent name and
-agent ID before removal. It never selects agents by `StudentVM` membership,
+The cleanup worker verifies the saved manager, agent name and ID before removal.
+For readable names, it also verifies the saved enrollment-key fingerprint;
+legacy names must contain the exact lane and VM identity. It never selects agents by `StudentVM` membership,
 reused VMID or disconnected status alone. Registrations created by unrelated
 manual installers are outside this automatic cleanup scope.
 

@@ -167,13 +167,17 @@ stubModule('cybercore-db.js', {
     if (/DELETE FROM cybercore_lane/.test(sql)) {
       assert.match(sql, /WITH removed AS \([\s\S]*RETURNING lane_id, config/);
       assert.match(sql, /INSERT INTO cybercore_wazuh_cleanup[\s\S]*FROM removed/);
+      for (const field of ['name_version', 'registration_owner', 'registration_key_hashes', 'previous_agent_name', 'previous_agent_id', 'previous_agent_key_hash']) {
+        assert.ok(sql.includes(`'${field}', job.value->`), `cleanup must retain ${field} from the deleted row`);
+      }
       assert.strictEqual(args.length, 1, 'cleanup must read DELETE RETURNING, not receive an earlier config snapshot');
       if (cleanupInsertFailure) throw new Error('fixture outbox INSERT failed');
       for (const id of args[0]) {
         const lane = lanes.get(id);
         if (!lane) continue;
         const registrations = Object.values(lane.config.wazuh_agent_jobs || {}).filter(value => value && typeof value === 'object')
-          .map(job => Object.fromEntries(['job_id', 'vm_id', 'manager', 'agent_id', 'agent_name']
+          .map(job => Object.fromEntries(['job_id', 'vm_id', 'manager', 'agent_id', 'agent_name', 'name_version', 'registration_owner',
+            'registration_key_hashes', 'previous_agent_name', 'previous_agent_id', 'previous_agent_key_hash']
             .filter(key => job[key] != null).map(key => [key, job[key]])));
         calls.cleanup.push({ lane_id: id, registrations });
       }
@@ -554,6 +558,8 @@ test('teardown captures the latest Wazuh identity atomically and finishes during
   await laneDeployer.deployLanes({ users: USERS, template: WIN, vxlanBlock: BLOCK });
   const lane = [...lanes.values()][0];
   const job = { job_id: 'enrollment-job', vm_id: 610000, manager: '100.100.20.10', agent_name: 'cc-fixture',
+    name_version: 2, registration_owner: '33333333-3333-4333-8333-333333333333', registration_key_hashes: ['a'.repeat(64)],
+    previous_agent_name: 'cc-fixture-previous', previous_agent_id: '013', previous_agent_key_hash: 'b'.repeat(64),
     agent_key: 'DO-NOT-RETAIN', password: 'DO-NOT-RETAIN', status: 'running' };
   lane.config.wazuh_agent_jobs = { 610000: job };
   afterVmDelete = () => {
@@ -566,6 +572,8 @@ test('teardown captures the latest Wazuh identity atomically and finishes during
   assert.strictEqual(result.lanes_kept_for_retry, 0);
   assert.deepStrictEqual(calls.cleanup, [{ lane_id: lane.lane_id, registrations: [{
     job_id: job.job_id, vm_id: job.vm_id, manager: job.manager, agent_id: '014', agent_name: job.agent_name,
+    name_version: 2, registration_owner: job.registration_owner, registration_key_hashes: job.registration_key_hashes,
+    previous_agent_name: job.previous_agent_name, previous_agent_id: job.previous_agent_id, previous_agent_key_hash: job.previous_agent_key_hash,
   }] }]);
   assert.strictEqual(calls.cleanupWakeups.length, 1);
   assert.ok(!JSON.stringify(calls.cleanup).includes('DO-NOT-RETAIN'));

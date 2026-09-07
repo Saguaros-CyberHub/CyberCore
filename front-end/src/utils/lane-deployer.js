@@ -3087,7 +3087,13 @@ async function teardownLanes(laneIds, {
                     'vm_id', job.value->'vm_id',
                     'manager', job.value->>'manager',
                     'agent_id', job.value->>'agent_id',
-                    'agent_name', job.value->>'agent_name'
+                    'agent_name', job.value->>'agent_name',
+                    'name_version', job.value->'name_version',
+                    'registration_owner', job.value->>'registration_owner',
+                    'registration_key_hashes', job.value->'registration_key_hashes',
+                    'previous_agent_name', job.value->>'previous_agent_name',
+                    'previous_agent_id', job.value->>'previous_agent_id',
+                    'previous_agent_key_hash', job.value->>'previous_agent_key_hash'
                   )))
                   FROM jsonb_each(CASE
                     WHEN jsonb_typeof(removed.config->'wazuh_agent_jobs') = 'object'

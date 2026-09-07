@@ -1,6 +1,7 @@
 'use strict';
 
 const { isIP } = require('node:net');
+const { isAgentName } = require('./wazuh-agent-identity');
 
 // Official package URLs and API key import workflow:
 // https://documentation.wazuh.com/current/installation-guide/packages-list.html
@@ -11,18 +12,7 @@ const { isIP } = require('node:net');
 // https://github.com/wazuh/wazuh/blob/v4.14.0/src/addagent/main.c
 // https://github.com/wazuh/wazuh/blob/v4.14.0/src/addagent/manage_keys.c
 
-function validateOptions({ platform, manager, version, agentName, agentKey } = {}) {
-  if (platform !== 'linux' && platform !== 'windows') throw new TypeError('Wazuh agent platform must be windows or linux');
-  if (typeof manager !== 'string' || manager.length > 253 || /[^a-zA-Z0-9.:-]/.test(manager) ||
-      (!isIP(manager) && !manager.split('.').every(label => /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(label)))) {
-    throw new TypeError('Wazuh manager must be a hostname or IP address without a scheme, port or path');
-  }
-  if (typeof version !== 'string' || version.trim() !== version || !/^4\.(?:0|[1-9]\d?)\.(?:0|[1-9]\d{0,2})-[1-9]\d{0,2}$/.test(version)) {
-    throw new TypeError('Wazuh version must be a pinned 4.x package version with release, for example 4.14.7-1');
-  }
-  if (typeof agentName !== 'string' || agentName.trim() !== agentName || !/^cc-[a-zA-Z0-9][a-zA-Z0-9._-]{0,124}$/.test(agentName)) {
-    throw new TypeError('Wazuh agent name must be a safe CyberCore cc- identity of at most 128 characters');
-  }
+function validateKeyRecord(agentName, agentKey) {
   if (typeof agentKey !== 'string' || agentKey.length > 2048 || !/^[a-zA-Z0-9+/]+={0,2}$/.test(agentKey) ||
       Buffer.from(agentKey, 'base64').toString('base64') !== agentKey) {
     throw new TypeError('Wazuh agent key must be canonical base64');
@@ -33,10 +23,35 @@ function validateOptions({ platform, manager, version, agentName, agentKey } = {
       fields[1] !== agentName || fields[2] !== 'any' || !/^[a-fA-F0-9]{64}$/.test(fields[3]) || record.trim() !== record) {
     throw new TypeError('Wazuh agent key must contain the requested agent identity and any source IP');
   }
-  return { platform, manager, version, agentName, agentKey };
 }
 
-function buildLinuxScript({ manager, version, agentName, agentKey }) {
+function validateOptions({ platform, manager, version, agentName, agentKey, previousAgentName, previousAgentKey } = {}) {
+  if (platform !== 'linux' && platform !== 'windows') throw new TypeError('Wazuh agent platform must be windows or linux');
+  if (typeof manager !== 'string' || manager.length > 253 || /[^a-zA-Z0-9.:-]/.test(manager) ||
+      (!isIP(manager) && !manager.split('.').every(label => /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(label)))) {
+    throw new TypeError('Wazuh manager must be a hostname or IP address without a scheme, port or path');
+  }
+  if (typeof version !== 'string' || version.trim() !== version || !/^4\.(?:0|[1-9]\d?)\.(?:0|[1-9]\d{0,2})-[1-9]\d{0,2}$/.test(version)) {
+    throw new TypeError('Wazuh version must be a pinned 4.x package version with release, for example 4.14.7-1');
+  }
+  if (!isAgentName(agentName)) {
+    throw new TypeError('Wazuh agent name must be a safe managed identity of at most 128 characters');
+  }
+  validateKeyRecord(agentName, agentKey);
+  if (previousAgentName !== undefined || previousAgentKey !== undefined) {
+    const legacy = typeof previousAgentName === 'string'
+      && /^cc-[a-f0-9]{32}-([1-9][0-9]{0,15})-[a-f0-9]{32}$/.exec(previousAgentName);
+    const readable = /-vm-([1-9][0-9]*)$/.exec(agentName);
+    if (!legacy || !Number.isSafeInteger(Number(legacy[1])) || previousAgentName === agentName
+        || !readable || Number(readable[1]) !== Number(legacy[1])) {
+      throw new TypeError('Wazuh replacement requires a legacy identity and a readable name for the same VM');
+    }
+    validateKeyRecord(previousAgentName, previousAgentKey);
+  }
+  return { platform, manager, version, agentName, agentKey, previousAgentName, previousAgentKey };
+}
+
+function buildLinuxScript({ manager, version, agentName, agentKey, previousAgentKey }) {
   // Python's XML parser preserves Wazuh's multiple ossec_config roots and its
   // collection settings. No ad-hoc XML substitution and no Python dependencies.
   return `#!/bin/sh
@@ -67,6 +82,7 @@ CHECKSUM_BASE = 'https://packages.wazuh.com/4.x/checksums/wazuh/${version.split(
 AGENT_NAME = '${agentName}'
 AGENT_KEY = '${agentKey}'
 EXPECTED_RECORD = base64.b64decode(AGENT_KEY).decode('ascii').split()
+PREVIOUS_RECORD = base64.b64decode('${previousAgentKey || ''}').decode('ascii').split()
 AGENT_DIR = Path('/var/ossec')
 STAGE = 'preflight-failed'
 
@@ -115,7 +131,7 @@ def check_existing():
     require((AGENT_DIR / 'bin/manage_agents').is_file(), 'existing-installation-invalid')
     document, client = read_config()
     rows = key_rows()
-    require(not rows or rows == [EXPECTED_RECORD], 'identity-conflict')
+    require(not rows or rows == [EXPECTED_RECORD] or (PREVIOUS_RECORD and rows == [PREVIOUS_RECORD]), 'identity-conflict')
     addresses = []
     for tag in ('server', 'enrollment'):
         for section in client.getElementsByTagName(tag):
@@ -251,7 +267,9 @@ CYBERCORE_WAZUH_PY
 `;
 }
 
-function buildWindowsScript({ manager, version, agentName, agentKey }) {
+function buildWindowsScript({ manager, version, agentName, agentKey, previousAgentKey }) {
+  // Strip only indentation and blank lines to keep the UTF-16 encoded command
+  // below Windows limits. The generated script contains no multiline literals.
   return `$ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $manager = '${manager}'
@@ -260,6 +278,7 @@ $checksumBase = 'https://packages.wazuh.com/4.x/checksums/wazuh/${version.split(
 $agentName = '${agentName}'
 $agentKey = '${agentKey}'
 $expectedRecord = [Text.Encoding]::ASCII.GetString([Convert]::FromBase64String($agentKey))
+$previousRecord = [Text.Encoding]::ASCII.GetString([Convert]::FromBase64String('${previousAgentKey || ''}'))
 $script:stage = 'preflight-failed'
 $script:publicError = $null
 $installLock = $null
@@ -331,7 +350,7 @@ function Read-WazuhConfiguration {
 }
 function Assert-WazuhOwnership {
   $keys = @(Read-WazuhKeys)
-  if ($keys.Count -gt 0 -and ($keys.Count -ne 1 -or $keys[0] -cne $expectedRecord)) { Stop-WazuhInstall 'identity-conflict' }
+  if ($keys.Count -gt 0 -and ($keys.Count -ne 1 -or ($keys[0] -cne $expectedRecord -and $keys[0] -cne $previousRecord))) { Stop-WazuhInstall 'identity-conflict' }
   $document = Read-WazuhConfiguration
   $addresses = @($document.SelectNodes('//client/server/address | //client/server-ip | //client/enrollment/manager_address') | ForEach-Object { $_.InnerText.Trim() })
   foreach ($address in $addresses) {
@@ -454,7 +473,7 @@ try {
   }
   if ($installLock) { $installLock.Dispose() }
 }
-`;
+`.replace(/^[ \t]+/gm, '').replace(/^\r?\n/gm, '');
 }
 
 function buildInstallScript(options) {

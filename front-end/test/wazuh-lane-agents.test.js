@@ -8,6 +8,7 @@ const LANE_ID = '11111111-2222-4333-8444-555555555555';
 const OTHER_ID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 const START = Date.parse('2026-09-07T20:00:00.000Z');
 const KEY = 'private-per-agent-enrollment-key';
+const registrationKey = (id, name, rawKey = 'a'.repeat(64)) => Buffer.from(`${id} ${name} any ${rawKey}`).toString('base64');
 const clone = value => structuredClone(value);
 const eligible = lane => !!lane && (lane.status === 'active' || (lane.status === 'suspended'
   && ([lane.config.error, lane.config.provisioning_error].some(value => typeof value === 'string' && value.trim())
@@ -18,7 +19,7 @@ function harness(options = {}) {
     internet_enabled: true, password: 'private-lane-password', gateway_vm_id: 900,
     vms: [{ vm_id: 901, name: 'Windows workstation', os: 'windows' }],
   } }, resources: [{ vmid: 901, node: 'live-node', type: 'qemu', status: 'running' }],
-  clock: START, scheduled: [], sql: [], calls: [], registrations: [], scripts: [], creates: 0, agentReads: 0 };
+  clock: START, scheduled: [], sql: [], calls: [], registrations: [], keys: {}, scripts: [], creates: 0, agentReads: 0 };
   Object.assign(state, options.state);
   const query = async (sql, args) => {
     state.sql.push({ sql, args: clone(args) });
@@ -53,14 +54,22 @@ function harness(options = {}) {
       if (state.apiFailure) throw new Error('private-api-password');
       return clone(state.registrations);
     },
-    async createAgent(name) {
+    async createAgent(name, createOptions) {
       state.creates++;
       const id = String(state.creates).padStart(3, '0');
       state.registrations.push({ id, name, status: 'never_connected', lastKeepAlive: null });
+      state.keys[id] = registrationKey(id, name, createOptions?.key);
       if (options.createHook) await options.createHook(state);
-      return { id, key: KEY };
+      return { id, key: state.keys[id] };
     },
-    async getAgentKey(id) { state.calls.push(['key', id]); return KEY; },
+    async getAgentKey(id) { state.calls.push(['key', id]); return state.keys[id]; },
+    async deleteAgent(id, name) {
+      state.calls.push(['delete', id, name]);
+      if (state.deleteFailure) throw new Error('private-deletion-error');
+      if (options.deleteHook) await options.deleteHook(state, id, name);
+      state.registrations = state.registrations.filter(agent => agent.id !== id || agent.name !== name);
+      return { id, name };
+    },
     async assertGroupExists(group) {
       state.calls.push(['group-check', group]);
       if (state.groupMissing) throw Object.assign(new Error('Could not verify WAZUH_AGENT_GROUP.'), { status: 503, safe: true });
@@ -131,16 +140,18 @@ test('Windows enrollment persists identity and requires a fresh active server ch
   const h = harness();
   const response = await h.start();
   assert.equal(response.status, 'queued');
-  assert.match(response.agent_name, /^cc-[a-f0-9]{32}-901-[a-f0-9]{32}$/);
+  assert.equal(response.agent_name, 'Windows-workstation-vm-901');
   await h.run();
   assert.equal(h.job().status, 'completed');
   assert.equal(h.job().agent_id, '001');
   assert.equal(h.state.creates, 1);
-  assert.deepEqual(h.state.scripts[0], { platform: 'windows', manager: 'wazuh.example.test', version: '4.14.0-1', agentName: h.job().agent_name, agentKey: KEY });
+  assert.deepEqual(h.state.scripts[0], { platform: 'windows', manager: 'wazuh.example.test', version: '4.14.0-1', agentName: h.job().agent_name, agentKey: h.state.keys['001'] });
   const dispatch = h.state.calls.find(call => call[0] === 'windows');
   assert.equal(dispatch[1], 'live-node');
   assert.deepEqual(dispatch[3].slice(0, 5), ['powershell.exe', '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand']);
   assert.doesNotMatch(JSON.stringify(h.state.sql), /private-per-agent-enrollment-key/);
+  assert.equal(JSON.stringify(h.state.sql).includes(h.state.keys['001']), false);
+  assert.equal(JSON.stringify(h.state.sql).includes(Buffer.from(h.state.keys['001'], 'base64').toString().split(' ')[3]), false);
   const status = await h.service.status([h.state.lane]);
   assert.equal(status.lanes[0].agents[0].id, '001');
   assert.doesNotMatch(JSON.stringify(status), /private-|agentKey|password/);
@@ -169,6 +180,129 @@ test('retry recovers a registration created when the API response was lost', asy
   assert.equal(h.job().agent_id, '001');
   assert.equal(h.state.creates, 1);
   assert.equal(h.job().status, 'completed');
+});
+
+test('readable names use the recorded user-facing hostname or live Proxmox name and retain VMID', async () => {
+  for (const [recorded, liveName, expected] of [
+    [{ proxmox_name: 'cle-cybr400-inperson-10811' }, 'other', 'cle-cybr400-inperson-10811-vm-901'],
+    [{ hostname: 'Student Windows' }, 'other', 'Student-Windows-vm-901'],
+    [{}, 'deployed-win11', 'deployed-win11-vm-901'],
+  ]) {
+    const h = harness();
+    Object.assign(h.state.lane.config.vms[0], recorded);
+    h.state.resources[0].name = liveName;
+    assert.equal((await h.start()).agent_name, expected);
+  }
+});
+
+test('readable enrollment persists proof before creation and retains it and the name across retries', async () => {
+  const { keyFingerprint } = require('../src/utils/wazuh-agent-identity');
+  const h = harness({ createHook: state => {
+    const job = state.lane.config.wazuh_agent_jobs['901'];
+    assert.equal(job.name_version, 2);
+    assert.match(job.registration_owner, /^[a-f0-9-]{36}$/);
+    assert.deepEqual(job.registration_key_hashes, [keyFingerprint(state.keys['001'])]);
+  } });
+  await h.start(); await h.run();
+  const first = clone(h.job());
+  h.state.resources[0].name = 'renamed-after-enrollment';
+  await h.start(); await h.run();
+  assert.equal(h.job().agent_name, first.agent_name);
+  assert.equal(h.job().registration_owner, first.registration_owner);
+  assert.deepEqual(h.job().registration_key_hashes, first.registration_key_hashes);
+  assert.equal(h.state.creates, 1);
+  assert.doesNotMatch(JSON.stringify(await h.service.status([h.state.lane])), /registration_owner|registration_key_hashes/);
+});
+
+test('a reused readable name or changed key cannot be adopted or sent to a guest', async () => {
+  const h = harness();
+  h.state.registrations.push({ id: '018', name: 'Windows-workstation-vm-901', status: 'active' });
+  h.state.keys['018'] = registrationKey('018', 'Windows-workstation-vm-901');
+  await h.start(); await h.run();
+  assert.equal(h.job().status, 'failed');
+  assert.match(h.job().error, /another identity/);
+  assert.equal(h.job().agent_id, undefined);
+  assert.equal(h.state.creates, 0);
+  assert.equal(h.state.scripts.length, 0);
+
+  const changed = harness({ createHook: state => {
+    state.keys['001'] = registrationKey('001', state.registrations[0].name, 'b'.repeat(64));
+  } });
+  await changed.start(); await changed.run();
+  assert.equal(changed.job().status, 'failed');
+  assert.match(changed.job().error, /authorized registration key/);
+  assert.equal(changed.state.scripts.length, 0);
+});
+
+function legacyRegistration(h, { enrolled = true } = {}) {
+  const name = `cc-${LANE_ID.replaceAll('-', '')}-901-${OTHER_ID.replaceAll('-', '')}`;
+  h.state.lane.config.wazuh_agent_jobs = { '901': {
+    job_id: OTHER_ID, vm_id: 901, status: 'failed', manager: 'wazuh.example.test',
+    agent_name: name, ...(enrolled ? { agent_id: '016' } : {}),
+  } };
+  if (enrolled) {
+    h.state.registrations.push({ id: '016', name, status: 'active', group: ['default', 'StudentVM', 'Exercise'] });
+    h.state.keys['016'] = registrationKey('016', name);
+  }
+  return name;
+}
+
+test('legacy rename transfers group policy and removes the old registration only after the new check-in', async () => {
+  const h = harness({ deleteHook: (state, id, name) => {
+    assert.equal(id, '016');
+    assert.match(name, /^cc-/);
+    const next = state.registrations.find(agent => agent.id === '001');
+    assert.equal(next.status, 'active');
+    assert.ok(Date.parse(next.lastKeepAlive) > Date.parse(state.lane.config.wazuh_agent_jobs['901'].dispatched_at));
+  } });
+  const oldName = legacyRegistration(h);
+  await h.start(); await h.run();
+  assert.equal(h.job().status, 'completed');
+  assert.equal(h.job().agent_name, 'Windows-workstation-vm-901');
+  assert.equal(h.job().agent_id, '001');
+  assert.equal(h.state.scripts[0].previousAgentName, oldName);
+  assert.equal(h.state.scripts[0].previousAgentKey, h.state.keys['016']);
+  assert.deepEqual(h.state.registrations[0].group, ['default', 'StudentVM', 'Exercise']);
+  assert.equal(h.job().previous_agent_id, undefined);
+  assert.equal(h.job().previous_agent_name, undefined);
+  assert.equal(h.state.registrations.length, 1);
+  assert.equal(JSON.stringify(h.state.sql).includes(h.state.keys['016']), false);
+});
+
+test('legacy jobs that never enrolled can retry as a fresh readable registration', async () => {
+  const h = harness();
+  legacyRegistration(h, { enrolled: false });
+  await h.start(); await h.run();
+  assert.equal(h.job().status, 'completed');
+  assert.equal(h.state.creates, 1);
+  assert.equal(h.state.scripts[0].previousAgentKey, undefined);
+  assert.equal(h.job().previous_agent_name, undefined);
+});
+
+test('failed migration keeps both registrations for retry and lane destruction', async () => {
+  const h = harness({ stale: true });
+  const oldName = legacyRegistration(h);
+  await h.start(); await h.run();
+  assert.equal(h.job().status, 'failed');
+  assert.equal(h.job().previous_agent_name, oldName);
+  assert.equal(h.job().previous_agent_id, '016');
+  assert.equal(h.job().agent_id, '001');
+  assert.equal(h.state.registrations.length, 2);
+  assert.equal(h.state.calls.some(call => call[0] === 'delete'), false);
+});
+
+test('interrupted retirement retries the same readable registration and then retires the old one', async () => {
+  const h = harness({ state: { deleteFailure: true } });
+  legacyRegistration(h);
+  await h.start(); await h.run();
+  assert.equal(h.job().status, 'failed');
+  assert.equal(h.job().previous_agent_id, '016');
+  h.state.deleteFailure = false;
+  await h.start(); await h.run();
+  assert.equal(h.job().status, 'completed');
+  assert.equal(h.state.creates, 1);
+  assert.equal(h.state.registrations.length, 1);
+  assert.equal(h.job().previous_agent_id, undefined);
 });
 
 test('saved identity is not migrated to another manager or a reused agent ID', async () => {

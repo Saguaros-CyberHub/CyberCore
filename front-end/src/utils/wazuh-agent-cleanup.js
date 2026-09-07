@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const { createClient, managerHostname } = require('./wazuh-client');
+const { isAgentName, keyFingerprint } = require('./wazuh-agent-identity');
 
 const POLL_MS = 30000;
 const RECHECK_MS = 60000;
@@ -46,7 +47,7 @@ function registrationsFor(laneId, values) {
     throw cleanupError('Saved Wazuh cleanup metadata could not be verified.');
   }
   const byName = new Map();
-  for (const raw of values) {
+  function add(raw, previous = false) {
     const vmId = Number(raw?.vm_id);
     if (!raw || !UUID.test(raw.job_id || '') || !Number.isSafeInteger(vmId) || vmId <= 0
         || typeof raw.manager !== 'string' || !raw.manager || raw.manager !== managerHostname(raw.manager)) {
@@ -54,19 +55,57 @@ function registrationsFor(laneId, values) {
     }
     // Installation retries get a new job_id while retaining the original
     // registration name. Its UUID suffix belongs to that original enrollment.
-    const prefix = `cc-${laneId.toLowerCase().replaceAll('-', '')}-${vmId}-`;
-    const expected = raw.agent_name;
-    if (typeof expected !== 'string' || !expected.startsWith(prefix) || !/^[a-f0-9]{32}$/.test(expected.slice(prefix.length)) || (raw.agent_id != null
-      && (typeof raw.agent_id !== 'string' || !/^[0-9]{3,8}$/.test(raw.agent_id) || Number(raw.agent_id) === 0))) {
+    const expected = previous ? raw.previous_agent_name : raw.agent_name;
+    const id = previous ? raw.previous_agent_id : raw.agent_id;
+    if (id != null && (typeof id !== 'string' || !/^[0-9]{3,8}$/.test(id) || Number(id) === 0)) {
       throw cleanupError('Saved Wazuh registration ownership could not be verified.');
     }
+    const version = previous ? 1 : raw.name_version ?? 1;
+    let hashes = [], owner;
+    if (version === 2) {
+      if (!UUID.test(raw.registration_owner || '') || !Array.isArray(raw.registration_key_hashes)
+          || raw.registration_key_hashes.length > 64 || raw.registration_key_hashes.some(hash => typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash))
+          || !isAgentName(expected) || !expected.endsWith(`-vm-${vmId}`)) {
+        throw cleanupError('Saved readable Wazuh registration ownership could not be verified.');
+      }
+      hashes = [...new Set(raw.registration_key_hashes)];
+      owner = raw.registration_owner;
+      if (!hashes.length) {
+        if (id != null) throw cleanupError('The saved readable Wazuh registration has no ownership proof.');
+        return; // Registration was never attempted; the previous identity still gets cleaned below.
+      }
+    } else {
+      const prefix = `cc-${laneId.toLowerCase().replaceAll('-', '')}-${vmId}-`;
+      if (version !== 1 || typeof expected !== 'string' || !expected.startsWith(prefix)
+          || !/^[a-f0-9]{32}$/.test(expected.slice(prefix.length))) {
+        throw cleanupError('Saved Wazuh registration ownership could not be verified.');
+      }
+      if (previous && raw.previous_agent_key_hash != null) {
+        if (typeof raw.previous_agent_key_hash !== 'string' || !/^[a-f0-9]{64}$/.test(raw.previous_agent_key_hash)) {
+          throw cleanupError('Saved previous Wazuh registration ownership could not be verified.');
+        }
+        hashes = [raw.previous_agent_key_hash];
+      }
+    }
     const item = { job_id: raw.job_id, vm_id: vmId, manager: raw.manager,
-      agent_name: expected, ...(raw.agent_id != null ? { agent_id: raw.agent_id } : {}) };
+      agent_name: expected, ...(id != null ? { agent_id: id } : {}),
+      ...(version === 2 ? { name_version: 2, registration_owner: owner, registration_key_hashes: hashes } : {}),
+      ...(version === 1 && hashes.length ? { registration_key_hashes: hashes } : {}) };
     const old = byName.get(expected);
-    if (old && (old.manager !== item.manager || (old.agent_id && item.agent_id && old.agent_id !== item.agent_id))) {
+    if (old && (old.manager !== item.manager || (old.agent_id && item.agent_id && old.agent_id !== item.agent_id)
+      || old.name_version !== item.name_version || old.registration_owner !== item.registration_owner)) {
       throw cleanupError('Saved Wazuh cleanup registrations conflict. Review their ownership.');
     }
-    byName.set(expected, old?.agent_id ? old : item);
+    const merged = { ...item, ...(old?.agent_id ? { agent_id: old.agent_id } : {}) };
+    if (old?.registration_key_hashes?.length || hashes.length) {
+      merged.registration_key_hashes = [...new Set([...(old?.registration_key_hashes || []), ...hashes])];
+      if (merged.registration_key_hashes.length > 64) throw cleanupError('Saved Wazuh cleanup ownership proofs exceed the supported limit.');
+    }
+    byName.set(expected, merged);
+  }
+  for (const raw of values) {
+    add(raw);
+    if (raw.previous_agent_name != null || raw.previous_agent_id != null || raw.previous_agent_key_hash != null) add(raw, true);
   }
   return [...byName.values()];
 }
@@ -160,13 +199,23 @@ function createService(dependencies = {}) {
           if (!matching.length) continue;
           const id = matching[0].id;
           if (Number(id) === 0) throw new Error('Invalid registration');
+          if (registration.registration_key_hashes?.length) {
+            const key = await config.client.getAgentKey(id);
+            const fingerprint = keyFingerprint(key, { id, name: registration.agent_name });
+            // Readable names and numeric IDs can both be reused by a new lane.
+            // A different random key identifies a different owner; leave it.
+            if (!registration.registration_key_hashes.includes(fingerprint)) continue;
+            await renew(row);
+          }
           if (registration.agent_id && registration.agent_id !== id) {
             throw cleanupError('The saved Wazuh managed name belongs to a different registration ID. Review its ownership.');
           }
           if (leaseError) throw leaseError;
           // deleteAgent performs another exact ID/name verification at the API
           // and confirms disappearance. Never use group or status-wide deletes.
-          const result = await config.client.deleteAgent(id, registration.agent_name);
+          const result = registration.registration_key_hashes?.length
+            ? await config.client.deleteAgent(id, registration.agent_name, { keyHashes: registration.registration_key_hashes })
+            : await config.client.deleteAgent(id, registration.agent_name);
           if (!result || result.id !== id || result.name !== registration.agent_name
               || typeof result.already_absent !== 'boolean') throw new Error('Unconfirmed removal');
           if (!result.already_absent) removed++;

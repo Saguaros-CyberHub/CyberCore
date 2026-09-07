@@ -107,13 +107,14 @@ test('TLS server name accepts DNS names and rejects unsafe or non-DNS values bef
 });
 
 test('agent listing reads every page with stable sorting and a restricted field selection', async () => {
-  const agents = Array.from({ length: 501 }, (_, index) => ({ id: String(index).padStart(3, '0'), name: `agent-${index}` }));
+  const agents = Array.from({ length: 501 }, (_, index) => ({ id: String(index).padStart(3, '0'), name: `agent-${index}`,
+    group: ['default', 'StudentVM', 'custom-policy'] }));
   const h = harness(url => ({ error: 0, data: { total_affected_items: agents.length, total_failed_items: 0,
     affected_items: agents.slice(Number(url.searchParams.get('offset')), Number(url.searchParams.get('offset')) + 500) } }));
   assert.deepEqual(await h.client.listAgents(), agents);
   const calls = h.state.calls.filter(call => call.url.pathname === '/agents');
   assert.deepEqual(calls.map(call => call.url.searchParams.get('offset')), ['0', '500']);
-  assert.equal(calls[0].url.searchParams.get('select'), 'id,name,status,lastKeepAlive');
+  assert.equal(calls[0].url.searchParams.get('select'), 'id,name,status,lastKeepAlive,group');
   assert.equal(calls[0].url.searchParams.get('sort'), '+id');
 });
 
@@ -472,5 +473,121 @@ test('a successful deletion response still requires a fresh read and never delet
     await assert.rejects(h.client.deleteAgent('016', CLEANUP_NAME));
     assert.equal(reads, 2);
     assert.equal(h.state.calls.filter(call => call.opts.method === 'DELETE').length, 1);
+  }
+});
+
+const READABLE_NAME = 'cle-cybr400-inperson-10811-vm-610811';
+const OWNED_RAW_KEY = 'c'.repeat(64);
+const OWNED_KEY_HASH = require('node:crypto').createHash('sha256').update(OWNED_RAW_KEY).digest('hex');
+const readableKey = (raw = OWNED_RAW_KEY, name = READABLE_NAME, id = '016') => Buffer.from(`${id} ${name} any ${raw}`).toString('base64');
+const readableKeyResponse = key => ({ error: 0, data: { affected_items: [{ id: '016', key }],
+  total_affected_items: 1, total_failed_items: 0, failed_items: [] } });
+
+test('creation with a supplied key uses insert with force disabled and leaves ID assignment to Wazuh', async () => {
+  const h = harness((url, opts, body) => {
+    if (url.pathname !== '/agents/insert') return emptyAgents;
+    assert.equal(opts.method, 'POST');
+    assert.deepEqual(JSON.parse(body), { name: READABLE_NAME, ip: 'any', key: OWNED_RAW_KEY, force: { enabled: false } });
+    return { error: 0, data: { id: '016', key: readableKey() } };
+  });
+  assert.deepEqual(await h.client.createAgent(READABLE_NAME, { key: OWNED_RAW_KEY, force: { enabled: true }, id: '999' }),
+    { id: '016', key: readableKey() });
+  assert.equal(h.state.calls.filter(call => call.url.pathname === '/agents/insert').length, 1);
+  assert.equal(h.state.calls.some(call => call.url.pathname === '/agents'), false);
+});
+
+test('readable creation requires supplied ownership material and rejects invalid keys before making requests', async () => {
+  const h = harness();
+  for (const name of [READABLE_NAME, 'cc-readable-vm-610811']) await assert.rejects(h.client.createAgent(name), { status: 400 });
+  for (const key of ['', 'private-key', 'z'.repeat(64), 'c'.repeat(63), null, 123]) {
+    await assert.rejects(h.client.createAgent(READABLE_NAME, { key }), error => error.status === 400 && !error.message.includes('private-key'));
+  }
+  assert.equal(h.state.calls.length, 0);
+});
+
+test('supplied enrollment keys are checked against the returned ID, name and raw secret', async () => {
+  for (const key of [readableKey('d'.repeat(64)), readableKey(OWNED_RAW_KEY.toUpperCase()), readableKey(OWNED_RAW_KEY, 'another-vm-610811'),
+    readableKey(OWNED_RAW_KEY, READABLE_NAME, '999'), 'invalid-key']) {
+    const h = harness(() => ({ error: 0, data: { id: '016', key } }));
+    await assert.rejects(h.client.createAgent(READABLE_NAME, { key: OWNED_RAW_KEY }), error => error.status === 502
+      && !error.message.includes(OWNED_RAW_KEY) && !error.message.includes(key));
+  }
+  const h = harness(() => ({ error: 0, data: { id: '016' } }));
+  assert.deepEqual(await h.client.createAgent(READABLE_NAME, { key: OWNED_RAW_KEY }), { id: '016', key: null });
+});
+
+test('creation preserves the exact case of the supplied raw enrollment key', async () => {
+  const rawKey = 'AbCd'.repeat(16);
+  const h = harness((url, opts, body) => {
+    if (url.pathname !== '/agents/insert') return emptyAgents;
+    assert.equal(JSON.parse(body).key, rawKey);
+    return { error: 0, data: { id: '016', key: readableKey(rawKey) } };
+  });
+  assert.deepEqual(await h.client.createAgent(READABLE_NAME, { key: rawKey }), { id: '016', key: readableKey(rawKey) });
+});
+
+test('readable cleanup requires a bounded nonempty fingerprint list before any requests', async () => {
+  const h = harness();
+  for (const name of [READABLE_NAME, 'cc-VM-vm-123']) {
+    for (const keyHashes of [undefined, [], null, OWNED_KEY_HASH, ['bad'], [OWNED_KEY_HASH.toUpperCase()], Array(65).fill(OWNED_KEY_HASH)]) {
+      await assert.rejects(h.client.deleteAgent('016', name, { keyHashes }), { status: 400 });
+    }
+  }
+  assert.equal(h.state.calls.length, 0);
+});
+
+test('readable cleanup verifies the key fingerprint before deleting the exact registration', async () => {
+  let deleted = false;
+  const h = harness((url, opts) => {
+    if (url.pathname === '/agents/016/key') return readableKeyResponse(readableKey());
+    if (url.pathname !== '/agents') return emptyAgents;
+    if (opts.method === 'GET') return deleted ? cleanupMissing() : cleanupRead('016', READABLE_NAME);
+    assert.equal(url.searchParams.get('name'), READABLE_NAME);
+    deleted = true;
+    return cleanupDeleted();
+  });
+  const result = await h.client.deleteAgent('016', READABLE_NAME, { keyHashes: ['d'.repeat(64), OWNED_KEY_HASH] });
+  assert.deepEqual(result, { id: '016', name: READABLE_NAME, already_absent: false });
+  assert.deepEqual(h.state.calls.filter(call => call.url.pathname !== '/security/user/authenticate')
+    .map(call => [call.opts.method, call.url.pathname]), [['GET', '/agents'], ['GET', '/agents/016/key'], ['DELETE', '/agents'], ['GET', '/agents']]);
+});
+
+test('reused readable IDs or names with different ownership are left alone and count as the old identity absent', async () => {
+  for (const actualRawKey of ['d'.repeat(64), OWNED_RAW_KEY.toUpperCase()]) {
+    for (const actualName of [READABLE_NAME, 'another-vm-610811']) {
+      const h = harness(url => {
+        if (url.pathname === '/agents/016/key') return readableKeyResponse(readableKey(actualRawKey));
+        return cleanupRead('016', actualName);
+      });
+      assert.deepEqual(await h.client.deleteAgent('016', READABLE_NAME, { keyHashes: [OWNED_KEY_HASH] }),
+        { id: '016', name: READABLE_NAME, already_absent: true, ownership_changed: true });
+      assert.equal(h.state.calls.some(call => call.opts.method === 'DELETE'), false);
+      assert.equal(h.state.calls.filter(call => call.url.pathname === '/agents/016/key').length, actualName === READABLE_NAME ? 1 : 0);
+    }
+  }
+});
+
+test('malformed or mismatched key records never establish replacement ownership and never permit deletion', async () => {
+  for (const key of ['invalid-key', readableKey(OWNED_RAW_KEY, READABLE_NAME, '999'),
+    readableKey(OWNED_RAW_KEY, 'another-vm-610811'), Buffer.from(`016 ${READABLE_NAME} any private-key`).toString('base64')]) {
+    const h = harness(url => url.pathname === '/agents/016/key' ? readableKeyResponse(key) : cleanupRead('016', READABLE_NAME));
+    await assert.rejects(h.client.deleteAgent('016', READABLE_NAME, { keyHashes: [OWNED_KEY_HASH] }), error => error.status === 502
+      && !error.message.includes(OWNED_RAW_KEY) && !error.message.includes(key));
+    assert.equal(h.state.calls.some(call => call.opts.method === 'DELETE'), false);
+  }
+});
+
+test('a readable registration replaced after deletion is preserved even when its ID and name are reused', async () => {
+  for (const lost of [false, true]) {
+    let keyReads = 0;
+    const h = harness((url, opts) => {
+      if (url.pathname === '/agents/016/key') return readableKeyResponse(readableKey(++keyReads === 1 ? OWNED_RAW_KEY : 'd'.repeat(64)));
+      if (opts.method === 'DELETE') return lost ? { aborted: true } : cleanupDeleted();
+      return cleanupRead('016', READABLE_NAME);
+    });
+    assert.deepEqual(await h.client.deleteAgent('016', READABLE_NAME, { keyHashes: [OWNED_KEY_HASH] }),
+      { id: '016', name: READABLE_NAME, already_absent: true, ownership_changed: true });
+    assert.equal(h.state.calls.filter(call => call.opts.method === 'DELETE').length, 1);
+    assert.equal(keyReads, 2);
   }
 });
