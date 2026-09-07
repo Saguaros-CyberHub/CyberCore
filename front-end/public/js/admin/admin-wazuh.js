@@ -158,6 +158,59 @@
     return s.laneView;
   }
 
+  // The word shown in a row's Status cell. Extracted so the cell, the row's
+  // search haystack and the status sort cannot describe the same VM three
+  // slightly different ways ("queued" would never match "install queued").
+  function statusOf(lane, target) {
+    const job = jobs(lane).find(entry => String(entry.vm_id) === String(target.vm_id) && ['queued', 'running'].includes(entry.status));
+    const word = job ? (job.status === 'queued' ? 'install queued' : 'installing')
+      : !laneAvailable(lane) ? (lane.internet_enabled === false ? 'internet off' : 'lane unavailable')
+        : target.runnable !== true ? target.power_state || 'power unknown'
+          : connected(target) ? 'connected' : target.agent?.status || 'agent missing';
+    return { word, jobStatus: job?.status || null };
+  }
+
+  const TARGET_FACETS = {
+    all: () => true,
+    missing: (s, lane, target) => available(lane, target) && !connected(target),
+    connected: (s, lane, target) => connected(target),
+    installing: (s, lane, target) => busy(lane, target),
+    failed: (s, lane, target) => failed(s, lane, target),
+    unavailable: (s, lane, target) => !available(lane, target) && !busy(lane, target),
+  };
+  // What an operator wants at the top when sorting by status: work in flight,
+  // then what went wrong, then what still needs doing, then what is done.
+  const STATUS_RANK = { installing: 0, 'install queued': 1, 'agent missing': 3, connected: 4 };
+
+  function targetView(s, vmRows) {
+    const toks = tokens(s.view.targetQuery), direction = s.view.targetDir === 'desc' ? -1 : 1;
+    const counts = Object.fromEntries(Object.keys(TARGET_FACETS).map(name => [name, 0]));
+    const annotated = vmRows.map(({ lane, target }, index) => {
+      const status = statusOf(lane, target);
+      Object.keys(TARGET_FACETS).forEach(name => { if (TARGET_FACETS[name](s, lane, target)) counts[name]++; });
+      return { lane, target, index, status,
+        haystack: [lane.name, target.name, target.vm_id, platform(s, lane, target), status.word, target.role]
+          .filter(Boolean).join(' ').toLowerCase() };
+    });
+    const facet = TARGET_FACETS[s.view.targetFacet] || TARGET_FACETS.all;
+    const shown = annotated.filter(row => facet(s, row.lane, row.target) && matches(row.haystack, toks));
+    // `lane` is the payload index, so the default view reproduces the order this
+    // table has always had, byte for byte, and a keep-alive-only poll leaves the
+    // template untouched along with the focus and scroll inside it.
+    const getters = { lane: row => row.index, machine: row => nameKey(row.target), vm: row => Number(row.target.vm_id),
+      os: row => platform(s, row.lane, row.target) || null,
+      status: row => failed(s, row.lane, row.target) ? 2 : (STATUS_RANK[row.status.word] ?? 5) };
+    const get = getters[s.view.targetSort] || getters.lane;
+    shown.sort((a, b) => {
+      const x = get(a), y = get(b);
+      if (x === y) return a.index - b.index;
+      if (x === null || x === undefined) return 1;
+      if (y === null || y === undefined) return -1;
+      return (typeof x === 'number' ? x - y : cmpText(x, y)) * direction;
+    });
+    return { shown, counts };
+  }
+
   // Collapse only once, only for a genuinely large inventory, and never over a
   // group the operator has already selected into. Polls must not re-close a
   // group somebody opened, so any manual toggle marks the seed as spent.
@@ -244,11 +297,16 @@
           <section class="waz-panel">
             <div class="waz-panel-head"><span class="waz-step">3</span><h4 class="waz-panel-title">Targets</h4><span id="wazuhTargetCount" class="waz-count"></span>
               <div class="waz-panel-actions"><button type="button" class="btn btn-outline btn-sm" id="wazuhMissing">Select missing agents</button><button type="button" class="btn btn-outline btn-sm" id="wazuhRetry">Select failed targets</button><button type="button" class="btn btn-outline btn-sm" id="wazuhClearTargets">Clear</button></div></div>
+            <div id="wazuhTargetTools">
+              <div class="waz-tools">
+                <div class="waz-search"><input type="search" id="wazuhTargetSearch" class="waz-searchbox" placeholder="Filter targets" autocomplete="off" aria-label="Filter target rows by lane, machine, VM id, operating system or status"><button type="button" class="waz-search-clear" id="wazuhTargetSearchClear" aria-label="Clear the target filter">&times;</button></div></div>
+              <div class="filter-pills waz-facets" role="group" aria-label="Target status filter"><button type="button" class="filter-pill active" id="wazuhTargetFacet-all">All <span class="pill-count" id="wazuhTargetFacetCount-all">0</span></button><button type="button" class="filter-pill" id="wazuhTargetFacet-missing">Needs agent <span class="pill-count" id="wazuhTargetFacetCount-missing">0</span></button><button type="button" class="filter-pill" id="wazuhTargetFacet-connected">Connected <span class="pill-count" id="wazuhTargetFacetCount-connected">0</span></button><button type="button" class="filter-pill" id="wazuhTargetFacet-installing">Installing <span class="pill-count" id="wazuhTargetFacetCount-installing">0</span></button><button type="button" class="filter-pill" id="wazuhTargetFacet-failed">Failed <span class="pill-count" id="wazuhTargetFacetCount-failed">0</span></button><button type="button" class="filter-pill" id="wazuhTargetFacet-unavailable">Unavailable <span class="pill-count" id="wazuhTargetFacetCount-unavailable">0</span></button></div>
+              <p class="waz-shown"><span id="wazuhTargetShown" role="status"></span> <span id="wazuhTargetHidden" class="waz-flagged"></span></p></div>
             <div id="wazuhTargets"></div></section>
           <div id="wazuhResults" class="waz-results" aria-live="polite"></div>
         </div>
         <div class="waz-footer"><p id="wazuhError" role="alert"></p>
-          <div class="waz-footer-row"><div class="waz-bar-state"><p id="wazuhSummary" class="waz-bar-text" role="status" aria-live="polite"></p><p id="wazuhUpdated" class="waz-hint"></p></div>
+          <div class="waz-footer-row"><div class="waz-bar-state"><p id="wazuhSummary" class="waz-bar-text" role="status" aria-live="polite"></p><p id="wazuhHiddenNote" class="waz-hint is-warn" role="status"></p><p id="wazuhUpdated" class="waz-hint"></p></div>
             <div class="waz-bar-actions"><button type="button" class="btn btn-outline btn-sm" id="wazuhRefresh">Refresh status</button><button type="submit" class="btn btn-primary" id="wazuhSubmit" disabled>Install selected agents</button></div></div></div>
       </form></div>`;
     document.body.appendChild(overlay);
@@ -263,7 +321,8 @@
       // rewrites the lane island; anything read back out of an input at render
       // time would be lost with it (blue-team.js:1230 documents the same rule).
       view: { laneQuery: '', groupBy: 'section', laneSort: 'name', laneDir: 'asc', laneFacet: 'all',
-        collapsed: new Set(), seeded: false } };
+        collapsed: new Set(), seeded: false,
+        targetQuery: '', targetFacet: 'all', targetSort: 'lane', targetDir: 'asc' } };
     state = s;
     el('wazuhClose').onclick = close;
     el('wazuhRefresh').onclick = () => refresh(s);
@@ -296,6 +355,8 @@
       };
     };
     bindSearch(el('wazuhLaneSearch'), el('wazuhLaneSearchClear'), 'laneQuery');
+    bindSearch(el('wazuhTargetSearch'), el('wazuhTargetSearchClear'), 'targetQuery');
+    Object.keys(TARGET_FACETS).forEach(name => { el(id('TargetFacet', name)).onclick = () => { s.view.targetFacet = name; render(s); }; });
     el('wazuhGroupBy').onchange = () => {
       s.view.groupBy = el('wazuhGroupBy').value;
       // Keys change meaning on a new axis, so old collapse state is meaningless.
@@ -317,9 +378,11 @@
     };
     el('wazuhMissing').onclick = () => {
       if (s.submitting) return;
-      rows(s).filter(({ lane, target }) => available(lane, target) && !connected(target)).forEach(({ lane, target }) => {
-        s.targets.add(key(lane, target)); s.excluded.delete(key(lane, target));
-      }); render(s);
+      // Scoped to the rows on screen, so filtering the table down to one machine
+      // name and pressing this selects that machine rather than everything.
+      targetView(s, rows(s)).shown.filter(({ lane, target }) => available(lane, target) && !connected(target))
+        .forEach(({ lane, target }) => { s.targets.add(key(lane, target)); s.excluded.delete(key(lane, target)); });
+      render(s);
     };
     el('wazuhClearTargets').onclick = () => {
       if (s.submitting) return;
@@ -451,7 +514,7 @@
     el('wazuhExpandAll').disabled = !grouped || searching;
     el('wazuhCollapseAll').disabled = !grouped || searching;
     renderMachines(s, vmRows);
-    renderTargets(s, vmRows);
+    const targetsView = renderTargets(s, vmRows);
     renderResults(s, inventory);
     const targets = selected(s);
     const unknown = targets.filter(target => !['windows', 'linux'].includes(target.platform)).length;
@@ -464,6 +527,13 @@
     el('wazuhRefresh').disabled = locked || s.refreshing;
     el('wazuhSubmit').disabled = locked || !s.fresh || !data.manager || !!data.configuration_error || !!data.power_error || !!data.agents_error || !targets.length || targets.length > 200 || !!unknown;
     el('wazuhSubmit').textContent = locked ? 'Queuing installations…' : targets.length ? `Install ${targets.length} agent${targets.length === 1 ? '' : 's'}` : 'Install selected agents';
+    // Filtering never deselects, so the batch can contain rows the operator
+    // cannot currently see. Say so beside the count they are about to install.
+    const shownKeys = new Set(targetsView.shown.map(({ lane, target }) => key(lane, target)));
+    const hidden = targets.filter(target => !shownKeys.has(JSON.stringify([String(target.lane_id), String(target.vm_id)])));
+    el('wazuhHiddenNote').textContent = hidden.length
+      ? `${hidden.length} selected target${hidden.length === 1 ? '' : 's'} in ${new Set(hidden.map(target => target.lane_id)).size} lane(s) are hidden by the current filters. Clear the filters to review them.`
+      : '';
   }
 
   function renderMachines(s, vmRows) {
@@ -494,26 +564,46 @@
     });
   }
 
+  const TARGET_COLUMNS = [['lane', 'Lane', ''], ['machine', 'Machine', ''], ['vm', 'VM', 'waz-c-vm'],
+    ['os', 'Operating system', 'waz-c-os'], ['status', 'Status', 'waz-c-status']];
+
   function renderTargets(s, vmRows) {
     const scroll = el('wazuhTargetScroll');
     const scrollTop = scroll?.scrollTop || 0;
     const scrollLeft = scroll?.scrollLeft || 0;
+    const view = targetView(s, vmRows);
+    const shown = view.shown;
     const selectable = vmRows.filter(({ lane, target }) => available(lane, target));
+    const shownSelectable = shown.filter(({ lane, target }) => available(lane, target));
+    const pickedShown = shownSelectable.filter(({ lane, target }) => s.targets.has(key(lane, target))).length;
+    // Counted over every row of the selected lanes, not the filtered subset: the
+    // header has to keep saying how much work there is in total.
     el('wazuhTargetCount').textContent = `${vmRows.length} rows · ${selectable.length} selectable`;
-    el('wazuhMissing').disabled = s.submitting || !selectable.some(({ target }) => !connected(target));
+    el('wazuhMissing').disabled = s.submitting || !shown.some(({ lane, target }) => available(lane, target) && !connected(target));
     el('wazuhRetry').disabled = s.submitting || !selectable.some(({ lane, target }) => failed(s, lane, target));
     el('wazuhClearTargets').disabled = s.submitting || !s.targets.size;
-    setHtml('wazuhTargets', vmRows.length ? `<div class="waz-tablewrap" id="wazuhTargetScroll"><table class="data-table waz-table"><thead><tr><th class="waz-c-pick"><span class="waz-sr-only">Install</span></th><th>Lane</th><th>Machine</th><th class="waz-c-vm">VM</th><th class="waz-c-os">Operating system</th><th class="waz-c-status">Status</th></tr></thead><tbody>${vmRows.map(({ lane, target }) => {
+    const head = `<th class="waz-c-pick"><label class="waz-pick"><input type="checkbox" id="wazuhTargetAll"${shownSelectable.length && pickedShown === shownSelectable.length ? ' checked' : ''}${s.submitting || !shownSelectable.length ? ' disabled' : ''}><span class="waz-sr-only">Select every selectable target shown</span></label></th>`
+      + TARGET_COLUMNS.map(([sortKey, label, columnClass]) => {
+        const on = s.view.targetSort === sortKey;
+        const order = s.view.targetDir === 'asc' ? 'ascending' : 'descending';
+        // aria-sort belongs on the header cell; the button is only its activator.
+        return `<th class="${columnClass ? `${columnClass} ` : ''}waz-sortable" aria-sort="${on ? order : 'none'}"><button type="button" class="waz-sort${on ? ' is-on' : ''}" id="${esc(id('Sort', sortKey))}">${label}<span class="waz-sort-ind" aria-hidden="true">${on ? (s.view.targetDir === 'asc' ? '▲' : '▼') : ''}</span></button></th>`;
+      }).join('');
+    setHtml('wazuhTargets', !vmRows.length
+      ? `<div class="waz-empty"><strong>${s.lanes.size ? 'No QEMU VMs in selected lanes' : 'No lanes selected'}</strong><p>${s.lanes.size ? 'Refresh status after the VMs finish deploying.' : 'Select lanes above to see their machines.'}</p></div>`
+      : !shown.length
+        ? '<div class="waz-empty"><strong>No targets match</strong><p>Adjust the target search or status filter.</p></div>'
+        : `<div class="waz-tablewrap" id="wazuhTargetScroll"><table class="data-table waz-table"><thead><tr>${head}</tr></thead><tbody>${shown.map(({ lane, target }) => {
       const vmKey = key(lane, target);
       const eligible = available(lane, target);
       const picked = eligible && s.targets.has(vmKey);
       return `<tr class="waz-row${picked ? ' is-picked' : ''}${eligible ? '' : ' is-off'}"><td class="waz-c-pick"><label class="waz-pick"><input type="checkbox" id="${esc(id('Target', vmKey))}"${picked ? ' checked' : ''}${s.submitting || !eligible ? ' disabled' : ''}><span class="waz-sr-only">Install on ${esc(lane.name || lane.lane_id)} ${esc(target.name || target.vm_id)}</span></label></td><td>${esc(lane.name || lane.lane_id)}</td><td class="waz-mname">${esc(target.name || 'VM')}</td><td class="waz-c-vm waz-mono">${esc(target.vm_id)}</td><td class="waz-c-os"><label class="waz-molabel"><span class="waz-sr-only">Operating system for ${esc(target.name || target.vm_id)} in ${esc(lane.name || lane.lane_id)}</span><select class="waz-select" id="${esc(id('TargetOs', vmKey))}"${s.submitting || !eligible ? ' disabled' : ''}>${options(platform(s, lane, target), 'Choose OS…')}</select></label></td><td class="waz-c-status" id="${esc(id('Status', vmKey))}"></td></tr>`;
-    }).join('')}</tbody></table></div>` : `<div class="waz-empty"><strong>${s.lanes.size ? 'No QEMU VMs in selected lanes' : 'No lanes selected'}</strong><p>${s.lanes.size ? 'Refresh status after the VMs finish deploying.' : 'Select lanes above to see their machines.'}</p></div>`);
+    }).join('')}</tbody></table></div>`);
     if (el('wazuhTargetScroll')) {
       el('wazuhTargetScroll').scrollTop = scrollTop;
       el('wazuhTargetScroll').scrollLeft = scrollLeft;
     }
-    vmRows.forEach(({ lane, target }) => {
+    shown.forEach(({ lane, target }) => {
       const vmKey = key(lane, target);
       el(id('Target', vmKey)).onchange = event => {
         if (s.submitting || !available(lane, target)) return;
@@ -524,15 +614,54 @@
       const os = el(id('TargetOs', vmKey));
       os.value = platform(s, lane, target);
       os.onchange = () => { if (!s.submitting && available(lane, target)) { s.platforms.set(vmKey, os.value); render(s); } };
-      const job = jobs(lane).find(entry => String(entry.vm_id) === String(target.vm_id) && ['queued', 'running'].includes(entry.status));
-      const status = job ? (job.status === 'queued' ? 'install queued' : 'installing')
-        : !laneAvailable(lane) ? (lane.internet_enabled === false ? 'internet off' : 'lane unavailable')
-          : target.runnable !== true ? target.power_state || 'power unknown' : connected(target) ? 'connected' : target.agent?.status || 'agent missing';
+      const { word: status, jobStatus } = statusOf(lane, target);
       const seen = target.agent?.lastKeepAlive || target.agent?.last_seen;
       // Status cells are separate islands: a changing check-in timestamp cannot
       // replace a focused OS selector, checkbox, or the target table scroll.
-      setHtml(id('Status', vmKey), `<span class="badge ${badge(job?.status || status)}">${esc(status)}</span>${seen ? `<small class="waz-last-seen">Last seen: ${esc(seen)}</small>` : ''}`);
+      setHtml(id('Status', vmKey), `<span class="badge ${badge(jobStatus || status)}">${esc(status)}</span>${seen ? `<small class="waz-last-seen">Last seen: ${esc(seen)}</small>` : ''}`);
     });
+    // Null-guarded: both empty states render no table at all, and render() runs
+    // once before the first payload arrives.
+    const allBox = el('wazuhTargetAll');
+    if (allBox) {
+      allBox.indeterminate = pickedShown > 0 && pickedShown < shownSelectable.length;
+      allBox.onchange = () => {
+        if (s.submitting) return;
+        shownSelectable.forEach(({ lane, target }) => {
+          const vmKey = key(lane, target);
+          if (allBox.checked) { s.targets.add(vmKey); s.excluded.delete(vmKey); }
+          else { s.targets.delete(vmKey); s.excluded.add(vmKey); }
+        });
+        render(s);
+      };
+    }
+    TARGET_COLUMNS.forEach(([sortKey]) => {
+      const button = el(id('Sort', sortKey));
+      if (!button) return;
+      button.onclick = () => {
+        if (s.view.targetSort === sortKey) s.view.targetDir = s.view.targetDir === 'asc' ? 'desc' : 'asc';
+        else { s.view.targetSort = sortKey; s.view.targetDir = 'asc'; }
+        render(s);
+      };
+    });
+    const filtered = !!tokens(s.view.targetQuery).length || s.view.targetFacet !== 'all';
+    el('wazuhTargetTools').hidden = !vmRows.length;
+    el('wazuhTargetShown').textContent = !vmRows.length ? ''
+      : filtered ? `Showing ${shown.length} of ${vmRows.length} targets`
+        : `${vmRows.length} target${vmRows.length === 1 ? '' : 's'}`;
+    const shownKeys = new Set(shown.map(({ lane, target }) => key(lane, target)));
+    const hidden = vmRows.filter(({ lane, target }) => s.targets.has(key(lane, target)) && !shownKeys.has(key(lane, target))).length;
+    el('wazuhTargetHidden').textContent = hidden
+      ? `${hidden} selected target${hidden === 1 ? '' : 's'} hidden` : '';
+    Object.keys(TARGET_FACETS).forEach(name => {
+      const pill = el(id('TargetFacet', name));
+      const active = s.view.targetFacet === name;
+      pill.className = `filter-pill${active ? ' active' : ''}`;
+      pill.ariaPressed = active ? 'true' : 'false';
+      pill.disabled = s.submitting;
+      el(id('TargetFacetCount', name)).textContent = String(view.counts[name]);
+    });
+    return view;
   }
 
   function renderResults(s, inventory) {

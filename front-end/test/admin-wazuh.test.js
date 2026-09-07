@@ -72,6 +72,8 @@ function named() {
 }
 
 const laneIds = h => h.el('wazuhLanes').ids.filter(value => value.startsWith('wazuhLane-'));
+const targetKeys = h => h.el('wazuhTargets').ids.filter(value => value.startsWith('wazuhTarget-'))
+  .map(value => JSON.parse(decodeURIComponent(value.slice('wazuhTarget-'.length))));
 const groupIds = h => h.el('wazuhLanes').ids.filter(value => value.startsWith('wazuhGroup-'));
 
 // The same lightweight VM/DOM approach as caldera-classroom-ui.test.js. It
@@ -398,6 +400,89 @@ test('the lane toolbar survives a poll with its text, sort and grouping intact',
   assert.equal(h.el('wazuhLaneSort').value, 'number');
   assert.equal(laneIds(h).length, before);
   assert.deepEqual(groupIds(h), [ident('Group', 'kind:course')]);
+});
+
+test('target columns sort both ways without changing the queued batch', async () => {
+  const h = harness(); await h.api.open(); h.click('wazuhAllLanes');
+  h.change(ident('Machine', 'dc01'), true);
+  h.change(ident('Machine', 'ws01'), true);
+  h.change(ident('MachineOs', 'ws01'), 'windows');
+  const byPayload = targetKeys(h);
+  // vm 100 is DC01, 101 WS01, 102 Connected, 103 Offline, in both lanes.
+  const machines = { 100: 'dc01', 101: 'ws01', 102: 'connected', 103: 'offline' };
+  const shownMachines = () => targetKeys(h).map(([, vm]) => machines[Number(vm) % 100 + 100]);
+  h.click(ident('Sort', 'machine'));
+  assert.match(h.el('wazuhTargets').innerHTML, /aria-sort="ascending"/);
+  assert.deepEqual(shownMachines(), ['connected', 'connected', 'dc01', 'dc01', 'offline', 'offline', 'ws01', 'ws01']);
+  assert.deepEqual(targetKeys(h).slice(0, 2).map(([lane]) => lane), ['lane-one', 'lane-two'],
+    'equal machine names keep payload order');
+  h.click(ident('Sort', 'machine'));
+  assert.match(h.el('wazuhTargets').innerHTML, /aria-sort="descending"/);
+  assert.deepEqual(shownMachines(), ['ws01', 'ws01', 'offline', 'offline', 'dc01', 'dc01', 'connected', 'connected']);
+  assert.deepEqual(targetKeys(h).slice(0, 2).map(([lane]) => lane), ['lane-one', 'lane-two'],
+    'a stable tie-break means reversing the key order does not reverse the ties');
+  h.click(ident('Sort', 'vm'));
+  assert.deepEqual(targetKeys(h).map(([, vm]) => Number(vm)), [100, 101, 102, 103, 200, 201, 202, 203]);
+  h.click(ident('Sort', 'lane'));
+  assert.deepEqual(targetKeys(h), byPayload, 'the default view is payload order');
+  await h.submit();
+  // The wire format is computed from the selection, never from the view.
+  assert.deepEqual(h.calls.find(call => call.method === 'POST').body.targets, [
+    { lane_id: 'lane-one', vm_id: 100, platform: 'windows' },
+    { lane_id: 'lane-one', vm_id: 101, platform: 'windows' },
+    { lane_id: 'lane-two', vm_id: 200, platform: 'windows' },
+    { lane_id: 'lane-two', vm_id: 201, platform: 'windows' },
+  ]);
+});
+
+test('target filters scope the header checkbox and Select missing agents, and report what they hide', async () => {
+  const h = harness(); await h.api.open(); h.click('wazuhAllLanes');
+  assert.equal(h.el('wazuhTargetFacetCount-connected').textContent, '2');
+  assert.match(h.el('wazuhTargetShown').textContent, /^8 targets$/);
+  h.click('wazuhTargetFacet-connected');
+  assert.equal(targetKeys(h).length, 2);
+  assert.match(h.el('wazuhTargetShown').textContent, /Showing 2 of 8 targets/);
+  assert.equal(h.el('wazuhMissing').disabled, true, 'nothing on screen needs an agent');
+  assert.ok(h.el('wazuhTargetFacet-connected').classes.has('active'));
+  assert.equal(h.el('wazuhTargetFacet-connected').ariaPressed, 'true');
+  h.click('wazuhTargetFacet-missing');
+  h.change('wazuhTargetSearch', 'ws01');
+  assert.equal(targetKeys(h).length, 2);
+  h.click('wazuhMissing');
+  assert.match(h.el('wazuhSummary').textContent, /^2 VMs/, 'only the rows on screen were selected');
+  h.change('wazuhTargetSearch', 'dc01');
+  assert.match(h.el('wazuhTargetHidden').textContent, /2 selected targets hidden/);
+  assert.match(h.el('wazuhHiddenNote').textContent, /2 selected targets in 2 lane\(s\) are hidden/);
+  h.click('wazuhTargetSearchClear');
+  h.click('wazuhTargetFacet-all');
+  assert.equal(h.el('wazuhTargetHidden').textContent, '');
+  assert.equal(h.el('wazuhHiddenNote').textContent, '');
+});
+
+test('the target header checkbox selects what is shown and reports a partial selection', async () => {
+  const h = harness(); await h.api.open(); h.change(ident('Lane', 'lane-one'), true);
+  h.click('wazuhTargetFacet-missing');
+  h.change('wazuhTargetAll', true);
+  assert.match(h.el('wazuhSummary').textContent, /^2 VMs/);
+  assert.equal(h.el('wazuhTargetAll').indeterminate, false);
+  h.change(targetId('Target', 'lane-one', 100), false);
+  assert.equal(h.el('wazuhTargetAll').indeterminate, true);
+  assert.equal(h.el('wazuhTargetAll').checked, false);
+  h.change('wazuhTargetAll', false);
+  assert.match(h.el('wazuhSummary').textContent, /^0 VMs/);
+});
+
+test('an empty or unmatched target table hides its toolbar and never throws on a poll', async () => {
+  const h = harness(); h.setStatus({ manager: '', console_url: '', lanes: [] }); await h.api.open();
+  assert.equal(h.el('wazuhTargetTools').hidden, true);
+  assert.equal(h.el('wazuhTargetShown').textContent, '');
+  const live = harness(); await live.api.open(); live.change(ident('Lane', 'lane-one'), true);
+  assert.equal(live.el('wazuhTargetTools').hidden, false);
+  live.change('wazuhTargetSearch', 'zzz');
+  assert.match(live.el('wazuhTargets').innerHTML, /No targets match/);
+  assert.equal(live.el('wazuhTargetAll'), undefined, 'no table means no header checkbox to bind');
+  await live.tick();
+  assert.match(live.el('wazuhTargets').innerHTML, /No targets match/);
 });
 
 test('lost queue response requires status refresh before retry; persisted job prevents duplicates', async () => {

@@ -59,6 +59,7 @@ html:has(#adminWazuhModal.active), body:has(#adminWazuhModal.active) { overflow-
 /* Lane toolbar. Same shape as the CALDERA adversary picker's filter row
    (courses.html:721), which is page-scoped there and so cannot be reused. */
 .waz-tools { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; padding: 0.5rem 0.7rem 0; }
+#wazuhTargetTools[hidden] { display: none; }
 .waz-search { position: relative; flex: 1 1 14rem; min-width: 9rem; }
 .waz-searchbox {
   width: 100%; box-sizing: border-box; padding: 0.35rem 1.9rem 0.35rem 0.55rem;
@@ -86,6 +87,8 @@ html:has(#adminWazuhModal.active), body:has(#adminWazuhModal.active) { overflow-
 .waz-shown { margin: 0.35rem 0.7rem 0; font-size: 0.75rem; color: var(--text-muted); }
 .waz-flagged { color: var(--warning); font-weight: 600; }
 .waz-flagged:empty { display: none; }
+.waz-hint.is-warn { color: var(--warning); font-weight: 600; }
+.waz-hint.is-warn:empty { display: none; }
 
 /* The lane list gets the scroll cap the target table has always had. Without it
    200 lanes are ~50rem of chips and steps 2 and 3 are below the fold. */
@@ -124,7 +127,7 @@ html:has(#adminWazuhModal.active), body:has(#adminWazuhModal.active) { overflow-
 .waz-group .waz-lanegrid { padding: 0.45rem 0.7rem; }
 .waz-lanescroll > .waz-lanegrid { padding: 0.65rem 0.7rem; }   /* group by: none */
 .waz-lane-meta { white-space: nowrap; }
-.waz-tablewrap { max-height: min(22rem, 42vh); overflow: auto; }
+.waz-tablewrap { max-height: min(30rem, 55vh); overflow: auto; }
 .waz-modal .waz-table { width: 100%; min-width: 46rem; border-collapse: collapse; margin: 0; }
 .waz-modal .waz-table thead th { position: sticky; top: 0; z-index: 1; padding: 0.4rem 0.6rem; font-size: 0.7rem; background: var(--bg-card-hover); color: var(--text-secondary); border-bottom: 0; box-shadow: inset 0 -1px 0 var(--border-color); }
 .waz-modal .waz-table td { padding: 0.32rem 0.6rem; font-size: 0.85rem; border-bottom: 1px solid var(--border-light); }
@@ -143,6 +146,20 @@ html:has(#adminWazuhModal.active), body:has(#adminWazuhModal.active) { overflow-
 .waz-modal .waz-table tbody .waz-row.is-picked td:first-child { box-shadow: inset 3px 0 0 var(--primary); }
 .waz-modal .waz-table tbody .waz-row.is-off td { color: var(--text-muted); }
 .waz-last-seen { display: block; margin-top: 0.2rem; font-size: 0.68rem; color: var(--text-muted); }
+/* The whole header cell is the hit target, so the button carries the padding
+   the th would otherwise own. There is no shared sortable-header style in
+   main.css; clinic-risk-assessment.html keeps its own, page-scoped. */
+.waz-modal .waz-table th.waz-sortable { padding: 0; }
+.waz-sort {
+  width: 100%; display: flex; align-items: center; gap: 0.25rem;
+  border: 0; background: none; padding: 0.4rem 0.6rem;
+  font: inherit; font-size: 0.7rem; font-weight: inherit; color: inherit;
+  cursor: pointer; text-align: left; white-space: nowrap;
+}
+.waz-sort:hover, .waz-sort.is-on { color: var(--text-primary); }
+.waz-modal .waz-sort:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+/* Fixed width so the header does not shift as the arrow appears and clears. */
+.waz-sort-ind { display: inline-block; width: 0.75rem; font-size: 0.6rem; color: var(--primary); }
 .waz-footer { flex: none; display: flex; flex-direction: column; gap: 0.5rem; padding: 0.7rem 1.25rem; border-top: 1px solid var(--border-color); background: var(--bg-card-hover); }
 .waz-footer-row { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
 .waz-bar-state { flex: 1 1 18rem; min-width: 0; display: flex; flex-direction: column; gap: 0.3rem; }
