@@ -1713,16 +1713,29 @@ async function cloneGateway(job) {
     net0: formatLaneGatewayNet0(net.wan),
     net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`,
   });
-  if (job.workstations.some(w => w.template.metadata?.analysis_profile === 'malware')) {
-    // Malware lanes use the approved gateway RDP path. Do not add a second
-    // remote network that would bypass their analysis policy. Remove any token
-    // belonging to an earlier gateway before this clean clone first boots.
-    await cybercoreQuery('DELETE FROM lane_bootstrap_tokens WHERE vxlan_id = $1', [vxlanId]);
-  } else {
-    await configureLaneTailscale({
-      subnetScheme, vxlanId, wanIp: net.wan.ip.split('/')[0], laneName, claimSecret, logTag: LOG,
-    });
-  }
+  // Malware lanes DO get a tailnet identity, and it is safe because it does not
+  // outlive preparation. applyAnalysisPolicy (utils/malware-network-policy.js)
+  // stops tailscaled, removes it from every runlevel, and replaces the whole
+  // filter table with a deny-by-default allowlist when the student starts
+  // analysis; renderVerification then REFUSES to report success while any
+  // runlevel still lists tailscale or tailscaled is still running. So the tailnet
+  // route exists while an instructor is setting the box up and is provably gone
+  // before anything is detonated.
+  //
+  // Staging nothing was the earlier approach and it was worse in both directions:
+  // it cost the instructor that access, and it left the gateway's firstboot loop
+  // polling /api/lane-bootstrap for its full 10-minute window (60 rounds of
+  // "No claimable token" per lane, times a class) because that loop only breaks
+  // on a response containing "tailscale_authkey".
+  //
+  // DELETE first because this also runs on the Reset Lab path, where
+  // replaceAnalysisGateway destroyed a gateway whose token may still be sitting
+  // unclaimed at this vxlan_id — storeLaneBootstrap upserts rather than failing,
+  // so without this a fresh clone could claim its predecessor's key.
+  await cybercoreQuery('DELETE FROM lane_bootstrap_tokens WHERE vxlan_id = $1', [vxlanId]);
+  await configureLaneTailscale({
+    subnetScheme, vxlanId, wanIp: net.wan.ip.split('/')[0], laneName, claimSecret, logTag: LOG,
+  });
   await proxmoxAPI('POST', `${vmApiBase(targetNode, gatewayVmid, 'lxc')}/status/start`);
   // Wait for the gateway's OWN boot-time config to land before the caller writes
   // the lane's reservations and DNATs over the top of it — see
@@ -3502,8 +3515,10 @@ async function replaceAnalysisGateway({ job, liveByVmid, gatewayNode, gatewayVmi
   });
   if (gateway.failed.length) throw new Error(`The old gateway could not be removed: ${gateway.failed[0].error}`);
 
-  // No old guest or gateway remains. Any cached tailnet identity belongs to
-  // the destroyed gateway; the new malware gateway never gets a bootstrap key.
+  // No old guest or gateway remains. Any cached tailnet identity belongs to the
+  // destroyed gateway and must go before cloneGateway mints a fresh key for the
+  // replacement, or the lane shows two devices and the stale one keeps a route
+  // advertised into a subnet that no longer exists.
   await tailscale.deleteLaneDevices({ vxlanId: job.vxlanId });
   await cloneGateway(job);
   await applyGatewayWorkstationAccess({ node: targetNode, gatewayVmid, workstations });
