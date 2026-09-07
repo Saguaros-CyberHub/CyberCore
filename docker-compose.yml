@@ -237,6 +237,16 @@ services:
       # MISMATCH IS QUIET — the console keeps working, because that path uses
       # Caddy's copy — and shows up only as 401s on the app's API calls.
       CALDERA_AUTHORING_API_KEY: ${CALDERA_API_KEY_RED:-}
+      # Central Wazuh batch installs from Admin > Active Lanes. API credentials
+      # stay in the app; each guest receives only its own agent key.
+      WAZUH_MANAGER: ${WAZUH_MANAGER:-}
+      WAZUH_API_URL: ${WAZUH_API_URL:-}
+      WAZUH_API_USERNAME: ${WAZUH_API_USERNAME:-}
+      WAZUH_API_PASSWORD: ${WAZUH_API_PASSWORD:-}
+      WAZUH_API_CA_FILE: ${WAZUH_API_CA_FILE:-}
+      WAZUH_API_SERVER_NAME: ${WAZUH_API_SERVER_NAME:-}
+      WAZUH_AGENT_VERSION: ${WAZUH_AGENT_VERSION:-}
+      WAZUH_DASHBOARD_URL: ${WAZUH_DASHBOARD_URL:-}
       # Proxmox
       PROXMOX_API_URL: ${PROXMOX_API_URL}
       PROXMOX_TOKEN_ID: ${PROXMOX_TOKEN_ID}

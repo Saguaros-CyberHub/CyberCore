@@ -335,17 +335,16 @@ async function compilePlanFor(engagement) {
   // pulls the batch deployer and the vuln-app generator behind it, and this
   // file is required from routes/instructor.js at boot. Keeping it here means
   // mounting the router costs nothing.
-  const { loadProfileForDeploy, defaultAssetSelection } = require('./profile-deploy');
+  const {
+    loadProfileForDeploy, defaultAssetSelection, loadDeployCatalogs, PLAN_PROBE_APP,
+  } = require('./profile-deploy');
 
   const { profile, assets } = await loadProfileForDeploy(engagement.profile_id);
 
   // The VM template catalog lives in cybercore_db, the vuln scripts in
-  // clinic_db — two pools, so two round trips, run together.
-  const [vmCat, vulnCat] = await Promise.all([
-    cybercoreQuery(`SELECT id, os_family, os_version, os_name, template_vmid, node, role_hints, is_active, preferred, created_at
-                    FROM cybercore_template_catalog WHERE is_active = true AND template_type = 'os_template'`),
-    query(`SELECT id, slug, name, os_target, category, script_type, services_exposed, is_active FROM vuln_scripts WHERE is_active = true`),
-  ]);
+  // clinic_db. Both come from profile-deploy's own reader, so a brief and a
+  // deploy of the same client can never resolve against different catalogs.
+  const { vmTemplateCatalog, vulnScriptCatalog } = await loadDeployCatalogs();
 
   const assetSelection = Array.isArray(engagement.asset_selection) && engagement.asset_selection.length
     ? engagement.asset_selection
@@ -354,9 +353,18 @@ async function compilePlanFor(engagement) {
   const { spec } = synthesizeSpecFromProfile({
     profile: { ...profile, assets },
     assetSelection,
-    vmTemplateCatalog: vmCat.rows,
-    vulnScriptCatalog: vulnCat.rows,
-    vulnApp: null,
+    vmTemplateCatalog,
+    vulnScriptCatalog,
+    // NOT null. profile-to-spec gates BOTH vuln_app_install and the synthetic
+    // vuln-app VM on `vulnApp && vulnApp.install_script`, so passing null meant
+    // resolveDmzVm returned null, applyV3Topology never ran, no machine was given
+    // nics, and every host fell through resolveVmSegments to ['ext']. The compiled
+    // brief therefore described a v3 client as a flat lane with its entire
+    // corporate network on the attacker's segment, and reported no problem — an
+    // instructor was briefed on a network that is not the one their students get.
+    // The probe answers the DMZ question without the ~4 minute LLM call the real
+    // generator is; see PLAN_PROBE_APP.
+    vulnApp: PLAN_PROBE_APP,
     // The ROW's scheme wins — that is the scheme the block was carved at, and
     // compileEngagementPlan compares it with spec.subnet_scheme to raise
     // SCHEME_MISMATCH. The default only covers a row so old it carries none.

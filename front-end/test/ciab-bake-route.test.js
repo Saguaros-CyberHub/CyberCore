@@ -1248,10 +1248,31 @@ test('the gate is on the live deploy path, not merely defined', () => {
   assert.notStrictEqual(gate, -1, 'runProfileDeploy must call the bake gate');
   assert.ok(gate < body.indexOf('provisionLaneStudents'),
     'and before a single student account is minted');
-  assert.strictEqual(
-    (ROUTE_SRC.match(/assertProfileBakeDeployable\(/g) || []).length, 2,
-    'defined once and called ONCE — an inline fallback that quietly baked on the deploy path is '
-    + 'the one thing this gate exists to prevent, and a second call site is where one would go');
+  // Defined once, and called once PER PATH. The original form of this assertion
+  // counted call sites across the whole file and expected 2; POST /plan added a
+  // third, which is a legitimate READ — it runs the gate in report mode so the
+  // live diagram can say "golden" rather than showing catalog vmids for a baked
+  // client, and it turns a refusal into a problems[] entry instead of drawing a
+  // lane that would 400. Counting per function keeps the property that mattered
+  // (no second deploy-path call, where an inline "just bake it" fallback would
+  // go) while letting the preview ask the same question.
+  const DEF = 'async function assertProfileBakeDeployable';
+  const RUN = 'async function runProfileDeploy';
+  const PLAN = 'async function buildLanePlan';
+  assert.ok(ROUTE_SRC.indexOf(DEF) < ROUTE_SRC.indexOf(RUN));
+  assert.ok(ROUTE_SRC.indexOf(RUN) < ROUTE_SRC.indexOf(PLAN));
+
+  const runBody = ROUTE_SRC.slice(ROUTE_SRC.indexOf(RUN), ROUTE_SRC.indexOf(PLAN));
+  const planBody = ROUTE_SRC.slice(ROUTE_SRC.indexOf(PLAN));
+  const countIn = (src) => (src.match(/assertProfileBakeDeployable\(/g) || []).length;
+
+  assert.strictEqual(countIn(runBody), 1,
+    'the deploy calls the gate exactly once — a second call site on this path is where an '
+    + 'inline fallback that quietly baked would go, and that is the one thing this gate prevents');
+  assert.strictEqual(countIn(planBody), 1,
+    'the preview asks the same question exactly once, in report mode');
+  assert.strictEqual((ROUTE_SRC.match(/assertProfileBakeDeployable\(/g) || []).length, 3,
+    'one definition, one deploy call, one preview call — nothing else may call the gate');
 });
 
 // ───────────────────────────────────────────────────────────────────────────

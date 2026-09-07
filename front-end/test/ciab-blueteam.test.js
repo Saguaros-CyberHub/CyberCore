@@ -815,12 +815,19 @@ test('E3-37: the routes thread the engagement id into all three deploy paths', (
 
 test('E3-38: attack boxes default OFF for defensive_monitoring, ON for everything else', () => {
   const code = jsCode(read(ROUTE_REL));
+  // The rule is now a named function rather than an inline expression, because
+  // POST /plan has to draw the attack box the deploy will actually build and a
+  // second spelling of this default is a second answer. The expression itself is
+  // still pinned — it is the part that is silent when wrong.
   assert.match(code,
-    /const attackBoxes = opts\.attackBoxes === undefined \? engagement !== BLUE_TEAM_TYPE_KEY : !!opts\.attackBoxes;/,
+    /function resolveAttackBoxDefault\(attackBoxes, engagementType\) \{\s*return attackBoxes === undefined\s*\? engagementType !== BLUE_TEAM_TYPE_KEY\s*: !!attackBoxes;/,
     `resolveConsolePlan picks the primary console as consoles.find(kind === 'kali') before it looks `
     + `at anything else, so on a lane where Kali exists Kali IS the Console button. Left true, the `
     + `student presses Console and lands on the attacker's machine instead of the SIEM — no error, `
     + `no warning. ${TRACK_E}`);
+  assert.match(code, /const attackBoxes = resolveAttackBoxDefault\(opts\.attackBoxes, engagement\);/,
+    `and the deploy must USE it — a rule defined and not called is the defect this file exists `
+    + `to catch one level up. ${TRACK_E}`);
   assert.ok(!/attackBoxes = true,/.test(code),
     `A destructured default of true would win over the engagement-aware one. ${TRACK_E}`);
 });

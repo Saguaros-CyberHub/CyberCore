@@ -849,6 +849,20 @@ function synthesizeSpecFromProfile({
   // change inert for them: appendTelemetryMachines is never called, no machine
   // is added, and the octet walk is the walk it always was.
   const telemetry = options.telemetry || null;
+  // Per-asset resolution logging, off for callers that run at keystroke cadence.
+  //
+  // POST /api/profile-deploy/plan calls this function on a 250ms debounce while
+  // an admin ticks checkboxes, and it emits one line PER RESOLVED ASSET. On a
+  // 30-asset client that is 30 lines every quarter second, which does not just
+  // make the log noisy — it buries the deploy lines an operator actually greps
+  // for. Default is unchanged, so every existing caller logs exactly as before.
+  //
+  // A `quiet` FLAG rather than a swapped-in logger, and deliberately not a
+  // console monkey-patch: this runs concurrently with real deploys, and a
+  // patched global console would silence theirs too.
+  const quiet = options.quiet === true;
+  const log = quiet ? () => {} : (msg) => console.log(msg);
+  const warn = quiet ? () => {} : (msg) => console.warn(msg);
 
   const assets = Array.isArray(profile && profile.assets) ? profile.assets : [];
   const selected = assets.filter(a => isIncluded(a, assetSelection));
@@ -871,7 +885,7 @@ function synthesizeSpecFromProfile({
     // "every company has a WEB01 server" rule.
     if (isWebServer(asset)) {
       if (os_family !== 'linux') {
-        console.log(`[profile-to-spec] Forcing ${asset.hostname} to Linux (was ${os_family}) — web servers must be Linux for vuln-app installability`);
+        log(`[profile-to-spec] Forcing ${asset.hostname} to Linux (was ${os_family}) — web servers must be Linux for vuln-app installability`);
       }
       os_family = 'linux';
       os_version = null;
@@ -892,7 +906,7 @@ function synthesizeSpecFromProfile({
     const resolverRole = isWebServer(asset) ? 'web' : asset.role;
     const match = resolveTemplate({ os_family, os_version, role: resolverRole }, vmTemplateCatalog);
     if (!match) {
-      console.warn(`[profile-to-spec] No template match for ${asset.hostname} (os_family=${os_family} os_version=${os_version} role=${resolverRole}). Catalog had ${vmTemplateCatalog.filter(r => r.os_family === os_family).length} ${os_family} row(s).`);
+      warn(`[profile-to-spec] No template match for ${asset.hostname} (os_family=${os_family} os_version=${os_version} role=${resolverRole}). Catalog had ${vmTemplateCatalog.filter(r => r.os_family === os_family).length} ${os_family} row(s).`);
       templateMisses.push({
         hostname: asset.hostname,
         os: asset.os || null,
@@ -900,7 +914,7 @@ function synthesizeSpecFromProfile({
       });
       continue;
     }
-    console.log(`[profile-to-spec] ${asset.hostname} → template_vmid=${match.template_vmid} (${match.os_name}, match=${match.match_type}, role=${resolverRole})`);
+    log(`[profile-to-spec] ${asset.hostname} → template_vmid=${match.template_vmid} (${match.os_name}, match=${match.match_type}, role=${resolverRole})`);
 
     // Resolve post-clone scripts for each declared service. Include the
     // 'init-setup' bootstrap only if its os_target covers the VM's os_family

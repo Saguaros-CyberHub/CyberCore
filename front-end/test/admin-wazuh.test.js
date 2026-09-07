@@ -1,0 +1,240 @@
+'use strict';
+
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const source = fs.readFileSync(path.join(__dirname, '../public/js/admin/admin-wazuh.js'), 'utf8');
+const clone = value => JSON.parse(JSON.stringify(value));
+const ident = (kind, value) => `wazuh${kind}-${encodeURIComponent(value)}`;
+const targetId = (kind, lane, machine) => ident(kind, JSON.stringify([lane, String(machine)]));
+function fixture() {
+  const payload = { manager: 'wazuh.example', console_url: 'https://wazuh.example/', lanes: ['one', 'two', 'stopped'].map((suffix, i) => ({
+    lane_id: `lane-${suffix}`, name: `Lane ${suffix}`, runnable: i < 2, internet_enabled: true, jobs: [], agents: [],
+    targets: [
+      { vm_id: (i + 1) * 100, name: i === 1 ? 'dc01' : 'DC01', type: 'qemu', platform: 'windows', runnable: i < 2, power_state: i < 2 ? 'running' : 'stopped' },
+      { vm_id: (i + 1) * 100 + 1, name: 'WS01', type: 'qemu', platform: null, runnable: i < 2, power_state: i < 2 ? 'running' : 'stopped' },
+      { vm_id: (i + 1) * 100 + 2, name: 'Connected', type: 'qemu', platform: 'linux', runnable: i < 2, power_state: 'running', agent: { id: `agent-${suffix}`, status: 'active', lastKeepAlive: '2026-09-07T12:00:00Z' } },
+      { vm_id: (i + 1) * 100 + 3, name: 'Offline', type: 'qemu', platform: 'linux', runnable: false, power_state: 'stopped' },
+      { vm_id: (i + 1) * 100 + 4, name: 'Container', type: 'lxc', platform: 'linux', runnable: true, power_state: 'running' },
+    ],
+  })) };
+  // The service correlates a saved job's manager/name/id with lane.agents and
+  // projects the result onto target.agent. Keep all three in this fixture so
+  // connected defaults exercise the actual server contract.
+  payload.lanes.forEach(lane => {
+    const target = lane.targets[2];
+    target.agent.name = `cc-${lane.lane_id}-${target.vm_id}`;
+    lane.agents.push(clone(target.agent));
+    lane.jobs.push({ job_id: `saved-${target.vm_id}`, vm_id: target.vm_id, manager: payload.manager,
+      agent_id: target.agent.id, agent_name: target.agent.name, status: 'completed', last_seen: target.agent.lastKeepAlive });
+  });
+  return payload;
+}
+
+// The same lightweight VM/DOM approach as caldera-classroom-ui.test.js. It
+// deliberately normalizes boolean attributes to catch innerHTML cache bugs.
+function harness() {
+  const elements = new Map(); const observers = new Map(); let document;
+  class Element {
+    constructor(id = '') {
+      this.id = id; this.value = ''; this.checked = false; this.disabled = false;
+      this.textContent = ''; this.ids = []; this.classes = new Set();
+      this.classList = { contains: name => this.classes.has(name),
+        add: name => { this.classes.add(name); observers.get(this)?.(); },
+        remove: name => { this.classes.delete(name); observers.get(this)?.(); } };
+      if (id) elements.set(id, this);
+    }
+    set className(value) { this.classes = new Set(value.split(/\s+/)); }
+    set innerHTML(value) {
+      this.html = value;
+      const forget = child => { for (const id of child.ids || []) { const nested = elements.get(id); if (nested) forget(nested); elements.delete(id); } };
+      forget(this); this.ids = [];
+      for (const match of value.matchAll(/\bid="([^"]+)"/g)) {
+        const name = match[1].replace(/&#39;/g, "'");
+        this.ids.push(name); const child = new Element(name);
+        const tag = value.slice(value.lastIndexOf('<', match.index), value.indexOf('>', match.index));
+        child.disabled = /\bdisabled(?:\s|$)/.test(tag); child.checked = /\bchecked(?:\s|$)/.test(tag);
+      }
+    }
+    get innerHTML() { return (this.html || '').replace(/\s(checked|selected|disabled)(?=[\s>])/g, ' $1=""'); }
+    contains(child) { return this.ids.includes(child?.id); }
+    focus() { document.activeElement = this; }
+  }
+  document = { activeElement: null, getElementById: id => elements.get(id) || null,
+    createElement: () => new Element(), body: { appendChild: element => elements.set(element.id, element) } };
+  let payload = fixture(); let getHandler; let postHandler; let timerId = 0;
+  const timers = new Map(); const calls = [];
+  const context = { document, URL, Date, Set, Map, WeakMap, Promise, JSON, encodeURIComponent,
+    window: {},
+    MutationObserver: class { constructor(fn) { this.fn = fn; } observe(el) { observers.set(el, this.fn); } },
+    Modal: { open(id) { elements.get(id).classList.add('active'); }, close(element) { (typeof element === 'string' ? elements.get(element) : element).classList.remove('active'); } },
+    setTimeout(fn, delay) { const id = ++timerId; timers.set(id, { fn, delay }); return id; },
+    clearTimeout(id) { timers.delete(id); },
+    api: async (method, url, body) => {
+      calls.push({ method, url, body: clone(body || null) });
+      if (method === 'GET') return getHandler ? getHandler() : clone(payload);
+      if (postHandler) return postHandler(body);
+      const results = body.targets.map(target => ({ ...target, job: { job_id: `job-${target.vm_id}`, vm_id: target.vm_id, status: 'queued', message: 'Queued for installation' } }));
+      results.forEach(result => payload.lanes.find(lane => lane.lane_id === result.lane_id).jobs.push(result.job));
+      return { results };
+    },
+  };
+  vm.createContext(context); vm.runInContext(source, context);
+  return { context, calls, timers, api: context.window.AdminWazuh, el: id => elements.get(id),
+    setStatus(value) { payload = value; }, setGet(fn) { getHandler = fn; }, setPost(fn) { postHandler = fn; },
+    change(id, value) { const e = elements.get(id); assert.ok(e, `Missing control ${id}`); if (typeof value === 'boolean') e.checked = value; else e.value = value; return e.onchange({ target: e }); },
+    click(id) { return elements.get(id).onclick(); },
+    submit() { return elements.get('wazuhForm').onsubmit({ preventDefault() {} }); },
+    async tick() { const entry = [...timers].find(([, timer]) => timer.delay === 5000); assert.ok(entry, 'Expected 5 second poll'); timers.delete(entry[0]); return entry[1].fn(); },
+  };
+}
+
+test('Admin toolbar loads its script after api helpers and opens with no silent selections', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '../public/admin.html'), 'utf8');
+  assert.match(html, /onclick="AdminWazuh\.open\(\)">Deploy Wazuh agents/);
+  assert.ok(html.indexOf('/js/admin/admin-core.js') < html.indexOf('/js/admin/admin-wazuh.js'));
+  const h = harness(); await h.api.open();
+  assert.equal(h.el('wazuhSubmit').disabled, true);
+  assert.match(h.el('wazuhSummary').textContent, /^0 VMs/);
+  assert.equal(h.el(ident('Lane', 'lane-one')).checked, false);
+  assert.equal(h.el(ident('Lane', 'lane-stopped')).disabled, true);
+  assert.deepEqual(h.calls, [{ method: 'GET', url: '/wazuh-agents', body: null }]);
+});
+
+test('matching names, individual exclusions and OS overrides produce the exact batch request', async () => {
+  const h = harness(); await h.api.open(); h.click('wazuhAllLanes');
+  h.change(ident('Machine', 'dc01'), true);
+  h.change(ident('Machine', 'ws01'), true);
+  assert.equal(h.el('wazuhSubmit').disabled, true);
+  h.change(ident('MachineOs', 'ws01'), 'windows');
+  h.change(targetId('Target', 'lane-two', 200), false);
+  h.change(targetId('TargetOs', 'lane-one', 101), 'linux');
+  await h.submit();
+  assert.deepEqual(h.calls.find(call => call.method === 'POST'), { method: 'POST', url: '/wazuh-agents/batch', body: { targets: [
+    { lane_id: 'lane-one', vm_id: 100, platform: 'windows' }, { lane_id: 'lane-one', vm_id: 101, platform: 'linux' }, { lane_id: 'lane-two', vm_id: 201, platform: 'windows' },
+  ] } });
+  assert.equal(h.el('wazuhSubmit').disabled, true);
+  assert.match(h.el('wazuhResults').innerHTML, /3 queued/);
+  await h.submit(); assert.equal(h.calls.filter(call => call.method === 'POST').length, 1);
+});
+
+test('missing agent selection skips connected, stopped, containers and unavailable lanes', async () => {
+  const h = harness(); const data = fixture(); data.lanes[1].internet_enabled = false; h.setStatus(data);
+  await h.api.open(); h.click('wazuhAllLanes'); h.click('wazuhMissing');
+  assert.equal(h.el(ident('Lane', 'lane-two')).checked, false);
+  assert.equal(h.el(targetId('Target', 'lane-one', 102)).checked, false);
+  assert.equal(h.el(targetId('Target', 'lane-one', 103)).disabled, true);
+  assert.equal(h.el(targetId('Target', 'lane-one', 104)), undefined);
+  assert.match(h.el('wazuhSummary').textContent, /^2 VMs/);
+  h.change(targetId('TargetOs', 'lane-one', 101), 'windows');
+  await h.submit(); assert.equal(h.calls.find(call => call.method === 'POST').body.targets.length, 2);
+});
+
+test('polling check-ins keeps DOM controls, focus, OS overrides and explicit exclusions', async () => {
+  const h = harness(); await h.api.open(); h.change(ident('Lane', 'lane-one'), true);
+  h.change(ident('Machine', 'dc01'), true); h.change(targetId('Target', 'lane-one', 100), false);
+  h.change(targetId('TargetOs', 'lane-one', 101), 'linux');
+  const os = h.el(targetId('TargetOs', 'lane-one', 101)); os.focus();
+  const data = fixture(); data.lanes[0].targets[2].agent.lastKeepAlive = '2026-09-07T12:00:05Z'; h.setStatus(data);
+  await h.tick();
+  assert.equal(h.el(targetId('TargetOs', 'lane-one', 101)), os);
+  assert.equal(h.context.document.activeElement, os);
+  assert.equal(os.value, 'linux');
+  assert.match(h.el(targetId('Status', 'lane-one', 102)).innerHTML, /12:00:05Z/);
+  h.change(ident('Lane', 'lane-two'), true);
+  assert.equal(h.el(targetId('Target', 'lane-one', 100)).checked, false);
+  assert.equal(h.el(targetId('Target', 'lane-two', 200)).checked, true);
+});
+
+test('stale or degraded status blocks installation and recovers without losing choices', async () => {
+  const h = harness(); await h.api.open(); h.change(ident('Lane', 'lane-one'), true); h.change(ident('Machine', 'dc01'), true);
+  h.setGet(async () => { throw new Error('gateway unavailable'); }); await h.tick();
+  assert.equal(h.el('wazuhSubmit').disabled, true); assert.match(h.el('wazuhError').textContent, /gateway unavailable/);
+  await h.submit(); assert.equal(h.calls.filter(call => call.method === 'POST').length, 0);
+  h.setGet(null); await h.tick(); assert.equal(h.el('wazuhSubmit').disabled, false);
+  const data = fixture(); data.configuration_error = 'Configure central Wazuh'; data.agents_error = 'Manager API unavailable'; h.setStatus(data); await h.tick();
+  assert.match(h.el('wazuhError').textContent, /Configure central Wazuh\nManager API unavailable/);
+  assert.equal(h.el('wazuhSubmit').disabled, true);
+});
+
+test('polls remove stopped and busy targets and never silently add new inventory', async () => {
+  const h = harness(); await h.api.open(); h.click('wazuhAllLanes'); h.change(ident('Machine', 'dc01'), true);
+  h.el('wazuhTargetScroll').scrollTop = 75; h.el('wazuhTargetScroll').scrollLeft = 30;
+  const focusId = targetId('TargetOs', 'lane-one', 101); h.el(focusId).focus();
+  const data = fixture(); data.lanes[0].targets[0].runnable = false;
+  data.lanes[1].jobs = [{ vm_id: 200, job_id: 'busy', status: 'running' }];
+  data.lanes[1].targets.push({ vm_id: 299, name: 'DC01', type: 'qemu', platform: 'windows', runnable: true });
+  h.setStatus(data); await h.tick();
+  assert.equal(h.el(targetId('Target', 'lane-one', 100)).disabled, true);
+  assert.equal(h.el(targetId('Target', 'lane-two', 200)).disabled, true);
+  assert.equal(h.el(targetId('Target', 'lane-two', 299)).checked, false);
+  assert.equal(h.el('wazuhSubmit').disabled, true);
+  assert.equal(h.el('wazuhTargetScroll').scrollTop, 75);
+  assert.equal(h.el('wazuhTargetScroll').scrollLeft, 30);
+  assert.equal(h.context.document.activeElement, h.el(focusId));
+});
+
+test('closing stops polls and reopening retrieves persisted jobs and check-ins', async () => {
+  const h = harness(); await h.api.open(); h.change(ident('Lane', 'lane-one'), true); h.change(ident('Machine', 'dc01'), true); await h.submit();
+  h.api.close(); assert.equal(h.timers.size, 0);
+  const data = fixture(); data.lanes[0].jobs = [{ vm_id: 100, job_id: 'job-100', status: 'completed', message: 'Connected', agent_name: 'lane-one-100', last_seen: '2026-09-07T13:00:00Z' }]; h.setStatus(data);
+  await h.api.open();
+  assert.match(h.el('wazuhResults').innerHTML, /Agent check-in confirmed: lane-one-100/);
+  assert.match(h.el('wazuhResults').innerHTML, /2026-09-07T13:00:00Z/);
+  assert.equal(h.timers.size, 1);
+  h.context.Modal.close(h.el('adminWazuhModal')); assert.equal(h.timers.size, 0, 'Escape/backdrop uses shared Modal close');
+});
+
+test('partial queue failures are escaped, persist on refresh and can be selected for retry', async () => {
+  const h = harness(); await h.api.open(); h.click('wazuhAllLanes'); h.change(ident('Machine', 'dc01'), true);
+  h.setPost(async () => ({ results: [
+    { lane_id: 'lane-one', vm_id: 100, error: '<img src=x onerror=bad>' },
+    { lane_id: 'lane-two', vm_id: 200, job: { job_id: 'job-200', vm_id: 200, status: 'queued' } },
+  ] })); await h.submit();
+  assert.match(h.el('wazuhResults').innerHTML, /&lt;img src=x onerror=bad&gt;/);
+  await h.tick(); assert.match(h.el('wazuhResults').innerHTML, /&lt;img/);
+  h.click('wazuhRetry'); await h.submit();
+  assert.deepEqual(h.calls.filter(call => call.method === 'POST')[1].body.targets, [{ lane_id: 'lane-one', vm_id: 100, platform: 'windows' }]);
+});
+
+test('unconfigured, empty and unsafe console URL payloads are explicit and cannot submit', async () => {
+  const h = harness(); h.setStatus({ manager: '', console_url: 'javascript:alert(1)', lanes: [] }); await h.api.open();
+  assert.match(h.el('wazuhManager').innerHTML, /not configured/);
+  assert.doesNotMatch(h.el('wazuhManager').innerHTML, /href=/);
+  assert.match(h.el('wazuhLanes').innerHTML, /No deployed lanes/);
+  assert.equal(h.el('wazuhSubmit').disabled, true);
+});
+
+test('batches above 200 targets cannot be submitted', async () => {
+  const h = harness(); const data = fixture(); data.lanes = [data.lanes[0]];
+  data.lanes[0].targets = Array.from({ length: 201 }, (_, i) => ({ vm_id: 1000 + i, name: 'Linux', type: 'qemu', platform: 'linux', runnable: true }));
+  h.setStatus(data); await h.api.open(); h.click('wazuhAllLanes'); h.click('wazuhMissing');
+  assert.equal(h.el('wazuhSubmit').disabled, true); assert.match(h.el('wazuhSummary').textContent, /at most 200/);
+  await h.submit(); assert.equal(h.calls.filter(call => call.method === 'POST').length, 0);
+  h.change(targetId('Target', 'lane-one', 1200), false); assert.equal(h.el('wazuhSubmit').disabled, false);
+});
+
+test('a status response started before submission cannot replace newly queued jobs', async () => {
+  const h = harness(); await h.api.open(); h.change(ident('Lane', 'lane-one'), true); h.change(ident('Machine', 'dc01'), true);
+  let finish; h.setGet(() => new Promise(resolve => { finish = resolve; }));
+  const poll = h.tick(); await h.submit();
+  assert.match(h.el('wazuhResults').innerHTML, /1 queued/);
+  finish(fixture()); await poll;
+  assert.match(h.el('wazuhResults').innerHTML, /1 queued/);
+  assert.equal(h.timers.size, 1, 'Only one poll remains after overlapping requests');
+  assert.equal(h.el('wazuhSubmit').disabled, true);
+});
+
+test('lost queue response requires status refresh before retry; persisted job prevents duplicates', async () => {
+  const h = harness(); await h.api.open(); h.change(ident('Lane', 'lane-one'), true); h.change(ident('Machine', 'dc01'), true);
+  const data = fixture(); data.lanes[0].jobs = [{ vm_id: 100, job_id: 'persisted', status: 'queued' }];
+  h.setPost(async () => { h.setStatus(data); throw new Error('Network disconnected'); });
+  await h.submit();
+  assert.equal(h.el('wazuhSubmit').disabled, true);
+  assert.match(h.el('wazuhError').textContent, /Refresh status before retrying/);
+  await h.submit(); assert.equal(h.calls.filter(call => call.method === 'POST').length, 1);
+  await h.tick(); assert.match(h.el('wazuhResults').innerHTML, /1 queued/);
+  assert.equal(h.el('wazuhSubmit').disabled, true);
+});

@@ -586,9 +586,15 @@ test('R1-20: no browser file sends an explicit v2 fallback', () => {
 
 test('R1-21: every subnet-scheme <select> pre-selects v3, and v2 stays offered', () => {
   const html = read(ADMIN_LANES_HTML);
-  const selects = html.match(/<select id="(?:gen|dep)-subnet-scheme">[\s\S]*?<\/select>/g) || [];
-  assert.strictEqual(selects.length, 2,
-    `expected the generate and the deploy selector. ${R1}`);
+  // ONE selector now. The Generate + Deploy tab was removed when this page was
+  // rebuilt around the live lane diagram: generation already had full parity on
+  // /ciab/generator, and this page became a deploy console. #gen-subnet-scheme
+  // went with it. Every other assertion below is unchanged and is the part that
+  // actually matters — v3 pre-selected, v2 never pre-selected, v2 still offered.
+  const selects = html.match(/<select id="dep-subnet-scheme">[\s\S]*?<\/select>/g) || [];
+  assert.strictEqual(selects.length, 1,
+    `expected the deploy selector, with a BARE opening tag — the live diagram is wired to it `
+    + `with addEventListener precisely so no attribute has to be added here. ${R1}`);
   for (const s of selects) {
     assert.ok(/<option value="v3" selected>/.test(s),
       `a v2-selected option is an explicit v2 on every submit. ${R1}\n${s}`);

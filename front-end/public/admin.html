@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="/css/main.css">
   <link rel="stylesheet" href="/css/layout.css">
   <link rel="stylesheet" href="/css/topology.css">
+  <link rel="stylesheet" href="/css/admin-wazuh.css">
   <style>
     /* Admin Dashboard Styles */
     .admin-grid {
@@ -557,6 +558,7 @@
         <div class="tab-content" id="tab-lanes">
           <div class="action-bar">
             <button class="btn btn-outline" onclick="loadLanes()">Refresh</button>
+            <button type="button" class="btn btn-primary" onclick="AdminWazuh.open()">Deploy Wazuh agents</button>
             <select id="lanesFilter" onchange="loadLanes()" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
               <option value="">All Statuses</option>
               <option value="active">Active</option>
@@ -2239,6 +2241,7 @@ msmith@arizona.edu, Mark, Smith"
   <script src="/js/admin/admin-users.js"></script>
   <script src="/js/admin/admin-sessions.js"></script>
   <script src="/js/admin/admin-lanes.js"></script>
+  <script src="/js/admin/admin-wazuh.js"></script>
   <script src="/js/admin/admin-audit.js"></script>
   <script src="/js/admin/admin-challenges.js"></script>
   <script src="/js/admin/admin-vuln-scripts.js"></script>

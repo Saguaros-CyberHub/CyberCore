@@ -12,6 +12,7 @@ const router = express.Router();
 router.use(require('./admin/guac'));
 router.use(require('./admin/cluster'));
 router.use(require('./admin/lanes'));
+router.use(require('./admin/wazuh-agents'));
 router.use(require('./admin/groups'));
 router.use(require('./admin/lab-networks'));
 router.use(require('./admin/workstation-templates'));

@@ -766,6 +766,12 @@ function loadRouter() {
   put(path.join(CIAB, 'routes', 'profile-deploy.js'), {
     loadProfileForDeploy: async () => ({ profile: { id: 'p1' }, assets: [] }),
     defaultAssetSelection: () => [],
+    // compilePlanFor reads its catalogs and its vuln-app probe from the same
+    // module the deploy does, so a brief and a deploy of one client can never
+    // resolve against different rows — and so the brief does not compile with
+    // vulnApp: null, which put every host on the attacker's segment.
+    loadDeployCatalogs: async () => ({ vmTemplateCatalog: [], vulnScriptCatalog: [] }),
+    PLAN_PROBE_APP: Object.freeze({ install_script: '# probe', delivery_mode: 'docker' }),
   });
 
   const model = require(path.join(CIAB, 'utils', 'engagement-model.js'));

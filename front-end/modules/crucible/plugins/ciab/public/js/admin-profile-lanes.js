@@ -35,74 +35,18 @@ let GROUPS_POLL_TIMER = null;
 // ─── Tabs ───────────────────────────────────────────────────────────────────
 
 function switchTab(name) {
-  // Top-level tabs only (skip the nested subtabs which use data-subtab)
+  // Two tabs now: Deploy Lanes and Active Groups. Generation lives on /ciab/generator.
   document.querySelectorAll('.tab[data-tab]').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === `tab-${name}`));
-  if (name === 'existing') refreshProfiles();
-  if (name === 'groups')   refreshGroups();
-}
-
-// Subtabs inside Tab 1 (Basic / Organization / Technical / Advanced / Lane Deployment)
-function switchSubTab(name) {
-  document.querySelectorAll('.tab[data-subtab]').forEach(t => t.classList.toggle('active', t.dataset.subtab === name));
-  document.querySelectorAll('.subtab-content').forEach(c => {
-    c.style.display = (c.id === `subtab-${name}`) ? '' : 'none';
-  });
-}
-
-// ─── Client-type → industry list (mirrors generator.html CLIENT_TYPES) ─────
-const CLIENT_TYPE_INDUSTRIES = {
-  SMB: [
-    'Regional Logistics & Warehousing', 'Mid-size Dental Group', 'Light Manufacturing',
-    'Professional Services Firm', 'Retail Chain (Regional)'
-  ],
-  NonProfit: ['Community Health Center', 'Social Services Agency'],
-  Utility_IT_OT: ['Municipal Water/Wastewater', 'Rural Electric Cooperative'],
-  K12: ['Rural School District', 'Suburban School District']
-};
-const CLIENT_TYPE_DEFAULTS = {
-  SMB:           { emp:[25,200],  stak:[5,8],  end:[20,90],  fw:[5,15],  weak:[3,8]  },
-  NonProfit:     { emp:[10,100],  stak:[4,7],  end:[15,60],  fw:[3,10],  weak:[3,6]  },
-  Utility_IT_OT: { emp:[50,500],  stak:[6,12], end:[50,300], fw:[15,50], weak:[5,12] },
-  K12:           { emp:[100,2000],stak:[5,10], end:[200,5000],fw:[10,30],weak:[4,10] }
-};
-
-function onClientTypeChange() {
-  const type = document.getElementById('gen-client-type').value;
-  const industries = CLIENT_TYPE_INDUSTRIES[type] || [];
-  const dropdown = document.getElementById('gen-industry');
-  dropdown.innerHTML = '<option value="">🎲 Random (recommended)</option>' +
-    industries.map(i => `<option value="${i}">${i}</option>`).join('');
-
-  // Update default ranges to match the client type's typical scale
-  const d = CLIENT_TYPE_DEFAULTS[type];
-  if (d) {
-    const setIf = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
-    setIf('gen-emp-min',  d.emp[0]);   setIf('gen-emp-max',  d.emp[1]);
-    setIf('gen-stak-min', d.stak[0]);  setIf('gen-stak-max', d.stak[1]);
-    setIf('gen-end-min',  d.end[0]);   setIf('gen-end-max',  d.end[1]);
-    setIf('gen-fw-min',   d.fw[0]);    setIf('gen-fw-max',   d.fw[1]);
-    setIf('gen-weak-min', d.weak[0]);  setIf('gen-weak-max', d.weak[1]);
+  if (name === 'existing') {
+    refreshProfiles();
+    // INSIDE switchTab, not on the onclick: switchTab is also called
+    // programmatically (see runDeploy), and a hook on the button would miss
+    // those. Cytoscape measures its container at create(), and .tab-content is
+    // display:none until it is .active, so the mount cannot happen any earlier.
+    if (typeof LaneTopo !== 'undefined') LaneTopo.onTabShown();
   }
-}
-
-function onDifficultyChange() {
-  // Weakness range follows difficulty (admin can still override after)
-  const diff = document.getElementById('gen-difficulty').value;
-  const weakDefaults = { beginner:[3,5], intermediate:[3,8], advanced:[6,12] };
-  const d = weakDefaults[diff];
-  if (d) {
-    document.getElementById('gen-weak-min').value = d[0];
-    document.getElementById('gen-weak-max').value = d[1];
-  }
-}
-
-// Keep max_students >= num_lanes so the form doesn't submit an invalid combo.
-// If admin bumps num_lanes above current max_students, bump max_students too.
-function syncMaxStudents() {
-  const numLanes = parseInt(document.getElementById('gen-num-lanes').value, 10) || 0;
-  const maxStud = parseInt(document.getElementById('gen-max-students').value, 10) || 0;
-  if (numLanes > maxStud) document.getElementById('gen-max-students').value = numLanes;
+  if (name === 'groups') refreshGroups();
 }
 
 // ─── HTTP helpers ───────────────────────────────────────────────────────────
@@ -115,6 +59,9 @@ async function apiCall(path, opts = {}) {
   const token = localStorage.getItem('token');
   const resp = await fetch(`/api${path}`, {
     method: opts.method || 'GET',
+    // Kept in step with API.request, which spreads options into the fetch config:
+    // the live diagram aborts superseded plan requests.
+    signal: opts.signal,
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
     body: opts.body ? (typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body)) : undefined
   });
@@ -133,82 +80,7 @@ function clearBanner(elId) {
   if (el) el.innerHTML = '';
 }
 
-// ─── TAB 1: Generate + Deploy ──────────────────────────────────────────────
-
-async function generateAndDeploy() {
-  // ─── Helpers to safely read form fields ──────────────────────────────────
-  const $ = id => document.getElementById(id);
-  const valStr = id => { const v = $(id)?.value?.trim(); return v ? v : undefined; };
-  const valInt = id => { const v = parseInt($(id)?.value, 10); return Number.isFinite(v) ? v : undefined; };
-  const valFloat = id => { const v = parseFloat($(id)?.value); return Number.isFinite(v) ? v : undefined; };
-  const range = (minId, maxId) => {
-    const min = valInt(minId), max = valInt(maxId);
-    if (min == null && max == null) return undefined;
-    return { min: min ?? max, max: max ?? min };
-  };
-
-  const empRange = range('gen-emp-min', 'gen-emp-max');
-  const payload = {
-    // Basic
-    client_type: valStr('gen-client-type'),
-    difficulty:  valStr('gen-difficulty'),
-    industry:    valStr('gen-industry'),
-
-    // Organization
-    company_name: valStr('gen-company-name'),
-    domain:       valStr('gen-domain'),
-    hq_city:      valStr('gen-hq-city'),
-    maturity:     valStr('gen-maturity'),
-    employees:    empRange,
-    stakeholder_count: range('gen-stak-min', 'gen-stak-max'),
-    framework:    valStr('gen-framework'),
-
-    // Technical
-    delivery:        valStr('gen-delivery'),
-    endpoint_range:  range('gen-end-min', 'gen-end-max'),
-    firewall_rules_range: range('gen-fw-min', 'gen-fw-max'),
-    weakness_range:  range('gen-weak-min', 'gen-weak-max'),
-
-    // Advanced
-    cooperation:  valStr('gen-cooperation'),
-    scaffolding:  valStr('gen-scaffolding'),
-    est_hours:    valInt('gen-est-hours'),
-    llmModel:     valStr('gen-llm-model'),
-    temperature:  valFloat('gen-temperature'),
-    custom_seed:  valStr('gen-custom-seed'),
-
-    // Lane deployment
-    num_lanes:    valInt('gen-num-lanes'),
-    max_students: valInt('gen-max-students'),
-    group_name:   valStr('gen-group-name'),
-    subnet_scheme: valStr('gen-subnet-scheme') || DEFAULT_SUBNET_SCHEME,
-    attack_boxes: $('gen-attack-boxes').checked,
-    vuln_app: {
-      enabled: $('gen-vuln-app').checked,
-      delivery_mode: $('gen-vuln-app-dedicated').checked ? 'standalone_vm' : 'docker'
-    }
-  };
-
-  if (!payload.num_lanes || payload.num_lanes < 1) {
-    renderBanner('gen-result', 'error', 'Number of lanes must be at least 1.');
-    return;
-  }
-
-  renderBanner('gen-result', 'info', '⏳ Generating profile via Claude (4 parallel calls)… this typically takes 30–90 seconds. Don\'t close this tab.');
-
-  try {
-    const result = await apiCall('/profiles/generate-and-deploy', { method: 'POST', body: payload });
-    const profileName = result.profile?.companyName || result.profile?.company_name || result.profile?.id;
-    renderBanner('gen-result', 'success',
-      `✅ Profile <strong>${profileName}</strong> generated. Lane group <code>${result.deploy.group_id}</code> deploying.<br>
-       Switching to Active Groups tab to watch progress…`);
-    setTimeout(() => switchTab('groups'), 1200);
-  } catch (err) {
-    renderBanner('gen-result', 'error', `❌ ${err.message}`);
-  }
-}
-
-// ─── TAB 2: Pick / upload profile ──────────────────────────────────────────
+// ─── TAB 1: Pick / upload profile ──────────────────────────────────────────
 
 async function refreshProfiles() {
   const picker = document.getElementById('profile-picker');
@@ -225,10 +97,10 @@ async function refreshProfiles() {
       const id = p.id;
       const name = p.companyName || p.company_name || id.slice(0, 8);
       const date = (p.createdAt || p.created_at || '').slice(0, 10);
-      return `<option value="${id}">${name} (${date})</option>`;
+      return `<option value="${escapeHtml(id)}">${escapeHtml(name)} (${escapeHtml(date)})</option>`;
     }).join('');
   } catch (err) {
-    picker.innerHTML = `<option value="">Error: ${err.message}</option>`;
+    picker.innerHTML = `<option value="">Error: ${escapeHtml(err.message)}</option>`;
   }
 }
 
@@ -271,6 +143,9 @@ async function loadProfileById(id) {
     CURRENT_ASSETS = Array.isArray(assets) ? assets : [];
 
     renderAssetTable();
+    // First draw. Everything after this is driven by the delegated listener in
+    // admin-profile-lanes-topo.js.
+    if (typeof LaneTopo !== 'undefined') LaneTopo.schedule();
     document.getElementById('asset-selection-card').style.display = '';
     document.getElementById('dep-group-name').placeholder =
       `${(profile.companyName || profile.company_name || 'profile').replace(/\s/g,'-').toLowerCase()}-${new Date().toISOString().slice(0,10)}`;
@@ -282,11 +157,35 @@ async function loadProfileById(id) {
   }
 }
 
+/**
+ * The scheme the block was CARVED at wins over the selector on every deploy
+ * (runProfileDeploy's carvedScheme). Once a reservation exists, showing a live
+ * v2/v3 dropdown invites a choice that cannot be honoured — so it is set to the
+ * carve and disabled, with the reason on screen.
+ */
+function lockSchemeToCarve(scheme) {
+  const sel = document.getElementById('dep-subnet-scheme');
+  const note = document.getElementById('dep-scheme-note');
+  if (!sel) return;
+  if (!scheme) {
+    sel.disabled = false;
+    if (note) note.textContent = '';
+    return;
+  }
+  sel.value = scheme;
+  sel.disabled = true;
+  if (note) {
+    note.textContent = 'Locked: this profile\'s network was reserved as ' + scheme
+      + ', and lanes are built at the scheme the block was carved at.';
+  }
+}
+
 async function loadReservationStatus(profileId) {
   const el = document.getElementById('dep-reservation-status');
   if (!el) return;
   try {
     const r = await apiCall(`/profile-deploy/profiles/${profileId}/reservation`);
+    lockSchemeToCarve(r.subnet_scheme || null);
     if (r.reserved) {
       const maxStudInput = document.getElementById('dep-max-students');
       maxStudInput.value = r.max_students;
@@ -411,7 +310,7 @@ async function renderEngagementPanel(profileId, el) {
 async function reserveEngagement(profileId, el) {
   const maxStudInput = document.getElementById('dep-max-students');
   const btn = document.getElementById('btn-reserve-engagement');
-  if (btn) setBtnLoading(btn, true);
+  if (btn) Utils.setBtnLoading(btn, true);
   try {
     await apiCall('/profile-deploy/engagements', {
       method: 'POST',
@@ -422,53 +321,234 @@ async function reserveEngagement(profileId, el) {
         max_students: parseInt(maxStudInput.value, 10),
       },
     });
-    Toast.success('Reserving the network — this takes a few minutes.');
+    Toast.success('Reserving Network', 'Carving the VXLAN block and creating one VNet per lane — this takes a few minutes.');
     await renderEngagementPanel(profileId, el);
   } catch (err) {
-    Toast.error(err.message || 'Could not start the reservation');
+    Toast.error('Reservation Failed', err.message || 'Could not start the reservation.');
   } finally {
-    if (btn) setBtnLoading(btn, false);
+    if (btn) Utils.setBtnLoading(btn, false);
   }
 }
 
 async function reprovisionEngagement(engagementId, profileId, el) {
   const btn = document.getElementById('btn-reprovision-engagement');
-  if (btn) setBtnLoading(btn, true);
+  if (btn) Utils.setBtnLoading(btn, true);
   try {
     await apiCall(`/profile-deploy/engagements/${engagementId}/reprovision`, { method: 'POST' });
-    Toast.success('Re-provisioning the network.');
+    Toast.success('Re-provisioning', 'Re-running the network carve for this engagement.');
     await renderEngagementPanel(profileId, el);
   } catch (err) {
-    Toast.error(err.message || 'Could not re-provision');
+    Toast.error('Re-provision Failed', err.message || 'Could not re-provision.');
   } finally {
-    if (btn) setBtnLoading(btn, false);
+    if (btn) Utils.setBtnLoading(btn, false);
   }
 }
 
-function renderAssetTable() {
-  const tbody = document.getElementById('asset-table-body');
+// ─── The asset rail ─────────────────────────────────────────────────────────
+//
+// Selection lives in a Set of asset indices rather than in the DOM. The table it
+// replaced read `input[data-asset-idx]` back out of the document on every
+// gather, which meant selection could not survive a filter, a search or a
+// re-render — and the rail does all three. gatherAssetSelection() keeps its
+// exact [{hostname, role, os, included}] contract so runDeploy is untouched.
+
+const SELECTED = new Set();      // asset indices the admin wants deployed
+let RAIL_FILTER = 'all';         // all | servers | ghosts
+let RAIL_SEARCH = '';
+// hostname (lowercased) -> what POST /plan says will become of it. Filled by
+// LaneTopo on every response; empty until the first one lands.
+let RAIL_FATE = new Map();
+
+/** The default selection, and the one runProfileDeploy applies when none is sent. */
+function selectDefault() {
+  SELECTED.clear();
+  CURRENT_ASSETS.forEach((a, i) => {
+    if (String(a.role || '').toLowerCase() === 'server') SELECTED.add(i);
+  });
+}
+
+/**
+ * The row's fate IN THE LANE, not its role — which is the whole point of the
+ * glyph. Everything except 'parked' comes from the server's plan; nothing here
+ * decides placement.
+ */
+const FATE = {
+  pivot:    { glyph: '\u25C6', cls: 'fate-pivot',    label: 'dual-homed pivot at .240' },
+  internal: { glyph: '\u25CF', cls: 'fate-internal', label: 'builds, on the corporate segment' },
+  external: { glyph: '\u25B2', cls: 'fate-external', label: 'builds, on the attacker segment' },
+  lan:      { glyph: '\u25AC', cls: 'fate-lan',      label: 'builds, flat lane' },
+  gap:      { glyph: '\u26A0', cls: 'fate-gap',      label: 'builds, but a declared service has no installer' },
+  ghost:    { glyph: '\u2716', cls: 'fate-ghost',    label: 'no template matched — this will NOT be built' },
+  parked:   { glyph: '\u2014', cls: 'fate-parked',   label: 'not selected' },
+  pending:  { glyph: '\u00B7', cls: 'fate-parked',   label: 'working it out…' },
+};
+
+function fateFor(asset, idx) {
+  if (!SELECTED.has(idx)) return FATE.parked;
+  return RAIL_FATE.get(String(asset.hostname || '').toLowerCase()) || FATE.pending;
+}
+
+/** Called by LaneTopo when a plan lands, so the list and the diagram agree. */
+function applyPlanToRail(plan) {
+  RAIL_FATE = new Map();
+  (plan.machines || []).forEach((m) => {
+    const key = String(m.hostname || m.name || '').toLowerCase();
+    let fate;
+    if (m.is_pivot) fate = FATE.pivot;
+    else if (m.severity === 'warning') fate = FATE.gap;
+    else if (m.segments.indexOf('lan') !== -1) fate = FATE.lan;
+    else if (m.segments.indexOf('int') !== -1) fate = FATE.internal;
+    else fate = FATE.external;
+    RAIL_FATE.set(key, fate);
+  });
+  (plan.ghosts || []).forEach((g) => {
+    RAIL_FATE.set(String(g.hostname || g.name || '').toLowerCase(),
+      Object.assign({}, FATE.ghost, { why: g.reason_text, remedies: g.remedies }));
+  });
+  renderAssetRail();
+}
+
+function railMatches(a, idx) {
+  if (RAIL_SEARCH) {
+    const hay = [a.hostname, a.os, a.role].join(' ').toLowerCase();
+    if (hay.indexOf(RAIL_SEARCH) === -1) return false;
+  }
+  if (RAIL_FILTER === 'servers') return String(a.role || '').toLowerCase() === 'server';
+  if (RAIL_FILTER === 'ghosts') return fateFor(a, idx) === FATE.ghost
+    || (fateFor(a, idx) && fateFor(a, idx).cls === 'fate-ghost');
+  return true;
+}
+
+/**
+ * Rows grouped by the profile's own subnet when it declares one, else by role.
+ * Grouping by the CLIENT's network is what lets an admin reason in the story's
+ * terms ("everything in the DMZ") rather than in ours.
+ */
+function railGroups() {
+  const groups = new Map();
+  CURRENT_ASSETS.forEach((a, i) => {
+    if (!railMatches(a, i)) return;
+    const key = a.subnet || a.role || 'other';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(i);
+  });
+  return groups;
+}
+
+function renderAssetRail() {
+  const host = document.getElementById('dep-asset-list');
+  if (!host) return;
+
+  const count = document.getElementById('rail-count');
+  if (count) {
+    const ghosts = CURRENT_ASSETS.filter(
+      (a, i) => SELECTED.has(i) && fateFor(a, i).cls === 'fate-ghost').length;
+    count.textContent = SELECTED.size + ' of ' + CURRENT_ASSETS.length + ' selected'
+      + (ghosts ? ' · ' + ghosts + ' will not build' : '');
+  }
+
   if (CURRENT_ASSETS.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty">No assets in this profile.</td></tr>';
+    host.innerHTML = '<div class="empty">No assets in this profile.</div>';
     return;
   }
-  tbody.innerHTML = CURRENT_ASSETS.map((a, i) => {
-    const isServer = String(a.role || '').toLowerCase() === 'server';
-    const services = Array.isArray(a.services) ? a.services.join(', ') : '';
-    return `<tr>
-      <td><input type="checkbox" data-asset-idx="${i}" ${isServer ? 'checked' : ''} /></td>
-      <td><code>${escapeHtml(a.hostname || '')}</code></td>
-      <td><span class="role-${isServer ? 'server' : 'workstation'}">${escapeHtml(a.role || '')}</span></td>
-      <td>${escapeHtml(a.os || '')}</td>
-      <td class="muted">${escapeHtml(services)}</td>
-    </tr>`;
-  }).join('');
+
+  const groups = railGroups();
+  if (groups.size === 0) {
+    host.innerHTML = '<div class="empty">Nothing matches that filter.</div>';
+  } else {
+    let out = '';
+    groups.forEach((idxs, key) => {
+      const on = idxs.filter((i) => SELECTED.has(i)).length;
+      out += '<div class="rail-group"><div class="rail-group-head">'
+        + '<span>' + escapeHtml(key) + '</span><span>' + on + '/' + idxs.length + '</span></div>';
+      out += idxs.map((i) => {
+        const a = CURRENT_ASSETS[i];
+        const f = fateFor(a, i);
+        const isGhost = f.cls === 'fate-ghost';
+        return '<label class="asset-row' + (isGhost ? ' is-ghost' : '') + '"'
+          + ' data-asset-row="' + i + '" title="' + escapeHtml(f.label) + '">'
+          + '<input type="checkbox" data-asset-idx="' + i + '"' + (SELECTED.has(i) ? ' checked' : '') + ' />'
+          + '<span><code>' + escapeHtml(a.hostname || '') + '</code>'
+          + '<span class="asset-sub">' + escapeHtml(a.os || a.role || '') + '</span></span>'
+          + '<span class="fate ' + f.cls + '">' + f.glyph + '</span>'
+          + '</label>';
+      }).join('');
+      out += '</div>';
+    });
+    host.innerHTML = out;
+  }
+
+  renderParked();
 }
 
+function renderParked() {
+  const host = document.getElementById('dep-parked');
+  if (!host) return;
+  const parked = CURRENT_ASSETS.map((a, i) => ({ a, i })).filter(({ i }) => !SELECTED.has(i));
+  if (parked.length === 0) { host.innerHTML = ''; return; }
+  host.innerHTML = '<div class="parked-strip"><span class="muted" style="font-size:0.72rem;">'
+    + 'PARKED (' + parked.length + ') — click to include</span><br>'
+    + parked.map(({ a, i }) =>
+      '<button type="button" class="parked-chip" data-park-add="' + i + '">'
+      + escapeHtml(a.hostname || '') + ' +</button>').join('')
+    + '</div>';
+}
+
+/** Back-compat alias: the old name, still called on profile load. */
+function renderAssetTable() {
+  selectDefault();
+  renderAssetRail();
+}
+
+// One delegated listener for the whole rail. Rows are re-rendered on every
+// change, so per-row handlers would be re-bound constantly.
+document.addEventListener('click', (e) => {
+  const chip = e.target.closest('[data-rail-filter]');
+  if (chip) {
+    RAIL_FILTER = chip.getAttribute('data-rail-filter');
+    document.querySelectorAll('[data-rail-filter]').forEach(
+      (b) => b.classList.toggle('active', b === chip));
+    renderAssetRail();
+    return;
+  }
+  const bulk = e.target.closest('[data-rail-select]');
+  if (bulk) {
+    const mode = bulk.getAttribute('data-rail-select');
+    if (mode === 'none') SELECTED.clear();
+    else if (mode === 'servers') selectDefault();
+    else CURRENT_ASSETS.forEach((a, i) => SELECTED.add(i));
+    renderAssetRail();
+    if (typeof LaneTopo !== 'undefined') LaneTopo.schedule();
+    return;
+  }
+  const park = e.target.closest('[data-park-add]');
+  if (park) {
+    SELECTED.add(parseInt(park.getAttribute('data-park-add'), 10));
+    renderAssetRail();
+    if (typeof LaneTopo !== 'undefined') LaneTopo.schedule();
+  }
+});
+
+document.addEventListener('change', (e) => {
+  const cb = e.target.closest('input[data-asset-idx]');
+  if (!cb) return;
+  const idx = parseInt(cb.getAttribute('data-asset-idx'), 10);
+  if (cb.checked) SELECTED.add(idx); else SELECTED.delete(idx);
+  // The row is repainted to 'pending' immediately; the real fate arrives with
+  // the plan. Optimistic UI may only DIM — it must never guess a placement.
+  renderAssetRail();
+});
+
+document.addEventListener('input', (e) => {
+  if (!e.target.closest('#rail-search')) return;
+  RAIL_SEARCH = e.target.value.trim().toLowerCase();
+  renderAssetRail();
+});
+
 function gatherAssetSelection() {
-  return CURRENT_ASSETS.map((a, i) => {
-    const cb = document.querySelector(`input[data-asset-idx="${i}"]`);
-    return { hostname: a.hostname, role: a.role, os: a.os, included: cb ? cb.checked : false };
-  });
+  return CURRENT_ASSETS.map((a, i) => (
+    { hostname: a.hostname, role: a.role, os: a.os, included: SELECTED.has(i) }
+  ));
 }
 
 async function runPreview() {
@@ -481,7 +561,12 @@ async function runPreview() {
         profile_id: CURRENT_PROFILE.id,
         num_lanes: parseInt(document.getElementById('dep-num-lanes').value, 10),
         attack_boxes: document.getElementById('dep-attack-boxes').checked,
-        vuln_app_enabled: document.getElementById('dep-vuln-app').checked
+        vuln_app_enabled: document.getElementById('dep-vuln-app').checked,
+        // Without these the server re-counted every server asset in the PROFILE
+        // and sized the cluster against a number that had nothing to do with
+        // what was ticked.
+        asset_selection: gatherAssetSelection(),
+        subnet_scheme: document.getElementById('dep-subnet-scheme').value
       }
     });
     const s = data.summary || {};
@@ -539,13 +624,28 @@ async function runDeploy() {
     asset_selection: gatherAssetSelection(),
     vuln_app: {
       enabled: document.getElementById('dep-vuln-app').checked,
-      delivery_mode: document.getElementById('dep-vuln-app-dedicated').checked ? 'standalone_vm' : 'docker',
+      // Always docker: vuln-app-generator.js overrides delivery_mode regardless
+      // of what is sent, so sending anything else would be a lie the diagram
+      // would then have to draw.
+      delivery_mode: 'docker',
       // Per-deploy difficulty (easy|medium|hard) chosen by admin/instructor in the UI.
       // Drives the LLM prompt's vuln-pool selection. Falls back to 'easy' if no radio
       // is selected (shouldn't happen because 'easy' is checked by default in the HTML).
       difficulty: (document.querySelector('input[name="dep-vuln-difficulty"]:checked') || {}).value || 'easy'
     }
   };
+
+  const ghosts = (typeof LaneTopo !== 'undefined' && LaneTopo.ghosts()) || [];
+  if (ghosts.length) {
+    const names = ghosts.map((g) => g.name).join(', ');
+    const ok = await Confirm.show({
+      title: 'Some selected assets will not be built',
+      message: ghosts.length + ' selected asset' + (ghosts.length === 1 ? '' : 's')
+        + ' resolve no VM template and will be skipped silently: ' + names + '.',
+      confirmText: 'Deploy anyway',
+    });
+    if (!ok) return;
+  }
 
   renderBanner('deploy-result', 'info', '⏳ Starting deployment…');
   try {
@@ -652,7 +752,7 @@ function showCredsModal(credentials, title = 'One-time student credentials') {
   document.body.appendChild(overlay);
 }
 
-// ─── TAB 3: Active groups ──────────────────────────────────────────────────
+// ─── TAB 2: Active groups ──────────────────────────────────────────────────
 
 async function refreshGroups() {
   document.getElementById('groups-status').textContent = 'Loading…';
@@ -681,7 +781,7 @@ function schedulePoll() {
 function renderGroups(groups) {
   const list = document.getElementById('groups-list');
   if (groups.length === 0) {
-    list.innerHTML = '<div class="empty">No groups yet. Deploy from Tab 1 or Tab 2.</div>';
+    list.innerHTML = '<div class="empty">No groups yet. Deploy some from the Deploy Lanes tab.</div>';
     return;
   }
   list.innerHTML = groups.map(g => `
@@ -695,15 +795,38 @@ function renderGroups(groups) {
             ${g.gap_count} service gaps, ${g.miss_count} template misses</div>
         </div>
         <div style="display:flex; gap:0.5rem;">
-          <button class="btn btn-secondary btn-small" onclick="loadGroupDetail('${g.id}')">Details</button>
-          <button class="btn btn-secondary btn-small" onclick="promptAddLanes('${g.id}','${g.profile_id || ''}','${escapeHtml(g.group_name)}')">+ Add lanes</button>
-          <button class="btn btn-danger btn-small" onclick="teardownGroup('${g.id}', '${escapeHtml(g.group_name)}')">Tear down</button>
+          <button class="btn btn-secondary btn-small" data-group-action="details"
+            data-group-id="${escapeHtml(g.id)}">Details</button>
+          <button class="btn btn-secondary btn-small" data-group-action="add-lanes"
+            data-group-id="${escapeHtml(g.id)}" data-profile-id="${escapeHtml(g.profile_id || '')}"
+            data-group-name="${escapeHtml(g.group_name)}">+ Add lanes</button>
+          <button class="btn btn-danger btn-small" data-group-action="teardown"
+            data-group-id="${escapeHtml(g.id)}" data-group-name="${escapeHtml(g.group_name)}">Tear down</button>
         </div>
       </div>
       <div id="group-${g.id}-detail"></div>
     </div>
   `).join('');
 }
+
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-group-action]');
+  if (!btn) return;
+  const id = btn.getAttribute('data-group-id');
+  const name = btn.getAttribute('data-group-name') || '';
+  switch (btn.getAttribute('data-group-action')) {
+    case 'details':   loadGroupDetail(id); break;
+    case 'add-lanes': promptAddLanes(id, btn.getAttribute('data-profile-id') || '', name); break;
+    case 'teardown':  teardownGroup(id, name); break;
+    case 'retry':     retryLane(id, btn.getAttribute('data-lane-id')); break;
+    // The deployed lane, drawn by the same renderer as the pre-deploy preview.
+    case 'topology':
+      if (typeof LaneTopo !== 'undefined') {
+        LaneTopo.openLive(btn.getAttribute('data-lane-id'), btn.getAttribute('data-lane-name'));
+      }
+      break;
+  }
+});
 
 async function loadGroupDetail(groupId) {
   const target = document.getElementById(`group-${groupId}-detail`);
@@ -750,8 +873,14 @@ async function loadGroupDetail(groupId) {
           <div><span class="pill pill-${j.status}">${j.status}</span>
             ${j.error_msg ? `<div class="muted" title="${escapeHtml(j.error_msg)}">⚠ ${escapeHtml(j.error_msg).slice(0, 60)}</div>` : ''}</div>
           <div class="ip-list">${escapeHtml(ipsForLane || '—')}</div>
-          <div>${isError
-            ? `<button class="btn btn-small btn-secondary" onclick="retryLane('${groupId}','${j.lane_id}')">Retry</button>`
+          <div style="display:flex; gap:0.35rem;">${j.lane_id
+            ? `<button class="btn btn-small btn-secondary" data-group-action="topology"
+                 data-lane-id="${escapeHtml(j.lane_id)}"
+                 data-lane-name="${escapeHtml(j.lane_name || ('lane ' + j.lane_index))}"
+                 title="What this lane actually built">Topology</button>`
+            : ''}${isError
+            ? `<button class="btn btn-small btn-secondary" data-group-action="retry"
+                 data-group-id="${escapeHtml(groupId)}" data-lane-id="${escapeHtml(j.lane_id)}">Retry</button>`
             : ''}</div>
         </div>`;
       }).join('')}
@@ -847,9 +976,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
   }
-  // Populate the industry dropdown for the default client type (SMB)
-  if (typeof onClientTypeChange === 'function') onClientTypeChange();
-
   // Hide the Vuln-App difficulty row when the vuln-app checkbox is off —
   // the selector is meaningless if no vuln-app will be generated.
   const vulnCb = document.getElementById('dep-vuln-app');
@@ -861,4 +987,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     syncDifficultyVisibility();
     vulnCb.addEventListener('change', syncDifficultyVisibility);
   }
+
+  // Deploy Lanes is the tab the page OPENS on now that Generate + Deploy is gone,
+  // so the profile list has to be fetched here. It used to arrive only via
+  // switchTab('existing'), which nothing calls when that tab is already active.
+  refreshProfiles();
 });

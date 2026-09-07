@@ -131,10 +131,7 @@ async function loadProfileForDeploy(profileId) {
   let json = null;
   if (profile.json_file_path) {
     const resolvedPath = path.join(process.cwd(), profile.json_file_path.replace(/^\//, ''));
-    if (fs.existsSync(resolvedPath)) {
-      const parsed = JSON.parse(fs.readFileSync(resolvedPath, 'utf-8'));
-      json = Array.isArray(parsed) ? parsed[0] : parsed;
-    }
+    json = readProfileJson(resolvedPath);
   }
   if (!json) {
     throw Object.assign(new Error('Profile JSON file missing'), { statusCode: 422 });
@@ -183,6 +180,84 @@ async function loadProfileForDeploy(profileId) {
 
 // (createEphemeralChallenge removed — challenges are now per-profile, managed
 //  by getOrCreateProfileChallenge() in utils/lane-reservation.js)
+
+/**
+ * The profile JSON is a ~100KB file read SYNCHRONOUSLY and JSON.parsed. That is
+ * cheap once per deploy and wasteful per keystroke — POST /plan calls
+ * loadProfileForDeploy on a 250ms debounce while an admin ticks checkboxes.
+ *
+ * Keyed on mtimeMs, so an edited profile is picked up on the next call rather
+ * than after a TTL expires. The parsed object is SHARED between callers by
+ * design: every reader treats it as immutable (synthesizeSpecFromProfile builds
+ * new vm objects and never writes back into the profile), and copying 100KB per
+ * call is the cost this exists to avoid.
+ */
+const PROFILE_JSON_MEMO = new Map();   // resolvedPath -> { mtimeMs, json }
+
+function readProfileJson(resolvedPath) {
+  let st;
+  try {
+    st = fs.statSync(resolvedPath);
+  } catch (_) {
+    return null;   // missing file — the caller raises the 422
+  }
+  const hit = PROFILE_JSON_MEMO.get(resolvedPath);
+  if (hit && hit.mtimeMs === st.mtimeMs) return hit.json;
+
+  const parsed = JSON.parse(fs.readFileSync(resolvedPath, 'utf-8'));
+  const json = Array.isArray(parsed) ? parsed[0] : parsed;
+  PROFILE_JSON_MEMO.set(resolvedPath, { mtimeMs: st.mtimeMs, json });
+  return json;
+}
+
+/**
+ * The two catalogs every spec synthesis resolves templates against.
+ *
+ * Extracted from runProfileDeploy so POST /plan resolves against the same rows
+ * the deploy will — a preview naming template 1201 while the deploy picks 1004
+ * would be exactly the silent wrongness the live diagram exists to remove.
+ *
+ * Memoised for CATALOG_TTL_MS because /plan runs on a keystroke debounce, and
+ * two cross-database round trips per keystroke is the one part of the preview
+ * that scales badly with an impatient admin. The DEPLOY passes { fresh: true }:
+ * it is rare, expensive and explicit, and must never resolve against a stale
+ * snapshot to save an indexed SELECT. A fresh read also refills the memo, so a
+ * preview taken straight after a deploy agrees with it.
+ */
+const CATALOG_SQL_VM = `SELECT id, os_family, os_version, os_name, template_vmid, node, role_hints, is_active, preferred, created_at
+                    FROM cybercore_template_catalog WHERE is_active = true AND template_type = 'os_template'`;
+const CATALOG_SQL_VULN = `SELECT id, slug, name, os_target, category, script_type, services_exposed, is_active FROM vuln_scripts WHERE is_active = true`;
+
+const CATALOG_TTL_MS = 30000;
+let CATALOG_MEMO = { at: 0, value: null };
+
+async function loadDeployCatalogs({ fresh = false } = {}) {
+  if (!fresh && CATALOG_MEMO.value && (Date.now() - CATALOG_MEMO.at) < CATALOG_TTL_MS) {
+    return CATALOG_MEMO.value;
+  }
+  const [vmCatalogRes, vulnCatalogRes] = await Promise.all([
+    cybercoreQuery(CATALOG_SQL_VM),
+    query(CATALOG_SQL_VULN)
+  ]);
+  const value = { vmTemplateCatalog: vmCatalogRes.rows, vulnScriptCatalog: vulnCatalogRes.rows };
+  CATALOG_MEMO = { at: Date.now(), value };
+  return value;
+}
+
+/**
+ * Whether this deploy gets a Kali box, given what the caller asked for and which
+ * engagement it is.
+ *
+ * Extracted so POST /plan draws the attack box the deploy will actually build
+ * rather than mirroring the rule. The full account of why the default is
+ * engagement-dependent — and why getting it wrong is SILENT — is at the call
+ * site in runProfileDeploy.
+ */
+function resolveAttackBoxDefault(attackBoxes, engagementType) {
+  return attackBoxes === undefined
+    ? engagementType !== BLUE_TEAM_TYPE_KEY
+    : !!attackBoxes;
+}
 
 /**
  * Build the default asset_selection from a list of assets: tick role==='server'.
@@ -615,6 +690,33 @@ function bakeSpecVmsFromMachines(machines) {
  * would bake that install into the golden image, and the real site arrives the
  * other way — bake-staging's cc_web phase, from the compiled lab, before capture.
  */
+/**
+ * The vuln-app row POST /plan hands the synthesizer.
+ *
+ * IT MUST NOT BE null, and that is the whole reason this constant exists.
+ * profile-to-spec.js gates BOTH vuln_app_install AND the synthetic 'vuln-app' VM
+ * on `vulnApp && vulnApp.install_script`. With null, resolveDmzVm returns null,
+ * applyV3Topology never runs, NO vm is given nics at all, and every machine
+ * falls through resolveVmSegments to ['ext'] — a preview that draws the entire
+ * corporate network on the attacker's segment, which is the exact inversion the
+ * live diagram exists to prevent.
+ *
+ * Never delivered and never written: /plan performs no writes, and the script
+ * body below reaches no VM. The real app is generated by getOrGenerateVulnApp,
+ * which is an LLM call taking ~4 minutes and MUST NOT be on this path.
+ *
+ * target_hostname is filled in per request from the ciab_profile_vuln_apps cache
+ * so the preview names the pivot the deploy will pick (targeting rung 1, see
+ * profile-to-spec.js). cf. BAKE_WEB_PROBE_APP, which does the same trick for the
+ * bake's web-host probe.
+ */
+const PLAN_PROBE_APP = Object.freeze({
+  install_script: '# lane-plan preview — never delivered, see PLAN_PROBE_APP',
+  // vuln-app-generator.js hard-overrides delivery to docker regardless, so this
+  // is what the deploy will use no matter what the request asked for.
+  delivery_mode: 'docker',
+});
+
 const BAKE_WEB_PROBE_APP = Object.freeze({
   install_script: '# bake web-host probe — never delivered, see BAKE_WEB_PROBE_APP',
   delivery_mode: 'docker',
@@ -2313,9 +2415,7 @@ async function runProfileDeploy(opts) {
   // which add-lanes and retry read back, so the default has to be applied here
   // rather than at the deployer — otherwise a retried lane would quietly
   // acquire the Kali the first deploy declined.
-  const attackBoxes = opts.attackBoxes === undefined
-    ? engagement !== BLUE_TEAM_TYPE_KEY
-    : !!opts.attackBoxes;
+  const attackBoxes = resolveAttackBoxDefault(opts.attackBoxes, engagement);
 
   if (!profileId) throw Object.assign(new Error('profile_id required'), { statusCode: 400 });
   if (!Number.isFinite(numLanes) || numLanes < 1 || numLanes > 100) {
@@ -2347,13 +2447,8 @@ async function runProfileDeploy(opts) {
     : defaultAssetSelection(assets);
 
   // 3. Fetch catalogs. vm catalog lives in cybercore_db; vuln scripts in clinic_db.
-  const [vmCatalogRes, vulnCatalogRes] = await Promise.all([
-    cybercoreQuery(`SELECT id, os_family, os_version, os_name, template_vmid, node, role_hints, is_active, preferred, created_at
-                    FROM cybercore_template_catalog WHERE is_active = true AND template_type = 'os_template'`),
-    query(`SELECT id, slug, name, os_target, category, script_type, services_exposed, is_active FROM vuln_scripts WHERE is_active = true`)
-  ]);
-  const vmTemplateCatalog = vmCatalogRes.rows;
-  const vulnScriptCatalog = vulnCatalogRes.rows;
+  //    fresh: a deploy never resolves against the preview's memo.
+  const { vmTemplateCatalog, vulnScriptCatalog } = await loadDeployCatalogs({ fresh: true });
 
   // 4 + 6 in parallel. Vuln-app LLM generation can take ~4min on a fresh
   // profile, and SDN provisioning for a 25-slot reservation takes ~45s.
@@ -2763,22 +2858,567 @@ router.get('/image/:token', (req, res) => {
 });
 
 // POST /api/profile-deploy/preview — pre-flight resource estimate
+// ─── THE LIVE LANE PLAN ─────────────────────────────────────────────────────
+/*
+ * What POST /plan is for: the admin lane-deploy page draws a live network
+ * diagram of ONE lane while an admin ticks assets, and that diagram has to be
+ * true. "True" here has a precise meaning — the machines, their segments and
+ * their octets must be the ones runProfileDeploy would build from the same
+ * inputs, not a second implementation that agrees today.
+ *
+ * So this endpoint calls the SAME functions the deploy calls:
+ * synthesizeSpecFromProfile for the machine list, resolveVmSegments for any
+ * placement the synthesizer did not stamp, resolveAttackBoxDefault for Kali,
+ * resolveConsolePlan for the console, and the same bake gate and stored-spec
+ * rules. Where the deploy's answer depends on state (a carved engagement, live
+ * lanes, a golden bake) this reads that state rather than assuming the happy
+ * path.
+ *
+ * WHAT IT MUST NEVER DO — each of these has bitten a preview endpoint before:
+ *   - getOrGenerateVulnApp: the LLM path, ~4 minutes. PLAN_PROBE_APP exists so
+ *     the DMZ question can be answered without it.
+ *   - buildDeployPreview / proxmoxAPI / anything touching the cluster. /preview
+ *     keeps that and stays on the slow lane; this runs at keystroke cadence.
+ *   - getOrCreateProfileChallenge: it CARVES. findProfileChallenge is the read.
+ *   - assertEngagementDeployable: it throws when unreserved, which is a
+ *     legitimate thing to be previewing.
+ *   - any write, and any return of profile.json_data (src/server.js 404s those
+ *     files over HTTP deliberately).
+ *
+ * IT RETURNS 200 WITH problems[] RATHER THAN THROWING. Every refusal path here
+ * is reachable by ticking a checkbox — 21 band-bound machines, a telemetry name
+ * collision, a drifted bake, a missing config/site.json — and a 500 mid-typing
+ * would blank the diagram instead of explaining it.
+ */
+async function buildLanePlan(opts = {}) {
+  const laneNetworking = require('../utils/lane-networking');
+  const goadDeploy = require('../../../../../src/utils/goad-deploy');
+
+  const profileId = opts.profileId;
+  const engagement = sanitizeEngagementType(opts.engagementType);
+  const numLanes = Number.isFinite(opts.numLanes) ? opts.numLanes : 1;
+  const problems = [];
+  const notices = [];
+  const push = (list, code, severity, message, extra) =>
+    list.push(Object.assign({ code, severity, message }, extra || {}));
+
+  if (!profileId) throw Object.assign(new Error('profile_id required'), { statusCode: 400 });
+
+  // challenge-lane-deployer is required LAZILY and DEFENSIVELY. Lazily for the
+  // same reason goad-deploy is elsewhere in this file — it drags in proxmox and
+  // ssh, and this is the only place here that needs it. Defensively because its
+  // transitive batch-deployer.js calls getSchedulingConfig() at module load,
+  // which reads config/site.json; a checkout or container without that file
+  // would otherwise turn the whole preview into a 500.
+  //
+  // What is lost without it is the console designation and the two VMIDs. What
+  // is NOT lost is the machine list and its placement, which is what the diagram
+  // is for — so this degrades rather than refusing.
+  let deployer = null;
+  try {
+    deployer = require('../../../../../src/utils/challenge-lane-deployer');
+  } catch (err) {
+    push(problems, 'SITE_CONFIG_MISSING', 'warning',
+      `VMIDs and the student console cannot be resolved here: ${err.message}`);
+  }
+
+  // ── 1. profile + catalogs (both memoised; neither touches the cluster) ──
+  const { profile, assets } = await loadProfileForDeploy(profileId);
+  let vmTemplateCatalog = [];
+  let vulnScriptCatalog = [];
+  try {
+    ({ vmTemplateCatalog, vulnScriptCatalog } = await loadDeployCatalogs());
+  } catch (err) {
+    push(problems, 'CATALOG_UNAVAILABLE', 'error',
+      `Could not read the template catalog: ${err.message}`);
+  }
+
+  const assetSelection = Array.isArray(opts.assetSelection) && opts.assetSelection.length > 0
+    ? opts.assetSelection
+    : defaultAssetSelection(assets);
+
+  // ── 2. the engagement decides the scheme, not the request ──────────────
+  //
+  // runProfileDeploy takes engagementRow.subnet_scheme over the request body
+  // (see carvedScheme). A preview that drew the REQUEST's scheme would draw two
+  // segments and a .240 pivot for a v2-carved profile that deploys flat.
+  //
+  // getEngagement, NOT resolveEngagement: the latter falls through to
+  // adoptExistingReservation, which INSERTs into ciab_engagement. A preview that
+  // ran on every keystroke must not adopt anything.
+  let engagementRow = null;
+  try {
+    engagementRow = await engagementProvision.getEngagement(profileId, engagement);
+  } catch (_) { /* unreserved is a legitimate preview state */ }
+  // ── 3. reservation state — read only, never carve ──────────────────────
+  let reservation = null;
+  try {
+    reservation = await findProfileChallenge(profileId, engagement);
+  } catch (_) { /* treated as unreserved */ }
+
+  // The scheme the block was actually carved at. A ciab_engagement row is the
+  // first authority, but a reservation can exist without one (the pre-engagement
+  // rows adoptExistingReservation exists to absorb), and there the carve's own
+  // spec is the record. Only then does the request's selector get a say.
+  const requestedScheme = opts.subnetScheme || DEFAULT_SUBNET_SCHEME;
+  const carvedScheme = (engagementRow && engagementRow.subnet_scheme)
+    || (reservation && reservation.spec && reservation.spec.subnet_scheme)
+    || null;
+  const effectiveScheme = carvedScheme || requestedScheme;
+  const isV3 = effectiveScheme === 'v3';
+  if (carvedScheme && carvedScheme !== requestedScheme) {
+    push(notices, 'SCHEME_LOCKED_BY_ENGAGEMENT', 'warning',
+      `This profile's network was reserved as ${carvedScheme}. The scheme is locked to the `
+      + 'carve; the selector is advisory.');
+  }
+
+  let slotsUsed = 0;
+  let liveCount = 0;
+  if (reservation && reservation.vxlan_block && Number.isFinite(reservation.vxlan_block.start)) {
+    try {
+      const usedRes = await cybercoreQuery(
+        `SELECT COUNT(DISTINCT vxlan_id) AS used FROM cybercore_lane
+          WHERE vxlan_id BETWEEN $1 AND $2 AND ${claimsSql()}`,
+        [reservation.vxlan_block.start, reservation.vxlan_block.end]
+      );
+      slotsUsed = parseInt(usedRes.rows[0].used, 10) || 0;
+      liveCount = slotsUsed;
+    } catch (_) { /* leave at 0 */ }
+  }
+  if (!reservation) {
+    push(notices, 'NO_RESERVATION', 'info',
+      'No network reserved yet — addresses are assigned when the network is reserved.');
+  }
+
+  // ── 4. the vuln-app probe (NOT the generator) ──────────────────────────
+  const vulnAppEnabled = opts.vulnAppEnabled !== false;
+  let cachedTarget = null;
+  let targetSource = 'inferred';
+  if (vulnAppEnabled) {
+    try {
+      const cached = await query(
+        `SELECT target_hostname FROM ciab_profile_vuln_apps
+          WHERE profile_id = $1 ORDER BY generated_at DESC LIMIT 1`,
+        [profileId]
+      );
+      if (cached.rowCount > 0) {
+        cachedTarget = cached.rows[0].target_hostname || null;
+        targetSource = 'cached';
+      }
+    } catch (_) { /* table absent in some envs — fall back to inference */ }
+  }
+  const probe = vulnAppEnabled
+    ? Object.assign({}, PLAN_PROBE_APP, { target_hostname: cachedTarget })
+    : null;
+  if (!vulnAppEnabled && isV3) {
+    push(notices, 'NO_PIVOT_V3', 'warning',
+      'With the vulnerable app off there is no dual-homed pivot: v3 puts every machine on the '
+      + 'External segment and the Internal segment stays empty.');
+  }
+  if (vulnAppEnabled) {
+    push(notices, 'PIVOT_CONTINGENT_ON_GENERATION', 'info',
+      'If vuln-app generation fails at deploy time the lane falls back to no pivot.');
+  }
+
+  // ── 5. telemetry (free for every engagement without a plan) ────────────
+  const attackBoxes = resolveAttackBoxDefault(opts.attackBoxes, engagement);
+  let telemetry = null;
+  try {
+    telemetry = engagementRow && engagementRow.telemetry_plan
+      ? await blueteamTemplates.resolveTelemetryTemplates(engagementRow.telemetry_plan)
+      : null;
+  } catch (err) {
+    push(problems, 'TELEMETRY_TEMPLATE_MISSING', 'error', err.message);
+  }
+
+  // ── 6. THE MACHINE LIST — the deploy's own arithmetic ──────────────────
+  let spec = null;
+  let serviceGaps = [];
+  let templateMisses = [];
+  try {
+    const out = synthesizeSpecFromProfile({
+      profile: Object.assign({}, profile, { assets }),
+      assetSelection,
+      vmTemplateCatalog,
+      vulnScriptCatalog,
+      vulnApp: probe,
+      options: {
+        subnetScheme: effectiveScheme,
+        attackBoxes,
+        telemetry,
+        // One line per resolved asset, on a 250ms debounce, would bury the deploy
+        // lines an operator greps for. The deploy itself still logs.
+        quiet: true,
+        vxlanBlock: reservation && reservation.vxlan_block
+          ? reservation.vxlan_block
+          : { start: VXLAN_SEARCH_MIN, end: VXLAN_SEARCH_MIN + 9 },
+      },
+    });
+    spec = out.spec;
+    serviceGaps = out.service_gaps || [];
+    templateMisses = out.template_misses || [];
+  } catch (err) {
+    // Reachable by ticking boxes: the .80-.99 band holds 20 machines, and a
+    // telemetry name can collide with an asset hostname. Both name themselves.
+    const code = /pin only|band/i.test(err.message) ? 'BAND_CAPACITY'
+      : /telemetry/i.test(err.message) ? 'TELEMETRY_NAME_COLLISION'
+      : /ENOENT|site\.json/i.test(err.message) ? 'SITE_CONFIG_MISSING'
+      : 'SYNTHESIS_FAILED';
+    push(problems, code, 'error', err.message);
+  }
+
+  // ── 7. what the deploy would ACTUALLY build, not what was asked for ────
+  let specSource = 'fresh';
+  const storedHasVms = reservation
+    && Array.isArray(reservation.spec && reservation.spec.vms)
+    && reservation.spec.vms.length > 0;
+  if (spec && storedHasVms && liveCount > 0) {
+    // runProfileDeploy keeps the stored spec once lanes are live — changing vm
+    // offsets under running lanes would collide. The selection being ticked is
+    // discarded, so drawing it would be a lie about this very deploy.
+    spec = reservation.spec;
+    specSource = 'stored';
+    push(notices, 'SPEC_LOCKED_BY_LIVE_LANES', 'warning',
+      `${liveCount} lane(s) are already live on this reservation. They are locked to the spec `
+      + 'deployed earlier — changing the asset selection will not change them.');
+  }
+
+  let templateSource = 'catalog';
+  if (spec) {
+    try {
+      const readyBake = await assertProfileBakeDeployable({ profileId, profile, spec });
+      const baked = prebakedSpecFromBake(spec, readyBake, {
+        subnetScheme: effectiveScheme, profile, engagementType: engagement,
+      });
+      if (baked !== spec) { spec = baked; templateSource = 'golden'; }
+    } catch (err) {
+      // The gate refuses a drifted or unsigned bake. The deploy would 400 here,
+      // so the diagram says so instead of drawing a lane that cannot be built.
+      push(problems, 'BAKE_GATE_REFUSED', 'error', err.message);
+    }
+  }
+
+  const specVms = (spec && Array.isArray(spec.vms)) ? spec.vms : [];
+  if (spec && specVms.length === 0) {
+    push(problems, 'NO_DEPLOYABLE_VMS', 'error',
+      'No selected asset resolves a VM template, so this deploy would build nothing.');
+  }
+
+  // ── 8. PLACEMENT — materialised server-side, never derived in the browser ──
+  //
+  // When applyV3Topology ran, its nics win verbatim. When it did not (no pivot,
+  // or an LXC target) we fall back to resolveVmSegments — THE SAME function
+  // challenge-lane-deployer calls at deploy time. The browser loads neither
+  // topology-editor.js nor topology-seed.js, so it cannot make this decision.
+  const segmentsOf = (vm) => {
+    const explicit = Array.isArray(vm.nics)
+      ? vm.nics.map(n => n && n.segment).filter(Boolean) : [];
+    if (explicit.length) return explicit;
+    try {
+      return laneNetworking.resolveVmSegments(vm, { subnetScheme: effectiveScheme });
+    } catch (_) {
+      return [isV3 ? 'ext' : 'lan'];
+    }
+  };
+
+  const segments = laneNetworking.resolveSegments(effectiveScheme).map((seg) => ({
+    id: seg.id, role: seg.role, label: seg.label, cidr: null,
+  }));
+
+  // Concrete CIDRs only when lane 1's vxlan really is the block start — i.e. a
+  // reservation exists and nothing has consumed a slot yet. Otherwise the
+  // diagram shows bare octets rather than an address that will not be the one.
+  const vxlanKnown = !!(reservation && reservation.vxlan_block
+    && Number.isFinite(reservation.vxlan_block.start) && slotsUsed === 0);
+  let extBase = null;
+  let intBase = null;
+  if (vxlanKnown) {
+    try {
+      const vx = reservation.vxlan_block.start;
+      extBase = laneNetworking.v2LaneSubnet(vx).base3;
+      if (isV3) intBase = laneNetworking.v3InternalSubnet(vx).base3;
+      for (const seg of segments) {
+        const base = (seg.id === 'int') ? intBase : extBase;
+        if (base) seg.cidr = base + '.0/24';
+      }
+    } catch (_) { extBase = intBase = null; }
+  }
+  const addrFor = (segIds, octet) => {
+    if (!Number.isFinite(octet)) return null;
+    const base = (segIds && segIds.includes('ext')) || !isV3 ? extBase : intBase;
+    return base ? base + '.' + octet : null;
+  };
+
+  // ── 9. the console, by the deploy's own rule ───────────────────────────
+  let consolePlan = { primary: null, consoles: [] };
+  try {
+    consolePlan = (deployer && deployer.resolveConsolePlan({ specVms, attackBoxes }))
+      || { primary: null, consoles: [] };
+  } catch (_) {
+    // Two machines both claiming console_role 'primary' throws. A console is a
+    // nicety on a preview; the machine list is not.
+  }
+  const primaryConsole = consolePlan.primary;
+  const consoleName = primaryConsole ? primaryConsole.name : null;
+
+  const dmzName = spec && spec.vuln_app_install ? spec.vuln_app_install.target_vm : null;
+  const gapsByVm = new Map();
+  for (const g of serviceGaps) {
+    if (!gapsByVm.has(g.vm)) gapsByVm.set(g.vm, []);
+    gapsByVm.get(g.vm).push(g);
+  }
+
+  const assetIndexByHost = new Map();
+  assets.forEach((a, i) => assetIndexByHost.set(String(a.hostname || '').toLowerCase(), i));
+
+  const viewRoleOf = (vm) => {
+    if (vm.name === dmzName) return 'dmz';
+    if (/^(elk|wazuh)$/i.test(vm.name)) return 'siem';
+    if (/^dc\d*$/i.test(vm.name)) return 'dc';
+    return vm.role || '';
+  };
+
+  const machines = specVms.map((vm) => {
+    const segIds = segmentsOf(vm);
+    const gaps = gapsByVm.get(vm.name) || [];
+    return {
+      id: 'm:' + vm.name,
+      name: vm.name,
+      hostname: vm.hostname || vm.name,
+      asset_index: assetIndexByHost.has(String(vm.hostname || vm.name).toLowerCase())
+        ? assetIndexByHost.get(String(vm.hostname || vm.name).toLowerCase()) : null,
+      origin: vm.synthetic ? 'synthetic' : 'asset',
+      role: vm.role || '',
+      view_role: viewRoleOf(vm),
+      os_family: vm.os_family || '',
+      os_version: vm.os_version || null,
+      template_vmid: vm.template_vmid != null ? vm.template_vmid : null,
+      template_match: vm.template_match_type || null,
+      template_source: templateSource,
+      segments: segIds,
+      ip_octet: Number.isFinite(vm.ipOctet) ? vm.ipOctet : null,
+      ip_display: addrFor(segIds, vm.ipOctet),
+      is_pivot: vm.name === dmzName && segIds.length > 1,
+      is_console: consoleName != null && vm.name === consoleName,
+      severity: gaps.length ? 'warning' : '',
+      services: Array.isArray(vm.services) ? vm.services : [],
+      service_gaps: gaps,
+    };
+  });
+
+  // ── 10. the two machines that are NEVER in spec.vms ────────────────────
+  //
+  // The gateway is cloned at GATEWAY_VMID_OFFSET + vxlanId and Kali at
+  // ATTACK_BOX_VMID_OFFSET + vxlanId, both OUTSIDE the spec loop; the
+  // synthesizer records only attack_boxes: <bool>. Their constants are IMPORTED
+  // rather than retyped so the preview cannot drift from the deploy.
+  const vxlanForLane1 = vxlanKnown ? reservation.vxlan_block.start : null;
+  const kaliOctet = goadDeploy.INFRA_IP_OCTETS.Kali;
+  if (attackBoxes) {
+    const kaliSegs = [isV3 ? 'ext' : 'lan'];
+    machines.push({
+      id: 'm:kali', name: 'kali', hostname: 'kali', asset_index: null,
+      origin: 'attack_box', role: 'attacker', view_role: 'attacker',
+      os_family: 'linux', os_version: null,
+      template_vmid: laneNetworking.KALI_TEMPLATE_VMID,
+      template_match: 'fixed', template_source: 'infra',
+      segments: kaliSegs,
+      ip_octet: kaliOctet,
+      ip_display: addrFor(kaliSegs, kaliOctet),
+      is_pivot: false,
+      // resolveConsolePlan picks kind==='kali' before anything else, so on a
+      // lane with Kali, Kali IS the console button unless a spec machine
+      // declared console_role 'primary'.
+      is_console: consoleName === 'kali',
+      severity: '', services: [], service_gaps: [],
+      vmid: vxlanForLane1 != null
+        ? laneNetworking.ATTACK_BOX_VMID_OFFSET + vxlanForLane1 : null,
+    });
+  }
+
+  const gateway = {
+    label: 'Lane gateway',
+    octet: goadDeploy.INFRA_IP_OCTETS.gateway,
+    vmid: (deployer && vxlanForLane1 != null)
+      ? deployer.GATEWAY_VMID_OFFSET + vxlanForLane1 : null,
+    // (module, subnetScheme) — CIAB profile lanes are crucible-module lanes.
+    vmid_template: laneNetworking.resolveGatewayVmid('crucible', effectiveScheme),
+  };
+
+  // ── 11. the assets that will NOT become machines ───────────────────────
+  const REASON_TEXT = {
+    unparseable_os: 'parseOs produced no os_family from this OS string, so the template resolver '
+      + 'was never asked.',
+    no_family_match: 'The OS family parsed, but the catalog holds no active template for it.',
+  };
+  const REMEDIES = {
+    unparseable_os: [
+      'Fix the OS string on the profile so it names a family we carry (Windows Server, Windows 11, '
+      + 'a Linux distribution, macOS).',
+      'Untick this asset — it stays on the profile\'s paper and simply gets no VM.',
+    ],
+    no_family_match: [
+      'Add or activate a template for this OS family in the VM template catalog.',
+      'Untick this asset — it stays on the profile\'s paper and simply gets no VM.',
+    ],
+  };
+  const ghosts = templateMisses.map((m) => ({
+    id: 'ghost:' + m.hostname,
+    name: m.hostname,
+    hostname: m.hostname,
+    asset_index: assetIndexByHost.has(String(m.hostname || '').toLowerCase())
+      ? assetIndexByHost.get(String(m.hostname || '').toLowerCase()) : null,
+    os: m.os || null,
+    reason: m.reason,
+    reason_text: REASON_TEXT[m.reason] || m.reason,
+    remedies: REMEDIES[m.reason] || [],
+  }));
+
+  const includedHosts = new Set(
+    assetSelection.filter((a) => a && a.included !== false)
+      .map((a) => String(a.hostname || '').toLowerCase())
+  );
+  const parked = assets
+    .map((a, i) => ({ i, a }))
+    .filter(({ a }) => !includedHosts.has(String(a.hostname || '').toLowerCase()))
+    .map(({ i, a }) => ({
+      asset_index: i, hostname: a.hostname, role: a.role || '', os: a.os || '',
+    }));
+
+  // The profile's own documented network, for grouping the asset rail. Not the
+  // lane — the lane is what the segments array above describes.
+  const net = (profile.json_data && profile.json_data.student_view
+    && profile.json_data.student_view.raw && profile.json_data.student_view.raw.threats
+    && profile.json_data.student_view.raw.threats.network) || {};
+  const subnets = (Array.isArray(net.subnets) ? net.subnets : []).map((sn) => ({
+    name: sn.name || null, cidr: sn.cidr || null,
+    vlan_id: sn.vlan_id != null ? sn.vlan_id : null,
+    purpose: sn.purpose || null, trust_level: sn.trust_level || null,
+  }));
+
+  const pinnableUsed = machines.filter(
+    (m) => m.origin === 'asset' || m.origin === 'synthetic'
+  ).length;
+  if (machines.length) {
+    push(notices, 'OCTETS_RENUMBER', 'info',
+      'Host octets are assigned in spec order, so changing the selection renumbers them.');
+  }
+
+  return {
+    profile: {
+      id: profile.id, company_name: profile.company_name, asset_count: assets.length,
+    },
+    scheme: {
+      requested: requestedScheme,
+      effective: effectiveScheme,
+      locked_by_engagement: !!(engagementRow && engagementRow.subnet_scheme),
+    },
+    engagement: {
+      type: engagement,
+      reserved: !!reservation,
+      vxlan_range_start: reservation && reservation.vxlan_block
+        ? reservation.vxlan_block.start : null,
+      vxlan_range_end: reservation && reservation.vxlan_block
+        ? reservation.vxlan_block.end : null,
+      max_students: reservation ? reservation.max_students : null,
+      slots_used: slotsUsed,
+      telemetry: !!telemetry,
+      spec_source: specSource,
+    },
+    segments,
+    gateway,
+    machines,
+    ghosts,
+    parked,
+    subnets,
+    vuln_app: {
+      enabled: vulnAppEnabled,
+      target_vm: dmzName,
+      target_source: dmzName ? targetSource : null,
+      // vuln-app-generator.js hard-overrides delivery to docker, so the request's
+      // standalone_vm never reaches a deploy. Reporting it honestly here is what
+      // stops the diagram drawing a dedicated VM that never gets built.
+      delivery_mode: 'docker',
+      contingent: vulnAppEnabled,
+    },
+    console: consoleName ? { vm: consoleName, kind: primaryConsole ? primaryConsole.kind : null } : null,
+    counts: {
+      machines_per_lane: machines.length,
+      ghosts: ghosts.length,
+      parked: parked.length,
+      service_gaps: serviceGaps.length,
+      pinnable_used: pinnableUsed,
+      pinnable_capacity: deployer
+        ? deployer.SPEC_OCTET_MAX - deployer.SPEC_OCTET_MIN + 1 : null,
+      num_lanes: numLanes,
+    },
+    problems,
+    notices,
+  };
+}
+
+/**
+ * POST /api/profile-deploy/plan — the live diagram's data source.
+ * Cheap, pure-ish, and safe at keystroke cadence. See buildLanePlan.
+ */
+router.post('/plan', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const plan = await buildLanePlan({
+      profileId: req.body.profile_id,
+      assetSelection: req.body.asset_selection,
+      subnetScheme: req.body.subnet_scheme,
+      attackBoxes: req.body.attack_boxes,
+      vulnAppEnabled: req.body.vuln_app_enabled,
+      engagementType: req.body.engagement_type,
+      numLanes: parseInt(req.body.num_lanes, 10) || 1,
+    });
+    res.json(plan);
+  } catch (err) {
+    // Only the profile itself failing to load reaches here; everything an admin
+    // can cause by ticking a box comes back as a 200 with problems[].
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
 router.post('/preview', authenticateToken, adminOnly, async (req, res) => {
   try {
     const {
       profile_id, num_lanes = 1, attack_boxes = true,
       vuln_app_enabled = true,
+      asset_selection, subnet_scheme, engagement_type,
       model_id = DEFAULT_MODEL
     } = req.body;
     if (!profile_id) return res.status(400).json({ error: 'profile_id required' });
 
     const { assets } = await loadProfileForDeploy(profile_id);
-    const serverCount = assets.filter(a => String(a.role || '').toLowerCase() === 'server').length;
+
+    // THE COUNT IS THE PLAN'S, NOT A RE-COUNT OF THE PROFILE.
+    //
+    // This used to be `assets.filter(role === 'server').length` over the WHOLE
+    // profile, which ignored asset_selection entirely — so unticking an asset
+    // changed the deploy and not the preview, and the number an operator sized
+    // the cluster against was not the number of VMs they were about to create.
+    // It also missed template misses (assets that resolve nothing and build no
+    // VM) and the synthetic vuln-app VM (which appears when no asset serves web).
+    //
+    // buildLanePlan is the same synthesizer the deploy runs. Kali is excluded
+    // because buildDeployPreview adds the attack box and the gateway itself.
+    const plan = await buildLanePlan({
+      profileId: profile_id,
+      assetSelection: asset_selection,
+      subnetScheme: subnet_scheme,
+      attackBoxes: attack_boxes,
+      vulnAppEnabled: vuln_app_enabled,
+      engagementType: engagement_type,
+      numLanes: parseInt(num_lanes) || 1,
+    });
+    const challengeVmCount = plan.machines.filter((m) => m.origin !== 'attack_box').length;
+    const serverCount = challengeVmCount;
 
     const preview = await buildDeployPreview({
       numLanes: parseInt(num_lanes) || 1,
       attackBoxes: !!attack_boxes,
-      challengeVmCount: Math.max(serverCount, 1),
+      challengeVmCount: Math.max(challengeVmCount, 1),
       proxmoxAPI,
       cybercoreQuery
     });
@@ -2807,9 +3447,15 @@ router.post('/preview', authenticateToken, adminOnly, async (req, res) => {
       ...preview,
       profile_asset_summary: {
         total: assets.length,
+        // Kept for the existing reader; 'servers' now means what will actually
+        // be built, which is what the caller always thought it meant.
         servers: serverCount,
-        will_deploy: serverCount
+        will_deploy: challengeVmCount,
+        not_built: plan.counts.ghosts,
       },
+      // So a caller can show the cluster cost and the machine list from one
+      // request rather than two answers that can disagree.
+      lane_plan_counts: plan.counts,
       cost_estimate: cost
     });
   } catch (err) {
@@ -2921,6 +3567,8 @@ router.get('/profiles/:profileId/reservation', authenticateToken, adminOnly, asy
         profile_id: p.id,
         company_name: p.company_name,
         engagement_type: engagement,
+        // Nothing carved yet, so nothing constrains the scheme the admin picks.
+        subnet_scheme: null,
         engagements: allReservations,
         search_window: { min: VXLAN_SEARCH_MIN, max: VXLAN_SEARCH_MAX }
       });
@@ -2941,6 +3589,12 @@ router.get('/profiles/:profileId/reservation', authenticateToken, adminOnly, asy
       challenge_id: ch.challenge_id,
       challenge_key: ch.challenge_key,
       engagement_type: engagement,
+      // THE CARVED SCHEME, and the reason the browser can lock its selector without a
+      // second round trip. runProfileDeploy takes the engagement's scheme over the
+      // request body's (see carvedScheme below), so a v2-carved profile deploys flat no
+      // matter what the v3-defaulted <select> says. A preview that drew the request's
+      // scheme would draw a lane that never gets built.
+      subnet_scheme: (ch.spec && ch.spec.subnet_scheme) || null,
       // Every reservation this profile holds, not just the one asked about. A
       // profile can now own one per engagement, and nothing else on the CIAB
       // surface can see them — without this an engagement other than the default
@@ -3806,6 +4460,14 @@ module.exports.defaultAssetSelection = defaultAssetSelection;
 // the identity derivation directly, rather than inferring either from a route
 // response that happens to exercise it.
 module.exports.bakeIdentityForProfile = bakeIdentityForProfile;
+// The live lane plan (POST /plan) and the pieces a second caller needs to ask
+// the same question. PLAN_PROBE_APP is exported because engagements.js compiles
+// an instructor brief from the SAME synthesizer and must not pass null either.
+module.exports.buildLanePlan = buildLanePlan;
+module.exports.PLAN_PROBE_APP = PLAN_PROBE_APP;
+module.exports.loadDeployCatalogs = loadDeployCatalogs;
+module.exports.resolveAttackBoxDefault = resolveAttackBoxDefault;
+
 module.exports.COMPILE_REFUSALS = COMPILE_REFUSALS;
 module.exports.compileRefusalOf = compileRefusalOf;
 module.exports.refineCompileRefusal = refineCompileRefusal;
