@@ -57,6 +57,11 @@ Full diagrams and the boot/request lifecycles are in
 
 ## Quick start
 
+Before starting the app, place the verified public Wazuh API certificate at
+`secrets/wazuh-api-ca.pem` on the Docker host. The main Compose file requires
+this file and mounts it read-only. See [Wazuh setup](docs/wazuh-admin-agents.md)
+for certificate verification and the matching environment settings.
+
 ```bash
 # 1. Configure
 cp example.env .env

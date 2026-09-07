@@ -41,23 +41,12 @@ Docker host, beside the base Compose file. This must be a regular PEM file.
 The `secrets` directory is ignored by Git and is outside the app's build context;
 pulling the repository or rebuilding the app does not copy this certificate.
 
-The repository includes [`docker-compose.wazuh.yml`](../docker-compose.wazuh.yml)
-with the read-only mount and its matching `WAZUH_API_CA_FILE` container path.
-Enable it on the Linux deployment host by adding this to `.env`:
-
-```dotenv
-COMPOSE_FILE=docker-compose.yml:docker-compose.wazuh.yml
-```
-
-If `COMPOSE_FILE` already selects other deployment overrides, append
-`docker-compose.wazuh.yml` to that list. Explicit selection replaces Compose's
-automatic override discovery, so include any existing `docker-compose.override.yml`
-that the deployment still needs. On Windows, the default list separator is `;`.
-Passing multiple `-f` arguments, as shown below, works on either platform.
-
-The Wazuh override stays in Git so the deployment uses the same configuration
-as the repository. The deployment `.env` and public certificate remain local
-files. Deployments that do not select this override do not need a private CA file.
+[`docker-compose.yml`](../docker-compose.yml) includes the read-only certificate
+mount directly. Standard `docker compose` commands mount the host file at
+`/run/secrets/wazuh-api-ca.pem`; no Wazuh override selection is needed. The
+mount definition stays in Git, while `.env` and the public certificate remain
+deployment files. The PEM must exist before starting `app`, including on a fresh
+deployment, because the main Compose file requires this mount.
 
 `create_host_path: false` makes a missing source fail during deployment instead
 of creating a directory where the PEM should be. The `Z` label allows the app
@@ -68,6 +57,11 @@ the label on hosts without SELinux. See the
 ```dotenv
 WAZUH_API_CA_FILE=/run/secrets/wazuh-api-ca.pem
 ```
+
+If a previous setup added `docker-compose.wazuh.yml` to `COMPOSE_FILE`, it can
+be removed from that list after setting the CA path above. Preserve any other
+deployment overrides. The old file remains as a compatibility shim that sets
+the same CA path, so existing `COMPOSE_FILE` values continue to work.
 
 The stock Wazuh 4.14 API certificate identifies `localhost`. When connecting by
 an IP address, a CA file alone cannot resolve that name mismatch. Prefer an API
@@ -83,22 +77,15 @@ This sets the certificate identity expected by the HTTPS client while connecting
 to the address in `WAZUH_API_URL`. Certificate-chain, expiry and identity checks
 remain enabled. Reverify and replace the trusted certificate when it is renewed.
 
-Recreate the app after pulling the tracked override and setting `COMPOSE_FILE`:
+Recreate the app after pulling the updated main Compose file:
 
 ```sh
 docker compose up -d --no-deps --force-recreate app
 ```
 
-Subsequent `docker compose build app` and `docker compose up -d app` commands use
-the same override through `COMPOSE_FILE`. A bind-mount change alone does not
-require rebuilding the image.
-
-To select the files explicitly instead, run the following command, including
-any additional override files your deployment uses:
-
-```sh
-docker compose -f docker-compose.yml -f docker-compose.wazuh.yml up -d --no-deps --force-recreate app
-```
+Subsequent `docker compose build app` and `docker compose up -d app` commands
+include the mount automatically. A bind-mount change alone does not require
+rebuilding the image.
 
 If the app reports `Could not read WAZUH_API_CA_FILE`, check the host file and
 the path visible to the app from the deployment directory. These commands do
@@ -111,9 +98,9 @@ docker compose exec -T app node -e 'const fs=require("node:fs");const p=process.
 
 `ENOENT` means the path is missing, `EISDIR` means it points to a directory,
 and `EACCES` indicates a permissions or SELinux access problem. For a missing
-path, also check that the certificate override was included when the app was
-created. Copying the file to a workstation alone does not make it available on
-the Docker host.
+path, also check that the app was recreated with the updated main Compose file.
+Copying the file to a workstation alone does not make it available on the Docker
+host.
 
 Lane VMs need outbound HTTPS to `packages.wazuh.com` and TCP 1514 to the manager.
 The app needs HTTPS access to the manager API, normally TCP 55000. This flow

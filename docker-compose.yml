@@ -359,6 +359,15 @@ services:
       # the path PROXMOX_SSH_KEY names. ssh refuses a key it considers
       # world-readable, so keep the host file at 0600.
       - ${PROXMOX_SSH_KEY_HOST:-./secrets/proxmox_ed25519}:${PROXMOX_SSH_KEY:-/run/secrets/proxmox_ssh_key}:ro
+      # Verified public Wazuh API certificate, provisioned on the Docker host.
+      # Keep the file out of Git; fail rather than create a directory if absent.
+      - type: bind
+        source: ./secrets/wazuh-api-ca.pem
+        target: /run/secrets/wazuh-api-ca.pem
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: Z
       - ./front-end/plugins:/app/plugins:rw
       - ./front-end/profiles:/app/profiles:rw
       - ./front-end/vuln-assets:/app/vuln-assets:ro
