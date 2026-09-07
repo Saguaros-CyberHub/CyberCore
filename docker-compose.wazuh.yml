@@ -1,9 +1,0 @@
-# Compatibility for deployments that already selected this file in COMPOSE_FILE.
-# The certificate mount now lives in docker-compose.yml and is always included.
-# Set WAZUH_API_CA_FILE=/run/secrets/wazuh-api-ca.pem in the deployment .env;
-# then this file can be removed from COMPOSE_FILE without changing behavior.
-
-services:
-  app:
-    environment:
-      WAZUH_API_CA_FILE: /run/secrets/wazuh-api-ca.pem
