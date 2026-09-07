@@ -33,6 +33,47 @@ function fixture() {
   return payload;
 }
 
+// A production-shaped inventory: past the 40-lane auto-collapse threshold, five
+// group keys covering all four derivations (course id, group id, name family,
+// and the ungroupable remainder), and one lane per failure mode.
+function wall() {
+  const lanes = [];
+  const push = (name, count, extra) => {
+    for (let i = 0; i < count; i++) {
+      const suffix = 10000 + lanes.length;
+      lanes.push({ lane_id: `${name}-${i}`, name: `${name}-${suffix}`, runnable: true, internet_enabled: true,
+        lane_number: suffix, family: name, jobs: [], agents: [], ...extra,
+        targets: [
+          { vm_id: suffix * 10, name: 'DC01', type: 'qemu', platform: 'windows', runnable: true, power_state: 'running' },
+          { vm_id: suffix * 10 + 1, name: 'WS01', type: 'qemu', platform: 'linux', runnable: true, power_state: 'running' },
+        ] });
+    }
+  };
+  push('cle-cybr388', 14, { course_id: 'c1', course_code: 'CYBR388', course_name: 'Network Defense', kind: 'course' });
+  push('cle-cybr400', 14, { course_id: 'c2', course_code: null, course_name: 'Incident Response', kind: 'course' });
+  push('cle', 6, { kind: 'course' });
+  push('ciab-cochise101', 8, { group_id: 'g1', group_label: 'Cochise 101', kind: 'ciab' });
+  // No context fields at all: what an older server still sends.
+  push('crucible', 4, {});
+  lanes[0].targets[1].agent = { id: 'a1', name: 'connected-one', status: 'active', lastKeepAlive: '2026-09-07T12:00:00Z' };
+  lanes[1].runnable = false;
+  lanes[2].internet_enabled = false;
+  lanes[3].jobs = [{ job_id: 'failed-one', vm_id: lanes[3].targets[0].vm_id, status: 'failed', error: 'boom' }];
+  lanes[15].jobs = [{ job_id: 'running-one', vm_id: lanes[15].targets[0].vm_id, status: 'running' }];
+  return { manager: 'wazuh.example', console_url: 'https://wazuh.example/', lanes };
+}
+
+// The three-lane fixture with production-shaped names but no server context, so
+// grouping has to fall back to parsing the trailing -<vxlanId>.
+function named() {
+  const payload = fixture();
+  ['cle-cybr388-10447', 'cle-cybr400-10711', 'cle-10871'].forEach((name, i) => { payload.lanes[i].name = name; });
+  return payload;
+}
+
+const laneIds = h => h.el('wazuhLanes').ids.filter(value => value.startsWith('wazuhLane-'));
+const groupIds = h => h.el('wazuhLanes').ids.filter(value => value.startsWith('wazuhGroup-'));
+
 // The same lightweight VM/DOM approach as caldera-classroom-ui.test.js. It
 // deliberately normalizes boolean attributes to catch innerHTML cache bugs.
 function harness() {
@@ -225,6 +266,138 @@ test('a status response started before submission cannot replace newly queued jo
   assert.match(h.el('wazuhResults').innerHTML, /1 queued/);
   assert.equal(h.timers.size, 1, 'Only one poll remains after overlapping requests');
   assert.equal(h.el('wazuhSubmit').disabled, true);
+});
+
+test('lanes group by course id, then group id, then name family, with the remainder last', async () => {
+  const h = harness(); h.setStatus(wall()); await h.api.open();
+  h.click('wazuhExpandAll');
+  ['course:c1', 'course:c2', 'group:g1', 'family:cle', 'family:crucible']
+    .forEach(key => assert.ok(h.el(ident('Group', key)), `Missing group ${key}`));
+  const html = h.el('wazuhLanes').innerHTML;
+  assert.match(html, /CYBR388 · Network Defense/);
+  assert.match(html, /Incident Response/);          // course with a blank code
+  assert.match(html, /Cochise 101/);
+  const ids = laneIds(h);
+  assert.equal(new Set(ids).size, ids.length, 'a lane may never be emitted twice');
+  assert.equal(ids.length, 46);
+  // Names alone still group when the server sends no context at all.
+  const plain = harness(); plain.setStatus(named()); await plain.api.open();
+  ['family:cle-cybr388', 'family:cle-cybr400', 'family:cle'].forEach(key => assert.ok(plain.el(ident('Group', key))));
+});
+
+test('large inventories open collapsed except where a selection lives, and polls never re-seed', async () => {
+  const h = harness(); h.setStatus(wall()); await h.api.open();
+  assert.deepEqual(laneIds(h), [], 'past the threshold every group starts closed');
+  assert.match(h.el('wazuhLanes').innerHTML, /aria-expanded="false"/);
+  h.click(ident('Group', 'course:c1'));
+  assert.ok(laneIds(h).length > 0);
+  h.change(ident('Lane', 'cle-cybr388-0'), true);
+  await h.tick();
+  assert.ok(h.el(ident('Lane', 'cle-cybr388-0')), 'a poll must not re-collapse an opened group');
+  assert.equal(h.el(ident('Group', 'course:c2')).checked, false);
+  h.click('wazuhCollapseAll');
+  assert.deepEqual(laneIds(h), []);
+  h.click('wazuhExpandAll');
+  assert.equal(laneIds(h).length, 46);
+  // A small inventory is never seeded, so the existing fixtures render in full.
+  const small = harness(); await small.api.open();
+  assert.equal(small.el(ident('Lane', 'lane-one')).disabled, false);
+});
+
+test('lane search matches every word against names, courses, machines and VM ids', async () => {
+  const h = harness(); h.setStatus(wall()); await h.api.open();
+  h.change('wazuhLaneSearch', 'CYBR388 dc01');
+  assert.equal(laneIds(h).length, 14, 'a search forces matching groups open');
+  assert.match(h.el('wazuhLaneShown').textContent, /Showing 14 of 46 lanes/);
+  assert.equal(h.el(ident('Group', 'course:c1')).disabled, true, 'toggling is meaningless while searching');
+  h.change('wazuhLaneSearch', 'cochise');
+  assert.equal(laneIds(h).length, 8);
+  h.change('wazuhLaneSearch', '100340');
+  assert.equal(laneIds(h).length, 1, 'a VM id finds its lane');
+  h.change('wazuhLaneSearch', 'zzz');
+  assert.match(h.el('wazuhLanes').innerHTML, /No lanes match/);
+  h.click('wazuhLaneNoMatchClear');
+  assert.equal(h.el('wazuhLaneSearch').value, '');
+  // Clearing the box restores the collapse state the search had overridden,
+  // rather than dumping all 46 lanes back into the panel.
+  assert.deepEqual(laneIds(h), []);
+  assert.equal(groupIds(h).length, 5);
+  h.change('wazuhLaneSearch', 'cle');
+  h.click('wazuhLaneSearchClear');
+  assert.equal(h.el('wazuhLaneSearch').value, '');
+});
+
+test('bulk selection follows the filter while Clear stays global and hidden picks are reported', async () => {
+  const h = harness(); h.setStatus(wall()); await h.api.open();
+  h.change('wazuhLaneSearch', 'cybr388');
+  h.click('wazuhAllLanes');
+  assert.match(h.el('wazuhAllLanes').textContent, /All matching \(0\)/);
+  assert.match(h.el('wazuhLaneCount').textContent, /^12 selected · 14 of 46 shown/, 'two cybr388 lanes are ineligible');
+  h.change('wazuhLaneSearch', 'cochise');
+  assert.match(h.el('wazuhLaneHidden').textContent, /12 selected lanes hidden by the filter/);
+  h.change(ident('GroupAll', 'group:g1'), true);
+  assert.equal(h.el(ident('GroupAll', 'group:g1')).checked, true);
+  h.change(ident('Lane', 'ciab-cochise101-0'), false);
+  assert.equal(h.el(ident('GroupAll', 'group:g1')).indeterminate, true);
+  assert.match(h.el('wazuhLanes').innerHTML, /waz-gpick is-partial/);
+  h.change(ident('GroupAll', 'group:g1'), false);
+  assert.equal(h.el('wazuhLaneCount').textContent.startsWith('12 selected'), true);
+  h.click('wazuhClearLanes');
+  assert.match(h.el('wazuhLaneCount').textContent, /^0 selected/, 'Clear is never scoped to the filter');
+  h.click('wazuhLaneSearchClear');
+  assert.equal(h.el('wazuhAllLanes').textContent, 'All available');
+});
+
+test('status pills count over the whole inventory and filter to their own predicate', async () => {
+  const h = harness(); h.setStatus(wall()); await h.api.open(); h.click('wazuhExpandAll');
+  assert.equal(h.el('wazuhLaneFacetCount-all').textContent, '46');
+  assert.equal(h.el('wazuhLaneFacetCount-off').textContent, '2', 'one stopped lane, one with internet off');
+  assert.equal(h.el('wazuhLaneFacetCount-failed').textContent, '1');
+  assert.equal(h.el('wazuhLaneFacetCount-installing').textContent, '1');
+  h.click('wazuhLaneFacet-off');
+  assert.equal(laneIds(h).length, 2);
+  assert.ok(h.el('wazuhLaneFacet-off').classes.has('active'));
+  assert.equal(h.el('wazuhLaneFacet-off').ariaPressed, 'true');
+  assert.equal(h.el('wazuhLaneFacet-all').ariaPressed, 'false');
+  h.click('wazuhLaneFacet-failed');
+  assert.equal(laneIds(h).length, 1);
+  h.click('wazuhLaneFacet-all');
+  assert.equal(laneIds(h).length, 46);
+});
+
+test('lane sorting orders within groups, defaults sensibly and puts unknown values last', async () => {
+  const h = harness(); h.setStatus(wall()); await h.api.open();
+  h.change('wazuhGroupBy', 'none');
+  h.click('wazuhExpandAll');
+  const numbers = () => laneIds(h).map(value => Number(decodeURIComponent(value.slice('wazuhLane-'.length)).split('-').pop()));
+  h.change('wazuhLaneSort', 'number');
+  assert.equal(h.el('wazuhLaneSortDir').textContent, '↑');
+  const ascending = numbers();
+  h.click('wazuhLaneSortDir');
+  assert.equal(h.el('wazuhLaneSortDir').textContent, '↓');
+  assert.deepEqual(numbers(), ascending.slice().reverse());
+  h.change('wazuhLaneSort', 'missing');
+  assert.equal(h.el('wazuhLaneSortDir').textContent, '↓', '"agents needed" answers itself from the top');
+  h.change('wazuhLaneSort', 'created');
+  assert.equal(laneIds(h).length, 46, 'no lane carries created_at, so none may be dropped');
+  h.change('wazuhLaneSort', 'name');
+  assert.equal(h.el('wazuhLaneSortDir').textContent, '↑');
+});
+
+test('the lane toolbar survives a poll with its text, sort and grouping intact', async () => {
+  const h = harness(); h.setStatus(wall()); await h.api.open();
+  const box = h.el('wazuhLaneSearch');
+  h.change('wazuhLaneSearch', 'cybr');
+  h.change('wazuhGroupBy', 'kind');
+  h.change('wazuhLaneSort', 'number');
+  const before = laneIds(h).length;
+  await h.tick();
+  assert.equal(h.el('wazuhLaneSearch'), box, 'the toolbar lives in the shell, not in the polled island');
+  assert.equal(box.value, 'cybr');
+  assert.equal(h.el('wazuhGroupBy').value, 'kind');
+  assert.equal(h.el('wazuhLaneSort').value, 'number');
+  assert.equal(laneIds(h).length, before);
+  assert.deepEqual(groupIds(h), [ident('Group', 'kind:course')]);
 });
 
 test('lost queue response requires status refresh before retry; persisted job prevents duplicates', async () => {
