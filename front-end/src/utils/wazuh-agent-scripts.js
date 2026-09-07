@@ -4,6 +4,7 @@ const { isIP } = require('node:net');
 
 // Official package URLs and API key import workflow:
 // https://documentation.wazuh.com/current/installation-guide/packages-list.html
+// Checksums live under /4.x/checksums/wazuh/<version>/, separately from packages.
 // https://documentation.wazuh.com/current/user-manual/agent/agent-enrollment/enrollment-methods/via-manager-API/importing-the-key.html
 // manage_agents also supports interactive I / key / y / Q on stdin. This keeps
 // the per-agent credential out of child process arguments and temporary files:
@@ -62,6 +63,7 @@ from xml.dom import minidom
 
 MANAGER = '${manager}'
 VERSION = '${version}'
+CHECKSUM_BASE = 'https://packages.wazuh.com/4.x/checksums/wazuh/${version.split('-')[0]}/'
 AGENT_NAME = '${agentName}'
 AGENT_KEY = '${agentKey}'
 EXPECTED_RECORD = base64.b64decode(AGENT_KEY).decode('ascii').split()
@@ -179,7 +181,7 @@ def download(url, destination, max_bytes):
 
 def main():
     global STAGE
-    require(os.geteuid() == 0, 'administrator-required')
+    require(os.geteuid() == 0, 'root-required')
     require(platform.system() == 'Linux', 'unsupported-platform')
     architecture = platform.machine().lower()
     require(architecture in ('x86_64', 'amd64', 'aarch64', 'arm64'), 'unsupported-architecture')
@@ -208,7 +210,7 @@ def main():
                 checksum = Path(temporary) / 'package.sha512'
                 STAGE = 'download-failed'
                 download(url, str(package), 200 * 1024 * 1024)
-                download(url + '.sha512', str(checksum), 8192)
+                download(CHECKSUM_BASE + filename + '.sha512', str(checksum), 8192)
                 expected = checksum.read_text().split()[0].lower()
                 require(re.fullmatch('[a-f0-9]{128}', expected) is not None, 'checksum-invalid')
                 require(hashlib.sha512(package.read_bytes()).hexdigest() == expected, 'checksum-mismatch')
@@ -254,6 +256,7 @@ function buildWindowsScript({ manager, version, agentName, agentKey }) {
 $ProgressPreference = 'SilentlyContinue'
 $manager = '${manager}'
 $version = '${version}'
+$checksumBase = 'https://packages.wazuh.com/4.x/checksums/wazuh/${version.split('-')[0]}/'
 $agentName = '${agentName}'
 $agentKey = '${agentKey}'
 $expectedRecord = [Text.Encoding]::ASCII.GetString([Convert]::FromBase64String($agentKey))
@@ -392,10 +395,11 @@ try {
   if (-not $service) {
     $script:stage = 'download-failed'
     $package = Join-Path $workDir ('wazuh-agent-' + [Guid]::NewGuid().ToString('N') + '.msi')
-    $url = 'https://packages.wazuh.com/4.x/windows/wazuh-agent-' + $version + '.msi'
+    $filename = 'wazuh-agent-' + $version + '.msi'
+    $url = 'https://packages.wazuh.com/4.x/windows/' + $filename
     Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $package -TimeoutSec 120 -MaximumRedirection 0
     $checksumFile = $package + '.sha512'
-    Invoke-WebRequest -UseBasicParsing -Uri ($url + '.sha512') -OutFile $checksumFile -TimeoutSec 30 -MaximumRedirection 0
+    Invoke-WebRequest -UseBasicParsing -Uri ($checksumBase + $filename + '.sha512') -OutFile $checksumFile -TimeoutSec 30 -MaximumRedirection 0
     $expectedHash = ([IO.File]::ReadAllText($checksumFile).Trim() -split '\\s+')[0]
     if ($expectedHash -notmatch '^[a-fA-F0-9]{128}$') { Stop-WazuhInstall 'checksum-invalid' }
     if ((Get-FileHash -LiteralPath $package -Algorithm SHA512).Hash -ine $expectedHash) { Stop-WazuhInstall 'checksum-mismatch' }

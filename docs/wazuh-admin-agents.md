@@ -34,6 +34,22 @@ There is no implicit latest version. Use an API account permitted to list agents
 create agents and read their enrollment keys. CyberCore holds that account's
 credentials; each VM receives only its own agent enrollment key.
 
+To assign lane agents to an existing Wazuh group, set:
+
+```dotenv
+WAZUH_AGENT_GROUP=StudentVM
+```
+
+Create and configure that exact, case-sensitive group in Wazuh first. The API
+account also needs `group:read`, `agent:modify_group` and
+`group:modify_assignments` for the relevant agents and group. CyberCore checks
+the group before queuing a batch and before enrolling each agent, then verifies
+assignment before running the guest installer. Retries retain the agent's
+identity and existing group memberships. Leaving this optional setting empty
+keeps the manager's default grouping. CyberCore imports API-issued keys, so it
+assigns groups through the manager API rather than installer auto-enrollment.
+See [Wazuh agent grouping](https://documentation.wazuh.com/current/user-manual/agent/agent-management/grouping-agents.html).
+
 The API connection verifies HTTPS certificates. For a private certificate
 authority, set `WAZUH_API_CA_FILE` to a PEM path inside the app container and
 copy the verified public CA certificate to `secrets/wazuh-api-ca.pem` on the
@@ -58,10 +74,9 @@ the label on hosts without SELinux. See the
 WAZUH_API_CA_FILE=/run/secrets/wazuh-api-ca.pem
 ```
 
-If a previous setup added `docker-compose.wazuh.yml` to `COMPOSE_FILE`, it can
-be removed from that list after setting the CA path above. Preserve any other
-deployment overrides. The old file remains as a compatibility shim that sets
-the same CA path, so existing `COMPOSE_FILE` values continue to work.
+If a previous setup added `docker-compose.wazuh.yml` to `COMPOSE_FILE`, remove
+that entry after setting the CA path above. Preserve any other deployment
+overrides; the deprecated Wazuh override file has been removed.
 
 The stock Wazuh 4.14 API certificate identifies `localhost`. When connecting by
 an IP address, a CA file alone cannot resolve that name mismatch. Prefer an API
@@ -105,8 +120,28 @@ host.
 Lane VMs need outbound HTTPS to `packages.wazuh.com` and TCP 1514 to the manager.
 The app needs HTTPS access to the manager API, normally TCP 55000. This flow
 imports API-issued client keys, so guest access to enrollment port 1515 is not
-required. The lane gateway's management-network restrictions still apply; allow
-the specific destination as appropriate for the deployment.
+required. Before installation, CyberCore verifies the selected VM's lane gateway
+and adds a rule for that lane's subnets to reach only the configured manager on
+TCP 1514. This exception precedes the gateway's private-network drops and is
+persisted for gateway restarts. Other firewall rules remain in place. The app
+needs its existing Proxmox node SSH access to execute this gateway update.
+
+Automatic gateway access supports ordinary v1/v2/v3 lane gateways with verified
+deployment metadata and interfaces. Internet-disabled and malware analysis lanes
+are refused. Upstream firewalls must also permit the manager connection; this
+action changes only the selected lane gateway.
+
+Use a stable IPv4 manager address or a hostname resolving to one IPv4 address.
+The rule is restricted to that resolved address. If the manager address changes,
+review the existing tagged rule and restart hook before retrying; CyberCore
+reports conflicting destinations instead of expanding access automatically.
+
+Packages and their SHA-512 checksums are downloaded from Wazuh's separate
+official package and checksum directories. Both Windows and Linux downloads
+are checked before installation. A failed job identifies the download,
+checksum, package, configuration or service stage without exposing guest
+output or enrollment keys. On Windows, MSI installation details are saved in
+`C:\ProgramData\CyberCore\Wazuh\install.log` once MSI execution begins.
 
 ## Selection, progress and retries
 
@@ -156,6 +191,8 @@ central automatic enrollment on future deployments is a separate lifecycle hook.
   guest execution and check-in verification.
 - `front-end/src/utils/wazuh-client.js`: authenticated HTTPS manager API client.
 - `front-end/src/utils/wazuh-agent-scripts.js`: Windows and Linux installers.
+- `front-end/src/utils/wazuh-gateway-access.js`: verified, persistent manager
+  TCP 1514 access on the selected lane gateway.
 
 Enrollment follows Wazuh's documented [API client-key workflow](https://documentation.wazuh.com/current/user-manual/agent/agent-enrollment/enrollment-methods/via-manager-API/requesting-the-key.html)
 and [key import procedure](https://documentation.wazuh.com/current/user-manual/agent/agent-enrollment/enrollment-methods/via-manager-API/importing-the-key.html).

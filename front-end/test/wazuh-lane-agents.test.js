@@ -59,6 +59,18 @@ function harness(options = {}) {
       return { id, key: KEY };
     },
     async getAgentKey(id) { state.calls.push(['key', id]); return KEY; },
+    async assertGroupExists(group) {
+      state.calls.push(['group-check', group]);
+      if (state.groupMissing) throw Object.assign(new Error('Could not verify WAZUH_AGENT_GROUP.'), { status: 503, safe: true });
+    },
+    async ensureAgentGroup(id, group) {
+      state.calls.push(['group-assign', id, group]);
+      assert.ok(Object.values(state.lane.config.wazuh_agent_jobs).some(job => job.agent_id === id));
+      if (options.groupHook) await options.groupHook(state);
+      if (state.groupFailure) throw Object.assign(new Error('Could not assign the agent to WAZUH_AGENT_GROUP.'), { status: 502, safe: true });
+      const agent = state.registrations.find(item => item.id === id);
+      agent.group = [...new Set([...(agent.group || ['default']), group])];
+    },
   };
   const executor = {
     async waitForGuestAgent(...args) {
@@ -87,8 +99,15 @@ function harness(options = {}) {
   };
   const service = createService({ query, executor, settings: () => {
     if (state.configFailure) throw new Error('private-api-password');
-    return { manager: state.manager || 'wazuh.example.test', consoleUrl: 'https://wazuh.example.test/', version: '4.14.0-1', client };
+    return { manager: state.manager || 'wazuh.example.test', consoleUrl: 'https://wazuh.example.test/', version: '4.14.0-1', client,
+      agentGroup: state.agentGroup || null };
   }, now: () => state.clock, sleep: async ms => { state.clock += ms; }, schedule: run => state.scheduled.push(run),
+  ensureGatewayAccess: async (request, dependencies) => {
+    state.calls.push(['gateway', request.vmId, request.manager]);
+    assert.equal((await dependencies.readLane()).lane_id, LANE_ID);
+    if (options.gatewayHook) await options.gatewayHook(state);
+    if (state.gatewayFailure) throw Object.assign(new Error('Could not prepare Wazuh TCP 1514 access on the lane gateway.'), { status: 409, safe: true });
+  },
   buildInstallScript: args => { state.scripts.push(args); return `installation ${args.agentKey}`; },
   proxmox: async (...args) => {
     state.calls.push(['proxmox', ...args]);
@@ -198,6 +217,43 @@ test('membership and job ownership are checked again after registration before c
   assert.equal(h.job().status, 'failed');
 });
 
+test('gateway access is prepared before enrollment and installation, and failure prevents both', async () => {
+  const h = harness({ createHook: state => assert.ok(state.calls.some(call => call[0] === 'gateway')) });
+  await h.start(); await h.run();
+  assert.equal(h.job().status, 'completed');
+  assert.ok(h.state.calls.findIndex(call => call[0] === 'gateway') < h.state.calls.findIndex(call => call[0] === 'windows'));
+  const blocked = harness({ state: { gatewayFailure: true } });
+  await blocked.start(); await blocked.run();
+  assert.equal(blocked.job().status, 'failed');
+  assert.match(blocked.job().error, /TCP 1514/);
+  assert.equal(blocked.state.creates, 0);
+  assert.equal(blocked.state.scripts.length, 0);
+});
+
+for (const [label, mutate] of [
+  ['disabled Internet', state => { state.lane.config.internet_enabled = false; }],
+  ['removed VM', state => { state.lane.config.vms = []; }],
+  ['replaced job', state => { state.lane.config.wazuh_agent_jobs['901'].job_id = OTHER_ID; }],
+]) {
+  test(`${label} while preparing gateway access prevents enrollment and guest installation`, async () => {
+    const h = harness({ gatewayHook: mutate });
+    await h.start(); await h.run();
+    assert.equal(h.state.creates, 0);
+    assert.equal(h.state.scripts.length, 0);
+    assert.equal(h.state.calls.some(call => call[0] === 'windows'), false);
+  });
+}
+
+test('malware analysis lanes cannot queue central gateway access or advertise runnable targets', async () => {
+  const h = harness();
+  h.state.lane.config.analysis_profile = 'malware';
+  await assert.rejects(h.start(), /malware analysis lane/);
+  assert.equal(h.state.scheduled.length, 0);
+  assert.equal(h.state.calls.some(call => call[0] === 'gateway'), false);
+  const status = await h.service.status([h.state.lane]);
+  assert.equal(status.lanes[0].targets[0].runnable, false);
+});
+
 test('replaced queue jobs cannot execute or overwrite their replacement', async () => {
   const h = harness();
   const old = await h.start();
@@ -247,6 +303,34 @@ test('controlled installer refusal markers show a useful message without publish
   const missing = harness({ result: () => ({ exited: true, exitcode: 1, stdout: '', stderr: 'CYBERCORE_WAZUH_ERROR:python3-missing\n' }) });
   await missing.start(); await missing.run();
   assert.match(missing.job().error, /Python 3/);
+});
+
+test('download, integrity and service failures identify the stage without exposing guest details', async () => {
+  for (const [code, message] of [
+    ['download-failed', /package or checksum.*packages\.wazuh\.com/],
+    ['checksum-invalid', /checksum was invalid/],
+    ['checksum-mismatch', /did not match its SHA-512 checksum/],
+    ['key-import-failed', /enrollment key could not be imported/],
+    ['service-start-failed', /service could not be started/],
+  ]) {
+    const h = harness({ result: () => ({ exited: true, exitcode: 1,
+      stdout: `private-api-password ${KEY}`, stderr: `CYBERCORE_WAZUH_ERROR:${code}\r\nprivate-guest-exception` }) });
+    await h.start(); await h.run();
+    assert.equal(h.job().status, 'failed');
+    assert.match(h.job().error, message);
+    assert.doesNotMatch(JSON.stringify(h.state.lane.config.wazuh_agent_jobs), /private-/);
+  }
+});
+
+test('unknown or malformed installer markers stay generic and never publish guest text', async () => {
+  for (const output of ['CYBERCORE_WAZUH_ERROR:private-unknown-stage',
+    'CYBERCORE_WAZUH_ERROR:download-failed private-api-password',
+    'private-prefix CYBERCORE_WAZUH_ERROR:download-failed']) {
+    const h = harness({ result: () => ({ exited: true, exitcode: 1, stdout: output, stderr: KEY }) });
+    await h.start(); await h.run();
+    assert.match(h.job().error, /^Agent installation failed\./);
+    assert.doesNotMatch(JSON.stringify(h.state.lane.config.wazuh_agent_jobs), /private-/);
+  }
 });
 
 test('status associates duplicate hostnames to persisted lane identities and strips private fields', async () => {
@@ -335,4 +419,71 @@ test('batch limits concurrent installers to four and preserves sibling jobs and 
   assert.ok(Object.values(h.state.lane.config.wazuh_agent_jobs).every(job => job.status === 'completed'));
   assert.equal(h.state.calls.filter(call => call[0] === 'linux').length, 7);
   assert.doesNotMatch(JSON.stringify(h.state.sql), /private-per-agent/);
+});
+
+test('optional group assignment runs before guest installation for a new registration and its retry', async () => {
+  const h = harness({ state: { agentGroup: 'StudentVM' } });
+  await h.start(); await h.run();
+  assert.equal(h.job().status, 'completed');
+  assert.deepEqual(h.state.registrations[0].group, ['default', 'StudentVM']);
+  const assignment = h.state.calls.findIndex(call => call[0] === 'group-assign');
+  assert.ok(assignment > -1 && assignment < h.state.calls.findIndex(call => call[0] === 'windows'));
+  h.state.registrations[0].group.push('servers');
+  await h.start(); await h.run();
+  assert.equal(h.job().status, 'completed');
+  assert.equal(h.state.creates, 1);
+  assert.deepEqual(h.state.registrations[0].group, ['default', 'StudentVM', 'servers']);
+  assert.equal(h.state.calls.filter(call => call[0] === 'group-assign').length, 2);
+  assert.equal(h.state.calls.filter(call => call[0] === 'group-check').length, 4);
+  const noGroup = harness();
+  await noGroup.start(); await noGroup.run();
+  assert.equal(noGroup.state.calls.some(call => call[0].startsWith('group-')), false);
+});
+
+test('missing configured group blocks standalone and batch claims without creating registrations', async () => {
+  for (const batch of [false, true]) {
+    const h = harness({ state: { agentGroup: 'StudentVM', groupMissing: true } });
+    const request = batch ? h.service.startBatch([h.state.lane], {
+      targets: [{ lane_id: LANE_ID, vm_id: 901, platform: 'windows' }],
+    }) : h.start();
+    await assert.rejects(request, /WAZUH_AGENT_GROUP/);
+    assert.equal(h.state.sql.length, 0);
+    assert.equal(h.state.creates, 0);
+    assert.equal(h.state.scheduled.length, 0);
+  }
+});
+
+test('a group removed after queuing is rejected before enrollment or guest installation', async () => {
+  const h = harness({ state: { agentGroup: 'StudentVM' } });
+  await h.start();
+  h.state.groupMissing = true;
+  await h.run();
+  assert.equal(h.job().status, 'failed');
+  assert.match(h.job().error, /WAZUH_AGENT_GROUP/);
+  assert.equal(h.state.creates, 0);
+  assert.equal(h.state.scripts.length, 0);
+  assert.equal(h.state.calls.some(call => call[0] === 'windows'), false);
+});
+
+test('failed group assignment preserves the saved registration and retries it before guest modification', async () => {
+  const h = harness({ state: { agentGroup: 'StudentVM', groupFailure: true } });
+  await h.start(); await h.run();
+  assert.equal(h.job().status, 'failed');
+  assert.match(h.job().error, /WAZUH_AGENT_GROUP/);
+  assert.equal(h.job().agent_id, '001');
+  assert.equal(h.state.calls.some(call => call[0] === 'windows'), false);
+  h.state.groupFailure = false;
+  await h.start(); await h.run();
+  assert.equal(h.job().status, 'completed');
+  assert.equal(h.state.creates, 1);
+  assert.equal(h.job().agent_id, '001');
+  assert.deepEqual(h.state.registrations[0].group, ['default', 'StudentVM']);
+});
+
+test('lane access is revalidated after waiting on manager-side group assignment', async () => {
+  const h = harness({ state: { agentGroup: 'StudentVM' }, groupHook: async state => { state.lane.config.internet_enabled = false; } });
+  await h.start(); await h.run();
+  assert.equal(h.job().status, 'failed');
+  assert.match(h.job().error, /internet access is disabled/);
+  assert.equal(h.state.calls.some(call => call[0] === 'windows'), false);
 });

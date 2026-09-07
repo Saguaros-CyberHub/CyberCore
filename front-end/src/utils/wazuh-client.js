@@ -37,6 +37,14 @@ function apiServerName(value) {
   return value;
 }
 
+function agentGroup(value, required = false) {
+  if (!required && (value === undefined || value === '')) return null;
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(value) || value === '.' || value === '..') {
+    throw failure(503, 'Set WAZUH_AGENT_GROUP to one existing Wazuh group name using letters, numbers, dots, underscores or hyphens.');
+  }
+  return value;
+}
+
 function createClient(options, deps = {}) {
   const base = httpsUrl(options.apiUrl);
   const serverName = apiServerName(options.serverName);
@@ -174,7 +182,51 @@ function createClient(options, deps = {}) {
     }
     return { id: String(item.id), key: typeof item.key === 'string' ? item.key : null };
   }
-  return { listAgents, createAgent, getAgentKey };
+
+  async function assertGroupExists(value) {
+    const group = agentGroup(value, true);
+    try {
+      const data = await api('GET', `/groups?groups_list=${encodeURIComponent(group)}&select=name`);
+      if (data.total_affected_items !== 1 || data.affected_items?.length !== 1 || data.affected_items[0]?.name !== group) {
+        throw failure(502, 'Invalid group response.');
+      }
+    } catch (_) {
+      throw failure(503, 'Could not verify WAZUH_AGENT_GROUP. Create that exact group in Wazuh and grant the API account permission to read it.');
+    }
+  }
+
+  async function ensureAgentGroup(id, value) {
+    if (!/^[0-9]{1,8}$/.test(String(id)) || Number(id) === 0) throw failure(502, 'Invalid Wazuh agent registration ID.');
+    const group = agentGroup(value, true);
+    const assigned = async () => {
+      const data = await api('GET', `/agents?agents_list=${id}&select=id,group`);
+      const item = data.affected_items?.[0];
+      // Wazuh omits `group` for registrations that have never connected and
+      // have no group yet. Absence cannot confirm membership, but is valid.
+      const groups = item?.group === undefined ? [] : item.group;
+      if (data.total_affected_items !== 1 || data.affected_items?.length !== 1 || String(item?.id) !== String(id)
+        || !Array.isArray(groups) || groups.some(name => typeof name !== 'string')) {
+        throw failure(502, 'The Wazuh API returned invalid agent group membership.');
+      }
+      return groups.includes(group);
+    };
+    try {
+      if (await assigned()) return;
+      // Wazuh returns error 1751 for an existing membership. A concurrent retry
+      // or a lost response is successful only if a fresh read confirms it.
+      let assignmentError;
+      try {
+        const data = await api('PUT', `/agents/${id}/group/${encodeURIComponent(group)}?force_single_group=false`);
+        if (data.total_affected_items !== 1 || data.affected_items?.length !== 1 || String(data.affected_items[0]) !== String(id)) {
+          throw failure(502, 'The Wazuh API returned an invalid group assignment.');
+        }
+      } catch (error) { assignmentError = error; }
+      if (!await assigned()) throw assignmentError || failure(502, 'Wazuh did not confirm group assignment.');
+    } catch (_) {
+      throw failure(502, 'Could not assign the agent to WAZUH_AGENT_GROUP. Check that the group exists and the API account can read agents and modify group assignments, then retry.');
+    }
+  }
+  return { listAgents, createAgent, getAgentKey, assertGroupExists, ensureAgentGroup };
 }
 
 function defaultSettings(env = process.env) {
@@ -186,7 +238,7 @@ function defaultSettings(env = process.env) {
   const client = createClient({ apiUrl: env.WAZUH_API_URL, username: env.WAZUH_API_USERNAME,
     password: env.WAZUH_API_PASSWORD, caFile: env.WAZUH_API_CA_FILE, serverName: env.WAZUH_API_SERVER_NAME });
   const consoleUrl = env.WAZUH_DASHBOARD_URL ? httpsUrl(env.WAZUH_DASHBOARD_URL, false).href : null;
-  return { manager, version, consoleUrl, client };
+  return { manager, version, consoleUrl, client, agentGroup: agentGroup(env.WAZUH_AGENT_GROUP) };
 }
 
 module.exports = { createClient, defaultSettings, managerHostname, REQUEST_TIMEOUT_MS };

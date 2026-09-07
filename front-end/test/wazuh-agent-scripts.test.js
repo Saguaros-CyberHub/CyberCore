@@ -72,6 +72,91 @@ const python = ['python3', 'python'].find(command => spawnSync(command, ['--vers
 const powershell = process.platform === 'win32' ? 'powershell.exe' : null;
 const pythonSource = linux.split("exec python3 - <<'CYBERCORE_WAZUH_PY'\n")[1].split('\nCYBERCORE_WAZUH_PY\n')[0];
 
+test('Linux downloads published package/checksum paths and rejects a corrupted package', { skip: !python }, () => {
+  const script = buildInstallScript({ ...options, version: '4.14.1-1' });
+  const source = script.split("exec python3 - <<'CYBERCORE_WAZUH_PY'\n")[1].split('\nCYBERCORE_WAZUH_PY\n')[0];
+  const downloadSection = source.slice(source.indexOf('            deb_arch ='), source.indexOf("                STAGE = 'package-install-failed'"));
+  const helpers = source.split("if __name__ == '__main__':")[0].replace('import fcntl', 'fcntl = None');
+  for (const [packageManager, architecture, filename, packageDirectory] of [
+    ['deb', 'x86_64', 'wazuh-agent_4.14.1-1_amd64.deb', 'apt/pool/main/w/wazuh-agent'],
+    ['deb', 'aarch64', 'wazuh-agent_4.14.1-1_arm64.deb', 'apt/pool/main/w/wazuh-agent'],
+    ['rpm', 'x86_64', 'wazuh-agent-4.14.1-1.x86_64.rpm', 'yum'],
+    ['rpm', 'aarch64', 'wazuh-agent-4.14.1-1.aarch64.rpm', 'yum'],
+  ]) {
+    for (const corrupt of [false, true]) {
+      const code = helpers + `
+import json, textwrap
+architecture = ${JSON.stringify(architecture)}
+shutil.which = lambda command: command if command in ${packageManager === 'deb' ? "('dpkg', 'apt-get')" : "('rpm',)"} else None
+requested = []
+def download(url, destination, max_bytes):
+    requested.append(url)
+    payload = b'fixture package'
+    if url.endswith('.sha512'):
+        # Published files contain a hash followed by a filename or /tmp/filename.
+        payload = (hashlib.sha512(payload).hexdigest() + '  /tmp/${filename}\\n').encode()
+    elif ${corrupt ? 'True' : 'False'}:
+        payload += b'corrupted'
+    Path(destination).write_bytes(payload)
+try:
+    exec(textwrap.dedent(${JSON.stringify(downloadSection)}))
+    error = None
+except InstallError as exception:
+    error = str(exception)
+print(json.dumps({'requested': requested, 'error': error}))
+`;
+      const result = spawnSync(python, ['-'], { input: code, encoding: 'utf8', timeout: 10000 });
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      const data = JSON.parse(result.stdout);
+      assert.deepEqual(data.requested, [
+        `https://packages.wazuh.com/4.x/${packageDirectory}/${filename}`,
+        `https://packages.wazuh.com/4.x/checksums/wazuh/4.14.1/${filename}.sha512`,
+      ]);
+      assert.equal(data.error, corrupt ? 'checksum-mismatch' : null);
+    }
+  }
+});
+
+test('Windows downloads the published checksum path and rejects a corrupted MSI', { skip: !powershell }, t => {
+  const script = buildInstallScript({ ...options, platform: 'windows', version: '4.14.1-1' });
+  const downloadSection = script.slice(script.indexOf("    $package = Join-Path $workDir"), script.indexOf("    $script:stage = 'package-install-failed'"));
+  const helpers = script.split('\ntry {\n  $identity =')[0];
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'wazuh-download-test-'));
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
+  for (const corrupt of [false, true]) {
+    const code = helpers + `
+$workDir = $env:WAZUH_TEST_DIRECTORY
+$requested = New-Object 'Collections.Generic.List[string]'
+function Invoke-WebRequest($Uri, $OutFile, $TimeoutSec, $MaximumRedirection, [switch]$UseBasicParsing) {
+  $requested.Add([string]$Uri)
+  $payload = [Text.Encoding]::ASCII.GetBytes('fixture package')
+  if ($Uri.EndsWith('.sha512')) {
+    $hasher = [Security.Cryptography.SHA512]::Create()
+    try { $hash = ([BitConverter]::ToString($hasher.ComputeHash($payload))).Replace('-', '').ToLowerInvariant() } finally { $hasher.Dispose() }
+    $payload = [Text.Encoding]::ASCII.GetBytes($hash + '  /tmp/wazuh-agent-4.14.1-1.msi' + [Environment]::NewLine)
+  } elseif ($${corrupt}) { $payload = [Text.Encoding]::ASCII.GetBytes('corrupted') }
+  [IO.File]::WriteAllBytes($OutFile, $payload)
+}
+try {
+${downloadSection}
+} catch { if (-not $script:publicError) { throw } }
+@{ requested = @($requested); error = $script:publicError } | ConvertTo-Json -Compress
+`;
+    const scriptFile = path.join(temporary, 'download-fixture.ps1');
+    fs.writeFileSync(scriptFile, code);
+    const result = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptFile], {
+      encoding: 'utf8', timeout: 15000, env: { ...process.env, WAZUH_TEST_DIRECTORY: temporary },
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const data = JSON.parse(result.stdout);
+    assert.deepEqual(data.requested, [
+      'https://packages.wazuh.com/4.x/windows/wazuh-agent-4.14.1-1.msi',
+      'https://packages.wazuh.com/4.x/checksums/wazuh/4.14.1/wazuh-agent-4.14.1-1.msi.sha512',
+    ]);
+    assert.equal(data.error, corrupt ? 'checksum-mismatch' : null);
+  }
+});
+
 test('generated Linux shell and Python parse without execution', { skip: !shell || !python }, () => {
   const shellResult = spawnSync(shell, ['-n'], { input: linux, encoding: 'utf8', timeout: 10000 });
   assert.equal(shellResult.status, 0, shellResult.stderr);

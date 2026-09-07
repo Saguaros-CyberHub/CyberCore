@@ -204,6 +204,7 @@ test('configuration requires a safe manager, HTTPS origin, API credentials and p
   const config = defaultSettings(env);
   assert.equal(config.manager, 'wazuh.example.test');
   assert.equal(config.version, '4.14.0-1');
+  assert.equal(config.agentGroup, null);
   assert.equal(config.consoleUrl, env.WAZUH_DASHBOARD_URL);
   assert.doesNotThrow(() => defaultSettings({ ...env, WAZUH_API_SERVER_NAME: 'localhost' }));
   for (const changes of [{ WAZUH_AGENT_VERSION: '' }, { WAZUH_AGENT_VERSION: 'latest' }, { WAZUH_AGENT_VERSION: '5.0.0-1' },
@@ -216,4 +217,123 @@ test('configuration requires a safe manager, HTTPS origin, API credentials and p
   for (const manager of ['wazuh.example.test', '192.0.2.5', '2001:db8::1']) assert.equal(managerHostname(manager), manager);
   for (const manager of ['name;touch', 'name$(secret)', '<xml>', 'server:1514', '-host', '.host']) assert.throws(() => managerHostname(manager));
   assert.throws(() => createClient({ ...options, caFile: '/private/missing' }, { readFileSync: () => { throw new Error(SECRET); } }), error => !error.message.includes(SECRET));
+});
+
+test('optional agent group accepts exact Wazuh names and rejects unsafe or ambiguous values', async () => {
+  const env = { WAZUH_MANAGER: 'wazuh.example.test', WAZUH_API_URL: options.apiUrl,
+    WAZUH_API_USERNAME: options.username, WAZUH_API_PASSWORD: SECRET, WAZUH_AGENT_VERSION: '4.14.1-1' };
+  assert.equal(defaultSettings({ ...env, WAZUH_AGENT_GROUP: '' }).agentGroup, null);
+  for (const group of ['StudentVM', 'student-vm_1.2', 'a'.repeat(128)]) {
+    assert.equal(defaultSettings({ ...env, WAZUH_AGENT_GROUP: group }).agentGroup, group);
+  }
+  for (const group of ['.', '..', 'StudentVM,default', 'all/groups', ' StudentVM', 'StudentVM ',
+    'StudentVM\n', 'student?group', 'x'.repeat(129), null, 123]) {
+    assert.throws(() => defaultSettings({ ...env, WAZUH_AGENT_GROUP: group }), /WAZUH_AGENT_GROUP/);
+    const h = harness();
+    await assert.rejects(h.client.assertGroupExists(group), /WAZUH_AGENT_GROUP/);
+    await assert.rejects(h.client.ensureAgentGroup('001', group), /WAZUH_AGENT_GROUP/);
+    assert.equal(h.state.calls.length, 0);
+  }
+});
+
+test('configured group preflight requires exactly the named existing group and never creates it', async () => {
+  const h = harness(url => {
+    if (url.pathname === '/groups') {
+      assert.equal(url.searchParams.get('groups_list'), 'StudentVM');
+      assert.equal(url.searchParams.get('select'), 'name');
+    }
+    return { error: 0, data: { affected_items: [{ name: 'StudentVM' }], total_affected_items: 1, total_failed_items: 0 } };
+  });
+  await h.client.assertGroupExists('StudentVM');
+  assert.equal(h.state.calls.filter(call => call.url.pathname === '/groups').every(call => call.opts.method === 'GET'), true);
+  for (const answer of [emptyAgents,
+    { error: 0, data: { affected_items: [{ name: 'studentvm' }], total_affected_items: 1 } },
+    { error: 1710, message: SECRET }, { statusCode: 403, body: SECRET }]) {
+    const denied = harness(url => url.pathname === '/groups' ? answer : emptyAgents);
+    await assert.rejects(denied.client.assertGroupExists('StudentVM'), error => error.status === 503
+      && error.safe && /WAZUH_AGENT_GROUP/.test(error.message) && !error.message.includes(SECRET));
+    assert.equal(denied.state.calls.some(call => call.url.pathname === '/groups' && call.opts.method !== 'GET'), false);
+  }
+});
+
+test('group assignment targets one registered agent, preserves its other groups and verifies membership', async () => {
+  const groups = ['default', 'servers'];
+  const h = harness((url, opts, body) => {
+    if (url.pathname === '/agents') {
+      assert.equal(opts.method, 'GET');
+      assert.equal(url.searchParams.get('agents_list'), '001');
+      assert.equal(url.searchParams.get('select'), 'id,group');
+      return { error: 0, data: { affected_items: [{ id: '001', group: [...groups] }], total_affected_items: 1 } };
+    }
+    if (url.pathname === '/agents/001/group/StudentVM') {
+      assert.equal(opts.method, 'PUT');
+      assert.equal(url.searchParams.get('force_single_group'), 'false');
+      assert.equal(body, undefined);
+      groups.push('StudentVM');
+      return { error: 0, data: { affected_items: ['001'], total_affected_items: 1, total_failed_items: 0 } };
+    }
+    return emptyAgents;
+  });
+  await h.client.ensureAgentGroup('001', 'StudentVM');
+  await h.client.ensureAgentGroup('001', 'StudentVM');
+  assert.deepEqual(groups, ['default', 'servers', 'StudentVM']);
+  assert.equal(h.state.calls.filter(call => call.opts.method === 'PUT').length, 1);
+  assert.equal(h.state.calls.filter(call => call.url.pathname === '/agents').length, 3);
+});
+
+test('group retry tolerates already-assigned or lost responses only when a fresh read proves membership', async () => {
+  for (const assignmentReply of [{ error: 2, data: { total_failed_items: 1,
+    failed_items: [{ error: { code: 1751, message: SECRET }, id: ['001'] }] } },
+  { error: new Error(SECRET) }]) {
+    for (const confirmed of [false, true]) {
+      let reads = 0;
+      const h = harness(url => {
+        if (url.pathname === '/agents') {
+          const group = ++reads > 1 && confirmed ? ['default', 'StudentVM'] : ['default'];
+          return { error: 0, data: { affected_items: [{ id: '001', group }], total_affected_items: 1 } };
+        }
+        return url.pathname.includes('/group/') ? assignmentReply : emptyAgents;
+      });
+      if (confirmed) await h.client.ensureAgentGroup('001', 'StudentVM');
+      else await assert.rejects(h.client.ensureAgentGroup('001', 'StudentVM'), error => error.safe
+        && /WAZUH_AGENT_GROUP/.test(error.message) && !error.message.includes(SECRET));
+      assert.equal(reads, 2);
+      assert.equal(h.state.calls.filter(call => call.opts.method === 'PUT').length, 1);
+    }
+  }
+});
+
+test('never-connected registrations may omit group until their first verified assignment', async () => {
+  for (const confirmed of [true, false]) {
+    let assigned = false;
+    const h = harness((url, opts) => {
+      if (url.pathname === '/agents') {
+        return { error: 0, data: { affected_items: [{ id: '016',
+          ...(assigned && confirmed ? { group: ['StudentVM'] } : {}) }], total_affected_items: 1, total_failed_items: 0 } };
+      }
+      if (url.pathname === '/agents/016/group/StudentVM') {
+        assert.equal(opts.method, 'PUT');
+        assert.equal(url.searchParams.get('force_single_group'), 'false');
+        assigned = true;
+        return { error: 0, data: { affected_items: ['016'], total_affected_items: 1, total_failed_items: 0 } };
+      }
+      return emptyAgents;
+    });
+    if (confirmed) await h.client.ensureAgentGroup('016', 'StudentVM');
+    else await assert.rejects(h.client.ensureAgentGroup('016', 'StudentVM'), /WAZUH_AGENT_GROUP/);
+    assert.equal(h.state.calls.filter(call => call.opts.method === 'PUT').length, 1);
+    assert.equal(h.state.calls.filter(call => call.url.pathname === '/agents').length, 2);
+  }
+});
+
+test('group assignment refuses invalid IDs and mismatched or malformed membership before mutation', async () => {
+  const h = harness();
+  for (const id of ['000', '../001', '001?agents_list=all']) await assert.rejects(h.client.ensureAgentGroup(id, 'StudentVM'));
+  for (const group of [undefined, '']) await assert.rejects(h.client.assertGroupExists(group));
+  assert.equal(h.state.calls.length, 0);
+  for (const item of [{ id: '999', group: ['StudentVM'] }, { id: '001', group: 'StudentVM' }, { id: '001', group: [123] }, { id: '001', group: null }]) {
+    const malformed = harness(() => ({ error: 0, data: { affected_items: [item], total_affected_items: 1 } }));
+    await assert.rejects(malformed.client.ensureAgentGroup('001', 'StudentVM'), /WAZUH_AGENT_GROUP/);
+    assert.equal(malformed.state.calls.some(call => call.opts.method === 'PUT'), false);
+  }
 });

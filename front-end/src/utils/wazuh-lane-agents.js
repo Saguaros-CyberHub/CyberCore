@@ -4,6 +4,7 @@
 const crypto = require('node:crypto');
 const { targetsFor, laneEligible, eligibleLaneSql, seenAt } = require('./caldera-lane-agents');
 const { defaultSettings } = require('./wazuh-client');
+const { isMalwareLane } = require('./malware-analysis-state');
 
 const JOB_TIMEOUT_MS = 15 * 60 * 1000;
 const QUEUE_TIMEOUT_MS = 4 * 60 * 60 * 1000;
@@ -39,15 +40,30 @@ function publicJob(job, now) {
 }
 
 const INSTALL_ERRORS = {
+  'preflight-failed': 'The Wazuh installer could not complete its initial guest checks. Review guest permissions and the existing installation.',
+  'root-required': 'The Wazuh installer requires root privileges on this Linux VM.',
+  'administrator-required': 'The Wazuh installer requires administrator privileges on this Windows VM.',
+  'installation-busy': 'Another Wazuh installation is running on this VM. Wait for it to finish, then retry.',
   'manager-conflict': 'This VM is configured for another Wazuh manager. Review its existing configuration before retrying.',
   'identity-conflict': 'This VM already has a different Wazuh identity. Review its existing registration before retrying.',
+  'existing-installation-invalid': 'The existing Wazuh installation is incomplete or uses an unexpected service path. Review it before retrying.',
+  'unsafe-installation-path': 'The Wazuh installation or staging path is redirected or unsafe. Review guest directory permissions and links.',
   'dependency-missing': 'A required installer dependency is missing on this VM. Check its package tools and Python 3 on Linux.',
   'python3-missing': 'Python 3 is required on Linux to safely check and preserve Wazuh configuration. Install it and retry.',
   'systemd-required': 'This Linux installer requires systemd to manage the Wazuh service.',
   'manager-installation': 'The selected VM runs a Wazuh manager and cannot receive an agent installation.',
   'unsupported-package-manager': 'This Linux VM needs a supported Debian or RPM package manager.',
   'unsupported-architecture': 'This VM architecture is not supported by the Wazuh installer.',
+  'unsupported-platform': 'The selected installer does not support this VM operating system. Review the platform selection.',
+  'download-failed': 'Could not download the Wazuh package or checksum. Check guest HTTPS access to packages.wazuh.com and the configured agent version.',
+  'checksum-invalid': 'The downloaded Wazuh checksum was invalid. Check package availability and any proxy filtering downloads.',
+  'checksum-mismatch': 'The downloaded Wazuh package did not match its SHA-512 checksum. Retry the download and check any proxy or cache.',
   'package-install-failed': 'The Wazuh package could not be installed. Check guest package manager logs and retry.',
+  'configuration-invalid': 'The existing Wazuh configuration could not be safely parsed. Review ossec.conf before retrying.',
+  'configuration-failed': 'The Wazuh configuration could not be updated. Check guest file permissions and available disk space.',
+  'key-import-failed': 'The Wazuh enrollment key could not be imported or verified. Check the existing agent installation and registration.',
+  'service-stop-failed': 'The existing Wazuh agent service could not be stopped. Check its guest service status before retrying.',
+  'service-start-failed': 'The Wazuh agent service could not be started. Check its guest service logs and ossec.conf.',
 };
 function installationError(stdout) {
   for (const match of String(stdout || '').matchAll(/^CYBERCORE_WAZUH_ERROR:([a-z0-9-]+)\r?$/gm)) {
@@ -64,6 +80,7 @@ function createService(deps = {}) {
   const executor = () => deps.executor || require('./script-executor');
   const buildScript = args => (deps.buildInstallScript || require('./wazuh-agent-scripts').buildInstallScript)(args);
   const proxmox = (...args) => (deps.proxmox || require('./proxmox').proxmoxAPI)(...args);
+  const ensureGatewayAccess = deps.ensureGatewayAccess || require('./wazuh-gateway-access').ensureWazuhGatewayAccess;
   const pending = [];
   let active = 0;
   function pump() {
@@ -91,7 +108,7 @@ function createService(deps = {}) {
   }
 
   async function readLane(laneId) {
-    return (await query('SELECT lane_id, name, status, config FROM cybercore_lane WHERE lane_id = $1', [laneId])).rows[0];
+    return (await query('SELECT lane_id, name, status, vxlan_id, config FROM cybercore_lane WHERE lane_id = $1', [laneId])).rows[0];
   }
 
   function assertTarget(lane, vmId, job = null) {
@@ -100,6 +117,9 @@ function createService(deps = {}) {
     }
     if (object(lane.config).internet_enabled === false) {
       throw failure(409, 'Lane internet access is disabled. Enable Internet for this lane before installing a Wazuh agent.');
+    }
+    if (isMalwareLane(object(lane.config))) {
+      throw failure(409, 'Central Wazuh deployment cannot open gateway access on a malware analysis lane.');
     }
     if (job) {
       const stored = currentJob(jobForVm(lane.config, vmId), now());
@@ -144,7 +164,7 @@ function createService(deps = {}) {
           const agent = job?.manager === config?.manager && agents.find(item => item.name === job.agent_name
             && (!job.agent_id || String(item.id) === String(job.agent_id)));
           return { vm_id: target.vm_id, name: target.name, platform: target.platform, type: target.type,
-            power_state: live?.status || 'unknown', runnable: laneEligible(lane) && runnableGuest(live),
+            power_state: live?.status || 'unknown', runnable: laneEligible(lane) && runnableGuest(live) && !isMalwareLane(cfg),
             agent: agent ? publicAgent(agent) : null };
         });
         const targetIds = new Set(targets.map(target => target.vm_id));
@@ -171,6 +191,7 @@ function createService(deps = {}) {
   }
 
   async function enrollment(laneId, config, job) {
+    if (config.agentGroup) await config.client.assertGroupExists(config.agentGroup);
     const agents = await listAgents(config);
     const prior = job.agent_id ? agents.find(agent => String(agent.id) === String(job.agent_id))
       : agents.find(agent => agent.name === job.agent_name);
@@ -191,6 +212,10 @@ function createService(deps = {}) {
       key = created.key || await config.client.getAgentKey(job.agent_id);
     }
     if (typeof key !== 'string' || !key) throw failure(502, 'Wazuh did not return an enrollment key.');
+    if (config.agentGroup) {
+      await revalidate(laneId, job);
+      await config.client.ensureAgentGroup(job.agent_id, config.agentGroup);
+    }
     return key;
   }
 
@@ -204,6 +229,17 @@ function createService(deps = {}) {
       if (!await exec.waitForGuestAgent(live.node, job.vm_id, 15000)) {
         throw failure(409, 'The QEMU guest agent is unavailable. Start or install it in the selected VM, then retry.');
       }
+      await revalidate(laneId, job);
+      job.message = 'Preparing Wazuh access on the lane gateway.';
+      await saveOwned(laneId, job);
+      const readAuthorizedLane = async () => {
+        await revalidate(laneId, job);
+        const lane = await readLane(laneId);
+        assertTarget(lane, job.vm_id, job);
+        return lane;
+      };
+      await ensureGatewayAccess({ lane: await readAuthorizedLane(), vmId: job.vm_id, manager: config.manager },
+        { proxmox, readLane: readAuthorizedLane });
       await revalidate(laneId, job);
       const key = await enrollment(laneId, config, job);
       const script = buildScript({ platform: job.platform, manager: config.manager, version: config.version,
@@ -260,6 +296,7 @@ function createService(deps = {}) {
     assertTarget(lane, input.vm_id);
     const config = preflight?.config || settings();
     if (!preflight) {
+      if (config.agentGroup) await config.client.assertGroupExists(config.agentGroup);
       try { await listAgents(config); } catch (_) { throw failure(503, 'Wazuh is unavailable. Check API connectivity, credentials and TLS trust.'); }
     }
     const live = preflight?.byId.get(input.vm_id) || (!preflight && (await loadResources()).find(vm => Number(vm.vmid) === input.vm_id));
@@ -313,6 +350,7 @@ function createService(deps = {}) {
       seen.add(key);
     }
     const config = settings();
+    if (config.agentGroup) await config.client.assertGroupExists(config.agentGroup);
     try { await listAgents(config); } catch (_) { throw failure(503, 'Wazuh is unavailable. Check API connectivity, credentials and TLS trust.'); }
     const resources = await loadResources();
     const preflight = { config, byId: new Map(resources.map(vm => [Number(vm.vmid), vm])) };
