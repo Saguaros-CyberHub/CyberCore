@@ -36,14 +36,34 @@ credentials; each VM receives only its own agent enrollment key.
 
 The API connection verifies HTTPS certificates. For a private certificate
 authority, set `WAZUH_API_CA_FILE` to a PEM path inside the app container and
-mount that file read-only with a Compose override, for example:
+copy the verified public CA certificate to `secrets/wazuh-api-ca.pem` on the
+Docker host, beside the base Compose file. This must be a regular PEM file.
+The `secrets` directory is ignored by Git and is outside the app's build context;
+pulling the repository or rebuilding the app does not copy this certificate.
 
-```yaml
-services:
-  app:
-    volumes:
-      - ./secrets/wazuh-api-ca.pem:/run/secrets/wazuh-api-ca.pem:ro
+The repository includes [`docker-compose.wazuh.yml`](../docker-compose.wazuh.yml)
+with the read-only mount and its matching `WAZUH_API_CA_FILE` container path.
+Enable it on the Linux deployment host by adding this to `.env`:
+
+```dotenv
+COMPOSE_FILE=docker-compose.yml:docker-compose.wazuh.yml
 ```
+
+If `COMPOSE_FILE` already selects other deployment overrides, append
+`docker-compose.wazuh.yml` to that list. Explicit selection replaces Compose's
+automatic override discovery, so include any existing `docker-compose.override.yml`
+that the deployment still needs. On Windows, the default list separator is `;`.
+Passing multiple `-f` arguments, as shown below, works on either platform.
+
+The Wazuh override stays in Git so the deployment uses the same configuration
+as the repository. The deployment `.env` and public certificate remain local
+files. Deployments that do not select this override do not need a private CA file.
+
+`create_host_path: false` makes a missing source fail during deployment instead
+of creating a directory where the PEM should be. The `Z` label allows the app
+to read this dedicated file on SELinux hosts such as Rocky Linux; Docker ignores
+the label on hosts without SELinux. See the
+[Docker bind-mount reference](https://docs.docker.com/reference/compose-file/services/#volumes).
 
 ```dotenv
 WAZUH_API_CA_FILE=/run/secrets/wazuh-api-ca.pem
@@ -63,12 +83,37 @@ This sets the certificate identity expected by the HTTPS client while connecting
 to the address in `WAZUH_API_URL`. Certificate-chain, expiry and identity checks
 remain enabled. Reverify and replace the trusted certificate when it is renewed.
 
-Recreate the app after changing its environment. If using a separate override
-file, include it in the Compose invocation.
+Recreate the app after pulling the tracked override and setting `COMPOSE_FILE`:
 
 ```sh
 docker compose up -d --no-deps --force-recreate app
 ```
+
+Subsequent `docker compose build app` and `docker compose up -d app` commands use
+the same override through `COMPOSE_FILE`. A bind-mount change alone does not
+require rebuilding the image.
+
+To select the files explicitly instead, run the following command, including
+any additional override files your deployment uses:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.wazuh.yml up -d --no-deps --force-recreate app
+```
+
+If the app reports `Could not read WAZUH_API_CA_FILE`, check the host file and
+the path visible to the app from the deployment directory. These commands do
+not print API credentials or certificate contents:
+
+```sh
+ls -ld ./secrets/wazuh-api-ca.pem
+docker compose exec -T app node -e 'const fs=require("node:fs");const p=process.env.WAZUH_API_CA_FILE;console.log("CA path:",p);try{console.log("Regular file:",fs.statSync(p).isFile());console.log("Readable bytes:",fs.readFileSync(p).length)}catch(e){console.log("Read error:",e.code)}'
+```
+
+`ENOENT` means the path is missing, `EISDIR` means it points to a directory,
+and `EACCES` indicates a permissions or SELinux access problem. For a missing
+path, also check that the certificate override was included when the app was
+created. Copying the file to a workstation alone does not make it available on
+the Docker host.
 
 Lane VMs need outbound HTTPS to `packages.wazuh.com` and TCP 1514 to the manager.
 The app needs HTTPS access to the manager API, normally TCP 55000. This flow

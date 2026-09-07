@@ -1,0 +1,20 @@
+# Optional private Wazuh API CA mount. Keep this configuration in Git; copy the
+# verified public certificate to secrets/wazuh-api-ca.pem on the Docker host.
+#
+# Enable on Linux by adding this to the deployment .env:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.wazuh.yml
+# Or pass both files explicitly:
+#   docker compose -f docker-compose.yml -f docker-compose.wazuh.yml up -d --no-deps --force-recreate app
+
+services:
+  app:
+    environment:
+      WAZUH_API_CA_FILE: /run/secrets/wazuh-api-ca.pem
+    volumes:
+      - type: bind
+        source: ./secrets/wazuh-api-ca.pem
+        target: /run/secrets/wazuh-api-ca.pem
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: Z
