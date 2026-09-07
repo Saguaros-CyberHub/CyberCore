@@ -485,6 +485,53 @@ test('an empty or unmatched target table hides its toolbar and never throws on a
   assert.match(live.el('wazuhTargets').innerHTML, /No targets match/);
 });
 
+test('every combination of grouping, sorting and filtering renders and rebinds without throwing', async () => {
+  // el() is unguarded throughout the dialog, so a view that omits an element the
+  // rebind loop still walks throws mid-render and leaves half the controls dead.
+  // Walk the whole product rather than trusting that the four hand-written
+  // cases above happen to cover it.
+  const h = harness(); h.setStatus(wall()); await h.api.open();
+  h.click('wazuhExpandAll');
+  h.click('wazuhAllLanes');
+  // The two panels filter and sort independently, so sweeping each dimension is
+  // the coverage that matters; the full cross product is 7200 renders for none.
+  for (const groupBy of ['section', 'kind', 'family', 'none']) {
+    h.change('wazuhGroupBy', groupBy);
+    h.click('wazuhExpandAll');
+    for (const laneSort of ['name', 'number', 'created', 'vms', 'missing']) {
+      h.change('wazuhLaneSort', laneSort);
+      h.click('wazuhLaneSortDir');
+      for (const laneFacet of ['all', 'needs', 'installing', 'failed', 'done', 'off']) {
+        h.click(`wazuhLaneFacet-${laneFacet}`);
+      }
+    }
+  }
+  h.click('wazuhLaneFacet-all');
+  for (const targetFacet of ['all', 'missing', 'connected', 'installing', 'failed', 'unavailable']) {
+    h.click(`wazuhTargetFacet-${targetFacet}`);
+    if (!h.el('wazuhTargetAll')) {
+      // A facet that matches nothing renders an empty state and no table, so
+      // there is no header checkbox and no sort button left to bind.
+      assert.match(h.el('wazuhTargets').innerHTML, /No targets match|No lanes selected|No QEMU VMs/);
+      continue;
+    }
+    for (const column of ['lane', 'machine', 'vm', 'os', 'status']) {
+      h.click(ident('Sort', column));   // ascending
+      h.click(ident('Sort', column));   // descending
+    }
+  }
+  h.click('wazuhTargetFacet-all');
+  // Collapsed groups omit their chips, and a query omits whole groups: the two
+  // ways a rebind loop can outrun what was actually rendered.
+  h.click('wazuhCollapseAll');
+  h.change('wazuhLaneSearch', 'cybr388');
+  h.change('wazuhTargetSearch', 'dc01');
+  await h.tick();
+  h.click('wazuhLaneSearchClear');
+  h.click('wazuhTargetSearchClear');
+  assert.match(h.el('wazuhSummary').textContent, /^\d+ VMs selected/);
+});
+
 test('lost queue response requires status refresh before retry; persisted job prevents duplicates', async () => {
   const h = harness(); await h.api.open(); h.change(ident('Lane', 'lane-one'), true); h.change(ident('Machine', 'dc01'), true);
   const data = fixture(); data.lanes[0].jobs = [{ vm_id: 100, job_id: 'persisted', status: 'queued' }];

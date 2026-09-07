@@ -152,6 +152,46 @@ checksum, package, configuration or service stage without exposing guest
 output or enrollment keys. On Windows, MSI installation details are saved in
 `C:\ProgramData\CyberCore\Wazuh\install.log` once MSI execution begins.
 
+## Finding lanes and targets
+
+Lanes are grouped by course, then by deployed group, then by the shared prefix
+of their names. A course label such as `CYBR388 - Network Defense` comes from
+the lane's own course metadata; where that is unavailable the group falls back
+to the lane-name prefix, for example `ciab-cochise101`. Lanes that fit no such
+grouping collect under **Other lanes**, last.
+
+**Above 40 lanes the groups open collapsed**, once, so the dialog opens on a
+readable list rather than a wall. A group holding a lane you have already
+selected always opens. Nothing re-collapses a group you opened, including the
+five-second status refresh. **Expand all** and **Collapse all** override this.
+
+The search box matches every word you type against the lane name, its course,
+its deployed group, its machine names and its VM ids; all words must match, in
+any order and any case. A search opens every group that contains a hit, and the
+group toggles are disabled while it is active. Clearing the box restores the
+collapse state you had. Pressing Enter in either search box does nothing; it
+never queues an installation. Escape clears the box, and closes the dialog when
+the box is already empty.
+
+The status pills filter lanes to those that need an agent, have one installing,
+have a failure, are fully connected, or cannot be used. Their counts always
+describe the whole inventory, not the filtered view. The sort control orders
+lanes within each group by name, lane number, age, running VMs or agents
+needed. The target table has the same search and pills, and its column headers
+sort it.
+
+**Bulk selection follows the filter.** With a filter active, *All available*
+becomes *All matching (N)* and acts only on lanes the filter admits, as do a
+group's checkbox, the target table's header checkbox and **Select missing
+agents**. A collapsed group is still matching: collapsing hides, it does not
+exclude. **Clear** and **Select failed targets** always act on everything.
+
+Filtering never deselects. Selections you can no longer see are counted beside
+the lane list, beside the target table and above the Install button, so a
+filtered view cannot hide part of what you are about to install. The 200-target
+limit is unchanged and counts hidden selections; selecting a whole group can
+exceed it.
+
 ## Selection, progress and retries
 
 - Match machine names across selected lanes without regard to case. Review
@@ -248,7 +288,8 @@ central automatic enrollment on future deployments is a separate lifecycle hook.
 
 ## Implementation
 
-- `front-end/public/js/admin/admin-wazuh.js`: selection modal and status polling.
+- `front-end/public/js/admin/admin-wazuh.js`: selection modal, grouping, search,
+  sorting and status polling.
 - `front-end/src/routes/admin/wazuh-agents.js`: admin authorization, inventory
   resolution, batch validation and audit recording.
 - `front-end/src/utils/wazuh-lane-agents.js`: bounded queue, per-VM claims,
@@ -259,6 +300,17 @@ central automatic enrollment on future deployments is a separate lifecycle hook.
   TCP 1514 access on the selected lane gateway.
 - `front-end/src/utils/wazuh-agent-cleanup.js`: durable agent-removal jobs and
   retry worker for destroyed lanes.
+
+`GET /wazuh-agents` returns each lane's `vxlan_id`, `lane_number`, `family`,
+`created_at`, `kind`, `course_id`, `course_code`, `course_name`, `group_id`,
+`group_label` and `material_id` for the dialog's grouping and sorting, plus each
+target's `role`. These are an explicit allowlist, never the lane configuration,
+which holds owner addresses and has carried guest credentials. Course names
+resolve through `front-end/src/utils/course-directory.js`, the registered seam
+onto the CLE plugin's database, memoized for 60 seconds and abandoned after
+1.5 seconds. Core never queries `cle_db` directly, and a directory outage
+degrades the group headings to lane-name prefixes rather than failing the
+inventory request.
 
 Enrollment follows Wazuh's documented [API client-key workflow](https://documentation.wazuh.com/current/user-manual/agent/agent-enrollment/enrollment-methods/via-manager-API/requesting-the-key.html)
 and [key import procedure](https://documentation.wazuh.com/current/user-manual/agent/agent-enrollment/enrollment-methods/via-manager-API/importing-the-key.html).
