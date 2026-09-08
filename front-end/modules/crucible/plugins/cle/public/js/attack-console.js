@@ -127,7 +127,10 @@
                 onclick="CleAttack.setMode('chain')">Attack Chains</button>
         <span style="flex:1"></span>
         <button class="btn btn-secondary" onclick="CleAttack.refreshTargets()">↻ Refresh lanes</button>
+        <button class="btn btn-secondary" id="acReclaimBtn" onclick="CleAttack.reclaim()"
+                title="Delete rotated logs, vacuum the journal, and claim any unused disk on every sensor. Live logs are never touched.">Free disk space</button>
       </div>
+      <div id="acReclaim"></div>
 
       <div id="acPicker"></div>
 
@@ -325,6 +328,12 @@
 
     const terminal = ['completed', 'partial', 'failed', 'aborted'].includes(r.status);
     const retryable = (data.targets || []).filter((t) => ['failed', 'skipped', 'unknown'].includes(t.status)).length;
+    // cc-attack.sh declines below a 2 GiB floor and says so rather than filling
+    // the disk mid-run. That refusal is the one failure an instructor can fix
+    // from this screen, so it gets its own button instead of being one more row
+    // in the Detail column reading like every other error.
+    const outOfSpace = (data.targets || [])
+      .filter((t) => /nospace/i.test(`${t.error || ''} ${t.skip_reason || ''} ${t.guest_state || ''}`));
 
     box.innerHTML = `
       <h3>Current run</h3>
@@ -337,6 +346,8 @@
           <span style="font-size:.85rem;">total events: <strong>${data.total_events || 0}</strong></span>
           ${terminal ? '' : `<button class="btn btn-secondary" onclick="CleAttack.abort()">Abort</button>`}
           ${retryable ? `<button class="btn btn-secondary" onclick="CleAttack.retry()">Retry ${retryable} lane(s)</button>` : ''}
+          ${outOfSpace.length ? `<button class="btn btn-secondary" onclick="CleAttack.reclaim()"
+              title="These lanes refused because the sensor is nearly full. Free space, then Retry.">Free space on ${outOfSpace.length} lane(s)</button>` : ''}
         </div>
         ${startsIn !== null && startsIn > 0
           ? `<p style="margin-top:.5rem;font-size:.9rem;">Starts on every lane in
@@ -491,6 +502,93 @@
     } catch (e) { toast(e.message, true); }
   }
 
+  /**
+   * Free disk on every resolvable sensor in the course.
+   *
+   * Synchronous on purpose. abort() and retry() fire-and-poll because a run
+   * already exists to watch; this has no run, and the instructor is standing at
+   * the console deciding whether the lane is usable for the next ten minutes.
+   * The numbers ARE the answer, so they are worth waiting a few seconds for and
+   * worth rendering rather than reducing to a toast.
+   */
+  async function reclaim() {
+    if (!currentCourseId) return;
+    const btn = el('acReclaimBtn');
+    const box = el('acReclaim');
+    if (btn) { btn.disabled = true; btn.textContent = 'Freeing space...'; }
+    if (box) box.innerHTML = '<p style="font-size:.85rem;color:var(--text-secondary);margin:.5rem 0;">Working through the lanes, a few seconds each...</p>';
+    try {
+      const r = await api('POST', `/courses/${currentCourseId}/attacks/reclaim`, {});
+      renderReclaim(r);
+      toast(`Freed ${fmtKb(r.freed_kb_total)} across ${r.reclaimed} lane(s)`);
+      // Free space changes whether a lane is targetable at all, so the picker's
+      // state is stale the moment this returns.
+      await refreshTargets();
+    } catch (e) {
+      if (box) box.innerHTML = '';
+      toast('Could not free space: ' + e.message, true);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = 'Free disk space'; }
+    }
+  }
+
+  /** KB to something a person reads, signed so a gain is obviously a gain. */
+  function fmtKb(kb) {
+    const n = Number(kb) || 0;
+    const abs = Math.abs(n);
+    const s = abs >= 1048576 ? `${(abs / 1048576).toFixed(1)} GB`
+      : abs >= 1024 ? `${(abs / 1024).toFixed(0)} MB`
+      : `${abs} KB`;
+    return n < 0 ? `-${s}` : s;
+  }
+
+  function renderReclaim(r) {
+    const box = el('acReclaim');
+    if (!box) return;
+    if (!r || !r.lanes) {
+      box.innerHTML = '<p style="font-size:.85rem;color:var(--text-secondary);margin:.5rem 0;">No reachable lanes to clean.</p>';
+      return;
+    }
+    // Worst-off first: the lane still short of the 2 GiB floor is the one the
+    // instructor has to deal with, and it should not be somewhere in the middle
+    // of an alphabetical list of successes.
+    const rows = (r.results || []).slice().sort((a, b) => {
+      if (a.ok !== b.ok) return a.ok ? 1 : -1;
+      return (a.after_kb || 0) - (b.after_kb || 0);
+    });
+    const FLOOR_KB = 2097152;
+    box.innerHTML = `
+      <div style="margin:.5rem 0;padding:.6rem .75rem;border:1px solid var(--border,#ddd);border-radius:6px;">
+        <strong style="font-size:.9rem;">Freed ${escHtml(fmtKb(r.freed_kb_total))}</strong>
+        <span style="font-size:.85rem;color:var(--text-secondary);">
+          across ${r.reclaimed} of ${r.lanes} lane(s)${r.unreachable ? ` · ${r.unreachable} unreachable` : ''}
+        </span>
+        <table style="width:100%;border-collapse:collapse;font-size:.8rem;margin-top:.5rem;">
+          <thead><tr style="background:var(--bg-secondary,#f7f7f7);">
+            <th style="text-align:left;padding:.3rem;">Student</th>
+            <th style="text-align:left;padding:.3rem;">Freed</th>
+            <th style="text-align:left;padding:.3rem;">Free now</th>
+            <th style="text-align:left;padding:.3rem;">Disk</th>
+          </tr></thead>
+          <tbody>
+          ${rows.map((x) => {
+            const short = x.ok && x.after_kb != null && x.after_kb < FLOOR_KB;
+            return `
+            <tr style="border-top:1px solid var(--border,#eee);${x.ok ? '' : 'opacity:.65;'}">
+              <td style="padding:.3rem;">${escHtml(x.student_email || x.lane_name || x.lane_id)}</td>
+              <td style="padding:.3rem;">${x.ok ? escHtml(fmtKb(x.freed_kb)) : '—'}</td>
+              <td style="padding:.3rem;${short ? 'color:#c53030;font-weight:600;' : ''}">
+                ${x.ok ? escHtml(fmtKb(x.after_kb)) : '—'}
+                ${short ? ' (still under the 2 GB floor)' : ''}</td>
+              <td style="padding:.3rem;color:var(--text-secondary);">
+                ${x.ok ? escHtml(fmtKb(x.total_kb)) : escHtml(x.error || 'unreachable')}</td>
+            </tr>`;
+          }).join('')}
+          </tbody>
+        </table>
+      </div>`;
+  }
+
   async function retry() {
     if (!activeRunId) return;
     try {
@@ -535,6 +633,7 @@
     launch,
     abort,
     retry,
+    reclaim,
     setMode(m) { mode = m; selectedId = null; renderShell(); },
     select(id) { selectedId = id; renderShell(); },
     setSearch(v) {

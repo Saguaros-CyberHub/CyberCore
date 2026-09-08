@@ -932,6 +932,151 @@ async function abortRun(runId, api = proxmoxAPI) {
 }
 
 /**
+ * Free disk on a sensor, without touching anything still being written or read.
+ *
+ * WHY THIS EXISTS AS AN INSTRUCTOR ACTION
+ *   cc-attack.sh refuses to run below a 2 GiB floor and reports `nospace`. That
+ *   guard is correct -- a run that fills the disk is worse than a run that does
+ *   not start -- but the instructor is then stuck: the failure is on the guest,
+ *   the fix is four find(1) invocations, and there is no path to it from the
+ *   console. Measured on a real class: one lane out of twenty-four, mid-session.
+ *
+ * WHAT ACTUALLY FILLS THESE BOXES
+ *   Not the live logs. Rotated ones. loggen-rotate.sh reaped `host-*.json` only
+ *   from inside its own `if size >= MAX` branch, so once the live file sat below
+ *   the rotation threshold nothing reaped and every previously rotated file
+ *   stayed forever -- 17 files, 4.6 GB, on a 10 GB root. The bake now reaps
+ *   unconditionally, but that fix ships in an IMAGE, so every lane already
+ *   deployed still has the old script. This is the remedy for those.
+ *
+ * WHAT IT WILL NOT DELETE, and why the globs are written the way they are
+ *   `host-*.json` and `logs-*.json` require the hyphen, so they cannot match the
+ *   LIVE `host.json` / `logs.json` that cc-emit.js and filebeat hold open.
+ *   Deleting those would not free anything anyway -- the writer keeps the inode
+ *   -- and would cost the class its baseline until the next restart.
+ *
+ * THE GRACE WINDOWS ARE INGESTION SAFETY, NOT TIDINESS
+ *   filestream finishes a rotated file after the rename. Deleting one it has not
+ *   harvested silently drops those events from Kibana. 30 minutes is well past
+ *   the harvest of a file that stopped growing, and matches the intent of the
+ *   60-minute grace the rotation script uses on a schedule this action does not
+ *   have the luxury of waiting for.
+ *
+ * THE LVM STEP IS THE ONE THAT ACTUALLY MATTERS
+ *   The bake grows the block device by 12G; cloud-init's growpart does not
+ *   traverse LVM, so the template was sealed with a 10G filesystem on a 22G
+ *   disk and every clone inherited it. Reclaiming that is worth more than every
+ *   deletion above combined, and each of the four steps is a no-op once done,
+ *   so this is safe to run repeatedly and safe on a lane that is already grown.
+ */
+function buildReclaimCommand() {
+  const BASE_CUR = '/opt/log-generator/logs/current';
+  const ATK = '/opt/log-generator-attack/logs';
+  return [
+    `B=$(df -Pk /opt 2>/dev/null | awk 'NR==2{print $4}')`,
+
+    // Rotated baseline logs. The single biggest consumer, and the one the
+    // on-image timer fails to reap on already-deployed lanes.
+    `find ${BASE_CUR} -maxdepth 1 \\( -name 'host-*.json' -o -name 'logs-*.json' \\) -mmin +30 -delete 2>/dev/null || true`,
+
+    // log-generator's own broken rotation. Never ingested (the agent globs
+    // *.json, these are .jsonl) but 54,609 of them once stalled guest-exec on
+    // an otherwise idle box, so they are worth removing for their inode count
+    // alone rather than their bytes.
+    `find /opt/log-generator/logs ${ATK} -name 'logs_*.jsonl' -mmin +5 -delete 2>/dev/null || true`,
+
+    // Finished attack runs. A day, not seven, because the wrapper's own
+    // -mtime +7 sweep is what let these accumulate in the first place.
+    `find ${ATK}/current -maxdepth 1 -name 'attack-*.json' -mmin +1440 -delete 2>/dev/null || true`,
+    `find /opt/log-generator/logs/historical ${ATK}/historical -type f -mmin +1440 -delete 2>/dev/null || true`,
+
+    // Covered by no rotation logic anywhere and defaults to 10% of the
+    // filesystem, which on a 10G root is another gigabyte.
+    `journalctl --vacuum-size=50M >/dev/null 2>&1 || true`,
+
+    // Claim the disk the bake already paid for. Four steps because LVM needs
+    // all four; each is idempotent.
+    `growpart /dev/sda 2 >/dev/null 2>&1 || true`,
+    `pvresize /dev/sda2 >/dev/null 2>&1 || true`,
+    `lvextend -l +100%FREE /dev/mapper/rl-root >/dev/null 2>&1 || true`,
+    `xfs_growfs / >/dev/null 2>&1 || resize2fs /dev/mapper/rl-root >/dev/null 2>&1 || true`,
+
+    `A=$(df -Pk /opt 2>/dev/null | awk 'NR==2{print $4}')`,
+    `T=$(df -Pk /opt 2>/dev/null | awk 'NR==2{print $2}')`,
+    `echo "reclaim before_kb=$B after_kb=$A total_kb=$T"`,
+  ].join('; ');
+}
+
+/** Pull the three numbers back out of what buildReclaimCommand printed. */
+function parseReclaim(stdout) {
+  const s = String(stdout || '');
+  const num = (k) => {
+    const m = new RegExp(`${k}=(\\d+)`).exec(s);
+    return m ? Number(m[1]) : null;
+  };
+  return { before_kb: num('before_kb'), after_kb: num('after_kb'), total_kb: num('total_kb') };
+}
+
+/**
+ * Run the reclaim on every resolvable lane in a scope, or on a named subset.
+ *
+ * Never throws for a lane it cannot reach. An instructor clearing space before
+ * class needs the twenty-nine that worked, not an exception from the one that
+ * is powered off.
+ */
+async function reclaimSpace({ scope, laneIds = null } = {}, api = proxmoxAPI) {
+  const all = await resolveScopeTargets(scope);
+  const wanted = Array.isArray(laneIds) && laneIds.length ? new Set(laneIds.map(String)) : null;
+  const live = all.filter((t) => t.node && t.vmid && (!wanted || wanted.has(String(t.lane_id))));
+
+  const cmd = buildReclaimCommand();
+  const results = [];
+
+  await runBatch(live, async (t) => {
+    const row = {
+      lane_id: t.lane_id,
+      lane_name: t.lane_name,
+      student_email: t.student_email,
+      vmid: t.vmid,
+      ok: false,
+      freed_kb: null,
+      before_kb: null,
+      after_kb: null,
+      total_kb: null,
+      error: null,
+    };
+    try {
+      const { pid } = await agentShellExec(t.node, t.vmid, cmd);
+      const status = await pollExecStatus(t.node, t.vmid, pid, 120000);
+      const parsed = parseReclaim(status && (status['out-data'] || status.outData || ''));
+      Object.assign(row, parsed, {
+        ok: parsed.after_kb !== null,
+        freed_kb: parsed.after_kb !== null && parsed.before_kb !== null
+          ? parsed.after_kb - parsed.before_kb
+          : null,
+      });
+      if (!row.ok) row.error = 'no reclaim line in guest output';
+    } catch (err) {
+      row.error = err.message;
+    }
+    results.push(row);
+  }, { concurrency: dispatchConcurrency() });
+
+  results.sort((a, b) => String(a.student_email || '').localeCompare(String(b.student_email || '')));
+  const okRows = results.filter((r) => r.ok);
+  return {
+    lanes: results.length,
+    reclaimed: okRows.length,
+    unreachable: results.length - okRows.length,
+    // Reported in KB so the caller does the unit choice; a lane that gained
+    // 12 GB from the LVM step and one that freed 40 MB of rotated logs are
+    // both interesting and should not be averaged into each other.
+    freed_kb_total: okRows.reduce((s, r) => s + (r.freed_kb || 0), 0),
+    results,
+  };
+}
+
+/**
  * Re-fire the lanes that missed, at a fresh common start.
  *
  * They cannot join the original one — that moment has passed — so every retried
@@ -1009,6 +1154,9 @@ module.exports = {
   finalizeRunStatus,
   abortRun,
   retryTargets,
+  buildReclaimCommand,
+  parseReclaim,
+  reclaimSpace,
   // constants
   WRAPPER_SH,
   PLAYBOOKS,

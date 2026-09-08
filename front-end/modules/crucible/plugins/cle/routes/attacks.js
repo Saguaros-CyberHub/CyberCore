@@ -161,6 +161,53 @@ router.get('/targets', instructorOnly, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /reclaim — free disk on the sensors
+// ---------------------------------------------------------------------------
+/**
+ * Course-scoped, NOT run-scoped, and that is the whole point.
+ *
+ * A lane that refuses with `nospace` has usually not run anything -- the wrapper
+ * declines below its 2 GiB floor before it starts -- so there is no run to hang
+ * this off. The instructor needs it BEFORE class, on lanes that may not have
+ * been in any recent run, which is why it resolves lanes from the course scope
+ * the same way the picker does.
+ *
+ * Synchronous, unlike abort and retry. Those fire and let the console poll a run
+ * that already exists; this has no run to poll and the instructor is standing at
+ * the console waiting to know whether the lane is usable. A 2-minute per-guest
+ * timeout across the batch is well inside a request, and returning the numbers
+ * is most of the value -- "freed 4.2 GB on 3 lanes, 1 unreachable" is the answer
+ * to the question they actually asked.
+ */
+router.post('/reclaim', instructorOnly, async (req, res) => {
+  try {
+    const courseId = courseIdOf(req, res);
+    const course = await getManagedCourse(courseId, req.user, 'course_id, course_name, code');
+    if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
+
+    const laneIds = Array.isArray(req.body && req.body.lane_ids) ? req.body.lane_ids : null;
+    const result = await runner.reclaimSpace({ scope: scopeOf(courseId), laneIds });
+
+    audit.log({
+      req,
+      action: 'attack.disk_reclaimed',
+      source: 'cle',
+      target: { type: 'course', id: courseId, label: course.code || course.course_name },
+      metadata: {
+        lanes: result.lanes,
+        reclaimed: result.reclaimed,
+        unreachable: result.unreachable,
+        freed_kb_total: result.freed_kb_total,
+      },
+    }).catch(() => {});
+
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET / — recent runs, live + legacy, merged in JavaScript
 // ---------------------------------------------------------------------------
 /**
