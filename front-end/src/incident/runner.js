@@ -1007,6 +1007,23 @@ function buildReclaimCommand() {
   ].join('; ');
 }
 
+/**
+ * The guest's stdout, from whatever shape the executor handed back.
+ *
+ * script-executor normalises Proxmox's `out-data` into `stdout` before it
+ * returns, so `stdout` is the real contract and the hyphenated form never
+ * reaches here. Reading `out-data` directly looked right against the raw
+ * `qm guest exec` JSON and silently produced an empty string for every lane --
+ * twenty-four rows of "no reclaim line in guest output" on guests that had in
+ * fact done the work. The fallbacks are belt and braces for a future executor
+ * that stops normalising; the export exists so this is a tested contract
+ * rather than a field name someone guessed at twice.
+ */
+function stdoutOf(status) {
+  if (!status) return '';
+  return status.stdout || status['out-data'] || status.outData || '';
+}
+
 /** Pull the three numbers back out of what buildReclaimCommand printed. */
 function parseReclaim(stdout) {
   const s = String(stdout || '');
@@ -1048,7 +1065,7 @@ async function reclaimSpace({ scope, laneIds = null } = {}, api = proxmoxAPI) {
     try {
       const { pid } = await agentShellExec(t.node, t.vmid, cmd);
       const status = await pollExecStatus(t.node, t.vmid, pid, 120000);
-      const parsed = parseReclaim(status && (status['out-data'] || status.outData || ''));
+      const parsed = parseReclaim(stdoutOf(status));
       Object.assign(row, parsed, {
         ok: parsed.after_kb !== null,
         freed_kb: parsed.after_kb !== null && parsed.before_kb !== null
@@ -1156,6 +1173,7 @@ module.exports = {
   retryTargets,
   buildReclaimCommand,
   parseReclaim,
+  stdoutOf,
   reclaimSpace,
   // constants
   WRAPPER_SH,
