@@ -22,7 +22,9 @@
   const platform = (s, lane, target) => s.platforms.has(key(lane, target)) ? s.platforms.get(key(lane, target))
     : s.machinePlatforms.get(nameKey(target)) || (['windows', 'linux'].includes(target.platform) ? target.platform : '');
   const selected = s => rows(s).filter(({ lane, target }) => available(lane, target) && s.targets.has(key(lane, target)))
-    .map(({ lane, target }) => ({ lane_id: lane.lane_id, vm_id: target.vm_id, platform: platform(s, lane, target) }));
+    .map(({ lane, target }) => ({ lane_id: lane.lane_id, vm_id: target.vm_id, platform: platform(s, lane, target),
+      ...(platform(s, lane, target) === 'windows' ? { windows_telemetry: s.windowsTelemetry }
+        : platform(s, lane, target) === 'linux' && s.linuxSuricata ? { linux_suricata: true } : {}) }));
   const badge = status => ({ queued: 'badge-yellow', running: 'badge-blue', completed: 'badge-green', failed: 'badge-red', active: 'badge-green', connected: 'badge-green' }[status] || 'badge-gray');
 
   // -- Derived data ---------------------------------------------------------
@@ -280,6 +282,12 @@
           <details class="waz-explain"><summary>What installation does</summary>
             <p>Downloads and installs the Windows or Linux agent, enrolls it with the configured Wazuh manager, and starts its service. Existing agents pointing to another manager are not migrated automatically; those targets report an error.</p>
             <p>Queue up to 200 targets at once; up to 4 installations run concurrently. Jobs continue when this window closes. Completion confirms an agent check-in; inspect collected events in Wazuh to verify your monitoring configuration.</p></details>
+          <section class="waz-panel"><div class="waz-panel-body">
+            <label class="waz-pick"><input type="checkbox" id="wazuhWindowsTelemetry" checked><span>Include Windows security telemetry</span></label>
+            <p class="waz-hint">Set up Sysmon, enable PowerShell script block logging, and collect available Defender events. Existing Sysmon settings and Defender protection policies are preserved. Select connected Windows VMs below to apply this to existing agents. Script and process events can contain commands and sensitive data.</p>
+            <label class="waz-pick"><input type="checkbox" id="wazuhLinuxSuricata"><span>Include Suricata on Linux sensors</span></label>
+            <p class="waz-hint">Install a passive network IDS on selected Debian / Kali / Ubuntu VMs and send alerts to Wazuh. Captures traffic visible to the VM's network interface; monitoring other VMs requires traffic mirroring. Uses extra CPU, memory and log storage. Existing Suricata installations require review.</p>
+          </div></section>
           <section class="waz-panel">
             <div class="waz-panel-head"><span class="waz-step">1</span><h4 class="waz-panel-title">Running lanes</h4><span id="wazuhLaneCount" class="waz-count"></span>
               <div class="waz-panel-actions"><button type="button" class="btn btn-outline btn-sm" id="wazuhAllLanes">All available</button><button type="button" class="btn btn-outline btn-sm" id="wazuhClearLanes">Clear</button></div></div>
@@ -312,7 +320,7 @@
     document.body.appendChild(overlay);
     const s = { overlay, payload: null, fresh: false, refreshing: false, submitting: false, error: '', timer: null,
       revision: 0, updated: '', lanes: new Set(), machines: new Set(), targets: new Set(), excluded: new Set(),
-      platforms: new Map(), machinePlatforms: new Map(), results: [],
+      platforms: new Map(), machinePlatforms: new Map(), results: [], windowsTelemetry: true, linuxSuricata: false,
       // payloadRevision invalidates the memoized lane view; resultErrors is the
       // batch-error index failed() reads. Both are refreshed wherever s.payload
       // or s.results is assigned, so no view can outlive the data behind it.
@@ -327,6 +335,12 @@
     el('wazuhClose').onclick = close;
     el('wazuhRefresh').onclick = () => refresh(s);
     el('wazuhForm').onsubmit = event => { event.preventDefault(); return submit(s); };
+    el('wazuhWindowsTelemetry').onchange = () => {
+      if (!s.submitting) { s.windowsTelemetry = el('wazuhWindowsTelemetry').checked; render(s); }
+    };
+    el('wazuhLinuxSuricata').onchange = () => {
+      if (!s.submitting) { s.linuxSuricata = el('wazuhLinuxSuricata').checked; render(s); }
+    };
     el('wazuhAllLanes').onclick = () => {
       if (s.submitting) return;
       // Scoped to what the operator can actually see. Collapse is presentation,
@@ -518,13 +532,21 @@
     renderResults(s, inventory);
     const targets = selected(s);
     const unknown = targets.filter(target => !['windows', 'linux'].includes(target.platform)).length;
+    const telemetryTargets = targets.filter(target => target.windows_telemetry).length;
+    const suricataTargets = targets.filter(target => target.linux_suricata).length;
     el('wazuhSummary').textContent = `${targets.length} VM${targets.length === 1 ? '' : 's'} selected in ${new Set(targets.map(target => target.lane_id)).size} lane(s).`
+      + (telemetryTargets ? ` Windows telemetry on ${telemetryTargets}.` : '')
+      + (suricataTargets ? ` Suricata on ${suricataTargets}.` : '')
       + (unknown ? ` Choose Windows or Linux for ${unknown} target(s).` : '')
       + (targets.length > 200 ? ' Select at most 200 targets per batch.' : '');
     el('wazuhSummary').className = `waz-bar-text${unknown || targets.length > 200 ? ' is-blocked' : targets.length ? ' is-ready' : ''}`;
     el('wazuhError').textContent = [s.error, data.configuration_error, data.agents_error, data.power_error].filter(Boolean).join('\n');
     el('wazuhUpdated').textContent = s.refreshing ? 'Refreshing status…' : s.updated ? `Updated ${s.updated}. Refreshes every 5 seconds while open.` : '';
     el('wazuhRefresh').disabled = locked || s.refreshing;
+    el('wazuhWindowsTelemetry').checked = s.windowsTelemetry;
+    el('wazuhWindowsTelemetry').disabled = locked;
+    el('wazuhLinuxSuricata').checked = s.linuxSuricata;
+    el('wazuhLinuxSuricata').disabled = locked;
     el('wazuhSubmit').disabled = locked || !s.fresh || !data.manager || !!data.configuration_error || !!data.power_error || !!data.agents_error || !targets.length || targets.length > 200 || !!unknown;
     el('wazuhSubmit').textContent = locked ? 'Queuing installations…' : targets.length ? `Install ${targets.length} agent${targets.length === 1 ? '' : 's'}` : 'Install selected agents';
     // Filtering never deselects, so the batch can contain rows the operator
@@ -673,7 +695,7 @@
     }).join('');
     setHtml('wazuhResults', all.length || failures.length ? `<h4 class="waz-results-title">Installation progress</h4><div class="waz-metrics">${metrics}</div>`
       + failures.map(result => `<div class="waz-job is-bad"><strong class="waz-job-name">${esc(inventory.find(lane => String(lane.lane_id) === String(result.lane_id))?.name || result.lane_id)} · VM ${esc(result.vm_id)}</strong><p class="waz-job-msg">${esc(result.error)}</p></div>`).join('')
-      + all.slice().sort((a, b) => Number(b.job.status === 'failed') - Number(a.job.status === 'failed')).map(({ lane, job }) => `<div class="waz-job is-${job.status === 'failed' ? 'bad' : job.status === 'completed' ? 'good' : 'live'}"><div class="waz-job-head"><strong class="waz-job-name">${esc(lane.name || lane.lane_id)} · VM ${esc(job.vm_id)}</strong><span class="badge ${badge(job.status)}">${esc(job.status || 'unknown')}</span></div><p class="waz-job-msg">${esc(job.error || job.message || '')}</p>${job.status === 'completed' ? `<p class="waz-job-ok">Agent check-in confirmed${job.agent_name ? `: ${esc(job.agent_name)}` : ''}.</p>` : ''}${job.last_seen ? `<p class="waz-job-msg">Last seen: ${esc(job.last_seen)}</p>` : ''}</div>`).join('') : '');
+      + all.slice().sort((a, b) => Number(b.job.status === 'failed') - Number(a.job.status === 'failed')).map(({ lane, job }) => `<div class="waz-job is-${job.status === 'failed' ? 'bad' : job.status === 'completed' ? 'good' : 'live'}"><div class="waz-job-head"><strong class="waz-job-name">${esc(lane.name || lane.lane_id)} · VM ${esc(job.vm_id)}</strong><span class="badge ${badge(job.status)}">${esc(job.status || 'unknown')}</span></div><p class="waz-job-msg">${esc([job.error || job.message || '', ...(Array.isArray(job.telemetry_warnings) ? job.telemetry_warnings : [])].filter(Boolean).join(' '))}</p>${job.status === 'completed' ? `<p class="waz-job-ok">Agent check-in confirmed${job.agent_name ? `: ${esc(job.agent_name)}` : ''}.</p>` : ''}${job.last_seen ? `<p class="waz-job-msg">Last seen: ${esc(job.last_seen)}</p>` : ''}</div>`).join('') : '');
   }
 
   async function refresh(s) {

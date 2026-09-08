@@ -156,11 +156,30 @@ test('matching names, individual exclusions and OS overrides produce the exact b
   h.change(targetId('TargetOs', 'lane-one', 101), 'linux');
   await h.submit();
   assert.deepEqual(h.calls.find(call => call.method === 'POST'), { method: 'POST', url: '/wazuh-agents/batch', body: { targets: [
-    { lane_id: 'lane-one', vm_id: 100, platform: 'windows' }, { lane_id: 'lane-one', vm_id: 101, platform: 'linux' }, { lane_id: 'lane-two', vm_id: 201, platform: 'windows' },
+    { lane_id: 'lane-one', vm_id: 100, platform: 'windows', windows_telemetry: true }, { lane_id: 'lane-one', vm_id: 101, platform: 'linux' }, { lane_id: 'lane-two', vm_id: 201, platform: 'windows', windows_telemetry: true },
   ] } });
   assert.equal(h.el('wazuhSubmit').disabled, true);
   assert.match(h.el('wazuhResults').innerHTML, /3 queued/);
   await h.submit(); assert.equal(h.calls.filter(call => call.method === 'POST').length, 1);
+});
+
+test('monitoring options persist through polling and apply only to the matching selected OS', async () => {
+  const h = harness(); await h.api.open(); h.click('wazuhAllLanes');
+  assert.equal(h.el('wazuhWindowsTelemetry').checked, true);
+  assert.equal(h.el('wazuhLinuxSuricata').checked, false);
+  h.change('wazuhWindowsTelemetry', false);
+  h.change('wazuhLinuxSuricata', true);
+  h.change(targetId('Target', 'lane-one', 100), true);
+  h.change(targetId('Target', 'lane-one', 102), true); // an existing connected Linux agent
+  await h.tick();
+  assert.equal(h.el('wazuhWindowsTelemetry').checked, false);
+  assert.equal(h.el('wazuhLinuxSuricata').checked, true);
+  assert.match(h.el('wazuhSummary').textContent, /Suricata on 1/);
+  await h.submit();
+  assert.deepEqual(h.calls.find(call => call.method === 'POST').body.targets, [
+    { lane_id: 'lane-one', vm_id: 100, platform: 'windows', windows_telemetry: false },
+    { lane_id: 'lane-one', vm_id: 102, platform: 'linux', linux_suricata: true },
+  ]);
 });
 
 test('missing agent selection skips connected, stopped, containers and unavailable lanes', async () => {
@@ -239,7 +258,7 @@ test('partial queue failures are escaped, persist on refresh and can be selected
   assert.match(h.el('wazuhResults').innerHTML, /&lt;img src=x onerror=bad&gt;/);
   await h.tick(); assert.match(h.el('wazuhResults').innerHTML, /&lt;img/);
   h.click('wazuhRetry'); await h.submit();
-  assert.deepEqual(h.calls.filter(call => call.method === 'POST')[1].body.targets, [{ lane_id: 'lane-one', vm_id: 100, platform: 'windows' }]);
+  assert.deepEqual(h.calls.filter(call => call.method === 'POST')[1].body.targets, [{ lane_id: 'lane-one', vm_id: 100, platform: 'windows', windows_telemetry: true }]);
 });
 
 test('unconfigured, empty and unsafe console URL payloads are explicit and cannot submit', async () => {
@@ -428,10 +447,10 @@ test('target columns sort both ways without changing the queued batch', async ()
   await h.submit();
   // The wire format is computed from the selection, never from the view.
   assert.deepEqual(h.calls.find(call => call.method === 'POST').body.targets, [
-    { lane_id: 'lane-one', vm_id: 100, platform: 'windows' },
-    { lane_id: 'lane-one', vm_id: 101, platform: 'windows' },
-    { lane_id: 'lane-two', vm_id: 200, platform: 'windows' },
-    { lane_id: 'lane-two', vm_id: 201, platform: 'windows' },
+    { lane_id: 'lane-one', vm_id: 100, platform: 'windows', windows_telemetry: true },
+    { lane_id: 'lane-one', vm_id: 101, platform: 'windows', windows_telemetry: true },
+    { lane_id: 'lane-two', vm_id: 200, platform: 'windows', windows_telemetry: true },
+    { lane_id: 'lane-two', vm_id: 201, platform: 'windows', windows_telemetry: true },
   ]);
 });
 

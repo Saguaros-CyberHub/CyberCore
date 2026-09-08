@@ -7,7 +7,7 @@ const { defaultSettings } = require('./wazuh-client');
 const { isMalwareLane } = require('./malware-analysis-state');
 const { readableAgentName, keyFingerprint, rawKeyFingerprint } = require('./wazuh-agent-identity');
 
-const JOB_TIMEOUT_MS = 15 * 60 * 1000;
+const JOB_TIMEOUT_MS = 30 * 60 * 1000;
 const QUEUE_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 const MAX_BATCH_TARGETS = 200;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -48,7 +48,7 @@ function publicJob(job, now) {
   if (!job) return null;
   const safe = currentJob(job, now);
   return Object.fromEntries(['job_id', 'status', 'vm_id', 'platform', 'manager', 'agent_name', 'agent_id',
-    'started_at', 'dispatched_at', 'finished_at', 'message', 'error'].filter(key => safe[key] !== undefined)
+    'started_at', 'dispatched_at', 'finished_at', 'message', 'error', 'windows_telemetry', 'linux_suricata', 'telemetry_status', 'telemetry_warnings'].filter(key => safe[key] !== undefined)
     .map(key => [key, safe[key]]));
 }
 
@@ -121,6 +121,8 @@ const INSTALL_ERRORS = {
   'key-import-failed': 'The Wazuh enrollment key could not be imported or verified. Check the existing agent installation and registration.',
   'service-stop-failed': 'The existing Wazuh agent service could not be stopped. Check its guest service status before retrying.',
   'service-start-failed': 'The Wazuh agent service could not be started. Check its guest service logs and ossec.conf.',
+  'windows-telemetry-incomplete': 'The Wazuh agent started, but Windows telemetry setup is incomplete. Review the monitoring notes and retry.',
+  'suricata-incomplete': 'The Wazuh agent started, but Suricata setup is incomplete. Review the monitoring notes and retry.',
 };
 function installationError(stdout) {
   for (const match of String(stdout || '').matchAll(/^CYBERCORE_WAZUH_ERROR:([a-z0-9-]+)\r?$/gm)) {
@@ -136,6 +138,7 @@ function createService(deps = {}) {
   const sleep = deps.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms)));
   const executor = () => deps.executor || require('./script-executor');
   const buildScript = args => (deps.buildInstallScript || require('./wazuh-agent-scripts').buildInstallScript)(args);
+  const dispatchGuest = (...args) => (deps.dispatchGuest || require('./wazuh-guest-dispatch').dispatchWazuhGuest)(...args);
   const proxmox = (...args) => (deps.proxmox || require('./proxmox').proxmoxAPI)(...args);
   const ensureGatewayAccess = deps.ensureGatewayAccess || require('./wazuh-gateway-access').ensureWazuhGatewayAccess;
   // Course labels come from cle_db, which core cannot join. course-directory.js
@@ -398,24 +401,45 @@ function createService(deps = {}) {
       const { key, previousKey } = await enrollment(laneId, config, job);
       const script = buildScript({ platform: job.platform, manager: config.manager, version: config.version,
         agentName: job.agent_name, agentKey: key,
+        ...(job.windows_telemetry ? { windowsTelemetry: true } : {}),
+        ...(job.linux_suricata ? { linuxSuricata: true } : {}),
         ...(previousKey ? { previousAgentName: job.previous_agent_name, previousAgentKey: previousKey } : {}) });
-      job.message = 'Installing and starting the Wazuh agent.';
+      job.message = job.windows_telemetry ? 'Installing Wazuh and Windows security telemetry.'
+        : job.linux_suricata ? 'Installing Wazuh and the Linux Suricata sensor.' : 'Installing and starting the Wazuh agent.';
       await saveOwned(laneId, job);
       // Recheck power, lane membership and ownership after all enrollment/guest
       // readiness waits, immediately before any guest modification.
       const dispatch = await revalidate(laneId, job);
-      job.dispatched_at = new Date(now()).toISOString();
-      const argv = job.platform === 'windows'
-        ? ['powershell.exe', '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')]
-        : ['/bin/sh', '-c', script];
-      const started = job.platform === 'windows'
-        ? await exec.agentExecArgv(dispatch.node, job.vm_id, argv)
-        : await exec.proxmoxFormPOST(`/api2/json/nodes/${dispatch.node}/qemu/${job.vm_id}/agent/exec`, argv.map(arg => ['command', arg]));
+      const started = await dispatchGuest({ node: dispatch.node, vmId: job.vm_id, platform: job.platform, script,
+        agentName: job.agent_name, agentKey: key,
+        ...(previousKey ? { previousAgentName: job.previous_agent_name, previousAgentKey: previousKey } : {}) }, {
+        api: proxmox,
+        beforeExec: async () => {
+          const checked = await revalidate(laneId, job);
+          if (checked.node !== dispatch.node) throw failure(409, 'This VM moved to another node. Refresh status and retry.');
+          job.dispatched_at = new Date(now()).toISOString();
+          await saveOwned(laneId, job);
+        },
+      });
       if (!started?.pid) throw failure(502, 'Guest execution did not return a process ID.');
       await saveOwned(laneId, job);
-      const result = await exec.pollExecStatus(dispatch.node, job.vm_id, started.pid, 600000);
+      const enhanced = job.windows_telemetry || job.linux_suricata;
+      const result = await exec.pollExecStatus(dispatch.node, job.vm_id, started.pid, enhanced ? 1200000 : 600000);
+      if (enhanced) {
+        const known = { 'windows-telemetry-setup-failed': 'Windows telemetry or its Wazuh collectors could not be configured.',
+          'suricata-setup-failed': 'Suricata or its Wazuh collector could not be configured.',
+          ...(job.windows_telemetry ? require('./wazuh-windows-telemetry').TELEMETRY_WARNINGS : require('./wazuh-linux-suricata').SURICATA_WARNINGS) };
+        const output = String(result.stdout || '');
+        job.telemetry_warnings = [...new Set([...output.matchAll(/^CYBERCORE_WAZUH_TELEMETRY_WARNING:([a-z0-9-]{1,80})\r?$/gm)]
+          .map(match => known[match[1]]).filter(Boolean))].slice(0, 12);
+        job.telemetry_status = result.exited && result.exitcode === 0 && /^CYBERCORE_WAZUH_TELEMETRY:configured\r?$/m.test(output)
+          ? 'configured' : 'incomplete';
+      }
       if (!result.exited || result.exitcode !== 0 || !String(result.stdout || '').split(/\r?\n/).includes(`CYBERCORE_WAZUH_STARTED:${job.agent_name}`)) {
         throw failure(502, installationError(`${result.stdout || ''}\n${result.stderr || ''}`));
+      }
+      if (enhanced && job.telemetry_status !== 'configured') {
+        throw failure(502, 'Wazuh started, but the requested monitoring setup was not confirmed. Review guest monitoring services and retry.');
       }
       job.message = 'Agent started. Waiting for a fresh Wazuh check-in.';
       await saveOwned(laneId, job);
@@ -433,7 +457,8 @@ function createService(deps = {}) {
             delete job.previous_agent_id;
             delete job.previous_agent_name;
           }
-          job.status = 'completed'; job.message = 'Agent is active and sent a fresh Wazuh check-in.';
+          job.status = 'completed'; job.message = 'Agent is active and sent a fresh Wazuh check-in.'
+            + (enhanced ? ' Monitoring is configured; verify incoming events in Wazuh.' : '');
           job.finished_at = new Date(now()).toISOString();
           await saveOwned(laneId, job);
           return;
@@ -456,6 +481,14 @@ function createService(deps = {}) {
     if (!Number.isSafeInteger(input.vm_id) || !['windows', 'linux'].includes(input.platform)) {
       throw failure(400, 'Choose a VM and its Windows or Linux platform.');
     }
+    if (input.windows_telemetry !== undefined && (typeof input.windows_telemetry !== 'boolean'
+      || (input.windows_telemetry && input.platform !== 'windows'))) {
+      throw failure(400, 'Windows telemetry must be a boolean and can only be enabled on Windows targets.');
+    }
+    if (input.linux_suricata !== undefined && (typeof input.linux_suricata !== 'boolean'
+      || (input.linux_suricata && input.platform !== 'linux'))) {
+      throw failure(400, 'Suricata must be a boolean and can only be enabled on Linux targets.');
+    }
     assertTarget(lane, input.vm_id);
     const config = preflight?.config || settings();
     if (!preflight) {
@@ -474,6 +507,8 @@ function createService(deps = {}) {
     const renameLegacy = legacyNameForLane(previous?.agent_name, lane.lane_id, input.vm_id);
     const readable = !previous?.agent_name || renameLegacy || previous.name_version === 2;
     const job = { job_id: jobId, status: 'queued', vm_id: input.vm_id, platform: input.platform,
+      ...(input.windows_telemetry ? { windows_telemetry: true, telemetry_status: 'pending' } : {}),
+      ...(input.linux_suricata ? { linux_suricata: true, telemetry_status: 'pending' } : {}),
       manager: config.manager, agent_name: (!renameLegacy && previous?.agent_name)
         || agentNameFor(targetDisplayName(current, live, input.vm_id), input.vm_id),
       ...(!renameLegacy && previous?.agent_id ? { agent_id: previous.agent_id } : {}),
@@ -516,6 +551,14 @@ function createService(deps = {}) {
     for (const target of targets) {
       if (!target || !UUID.test(target.lane_id) || !Number.isSafeInteger(target.vm_id) || !['windows', 'linux'].includes(target.platform)) {
         throw failure(400, 'Every target needs a lane, VM and Windows or Linux platform.');
+      }
+      if (target.windows_telemetry !== undefined && (typeof target.windows_telemetry !== 'boolean'
+        || (target.windows_telemetry && target.platform !== 'windows'))) {
+        throw failure(400, 'Windows telemetry must be a boolean and can only be enabled on Windows targets.');
+      }
+      if (target.linux_suricata !== undefined && (typeof target.linux_suricata !== 'boolean'
+        || (target.linux_suricata && target.platform !== 'linux'))) {
+        throw failure(400, 'Suricata must be a boolean and can only be enabled on Linux targets.');
       }
       const lane = byLane.get(target.lane_id);
       if (!lane || !targetsFor(lane).some(vm => vm.vm_id === target.vm_id)) throw failure(404, 'A selected machine was not found in the available lanes.');

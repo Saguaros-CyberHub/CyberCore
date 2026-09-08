@@ -99,13 +99,14 @@ function harness(options = {}) {
       return { pid: Number(args[0].match(/qemu\/(\d+)/)[1]) };
     },
     async pollExecStatus(node, vmId, pid, timeout) {
-      assert.equal(timeout, 600000);
       const job = state.lane.config.wazuh_agent_jobs[String(vmId)];
+      assert.equal(timeout, job.windows_telemetry || job.linux_suricata ? 1200000 : 600000);
       const agent = state.registrations.find(item => item.id === job.agent_id);
       agent.status = options.agentStatus || 'active';
       agent.lastKeepAlive = new Date(state.clock + (options.stale ? -1000 : 1000)).toISOString();
       if (options.result) return options.result(state, job);
-      return { exited: true, exitcode: 0, stdout: `CYBERCORE_WAZUH_STARTED:${job.agent_name}\n`, stderr: '' };
+      return { exited: true, exitcode: 0, stdout: `CYBERCORE_WAZUH_STARTED:${job.agent_name}\n`
+        + (job.windows_telemetry || job.linux_suricata ? 'CYBERCORE_WAZUH_TELEMETRY:configured\n' : ''), stderr: '' };
     },
   };
   const service = createService({ query, executor, settings: () => {
@@ -120,6 +121,13 @@ function harness(options = {}) {
     if (state.gatewayFailure) throw Object.assign(new Error('Could not prepare Wazuh TCP 1514 access on the lane gateway.'), { status: 409, safe: true });
   },
   buildInstallScript: args => { state.scripts.push(args); return `installation ${args.agentKey}`; },
+  dispatchGuest: async (request, dependencies) => {
+    if (options.stagingHook) await options.stagingHook(state);
+    await dependencies.beforeExec();
+    state.calls.push([request.platform, request.node, request.vmId, request]);
+    if (state.execFailure) throw new Error(`private-api-password ${KEY}`);
+    return { pid: request.vmId };
+  },
   courseDirectory: options.courseDirectory,
   deadline: options.deadline,
   proxmox: async (...args) => {
@@ -150,7 +158,8 @@ test('Windows enrollment persists identity and requires a fresh active server ch
   assert.deepEqual(h.state.scripts[0], { platform: 'windows', manager: 'wazuh.example.test', version: '4.14.0-1', agentName: h.job().agent_name, agentKey: h.state.keys['001'] });
   const dispatch = h.state.calls.find(call => call[0] === 'windows');
   assert.equal(dispatch[1], 'live-node');
-  assert.deepEqual(dispatch[3].slice(0, 5), ['powershell.exe', '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand']);
+  assert.equal(dispatch[3].agentName, h.job().agent_name);
+  assert.equal(dispatch[3].agentKey, h.state.keys['001']);
   assert.doesNotMatch(JSON.stringify(h.state.sql), /private-per-agent-enrollment-key/);
   assert.equal(JSON.stringify(h.state.sql).includes(h.state.keys['001']), false);
   assert.equal(JSON.stringify(h.state.sql).includes(Buffer.from(h.state.keys['001'], 'base64').toString().split(' ')[3]), false);
@@ -168,6 +177,43 @@ test('retry uses saved registration and key without creating or deleting an agen
   assert.equal(h.state.creates, 1);
   assert.ok(h.state.calls.some(call => call[0] === 'key' && call[1] === '001'));
   assert.equal(h.job().status, 'completed');
+});
+
+test('monitoring profiles persist across queue execution and retry reuses the active identity', async () => {
+  for (const [platform, flag, scriptFlag] of [['windows', 'windows_telemetry', 'windowsTelemetry'], ['linux', 'linux_suricata', 'linuxSuricata']]) {
+    const h = harness();
+    await h.start({ vm_id: 901, platform }); await h.run();
+    await h.start({ vm_id: 901, platform, [flag]: true }); await h.run();
+    assert.equal(h.job().status, 'completed');
+    assert.equal(h.job().telemetry_status, 'configured');
+    assert.equal(h.state.scripts.at(-1)[scriptFlag], true);
+    assert.equal(h.state.creates, 1);
+    const status = await h.service.status([h.state.lane]);
+    assert.equal(status.lanes[0].jobs[0][flag], true);
+  }
+});
+
+test('a running Wazuh agent cannot hide an incomplete or unconfirmed monitoring installation', async () => {
+  for (const result of [
+    job => ({ exited: true, exitcode: 1, stdout: `CYBERCORE_WAZUH_STARTED:${job.agent_name}\nCYBERCORE_WAZUH_TELEMETRY:incomplete\nCYBERCORE_WAZUH_TELEMETRY_WARNING:windows-telemetry-setup-failed\nCYBERCORE_WAZUH_TELEMETRY_WARNING:secret-text\n`, stderr: 'CYBERCORE_WAZUH_ERROR:windows-telemetry-incomplete\n' }),
+    job => ({ exited: true, exitcode: 0, stdout: `CYBERCORE_WAZUH_STARTED:${job.agent_name}\n`, stderr: '' }),
+  ]) {
+    const h = harness({ result: (_, job) => result(job) });
+    await h.start({ vm_id: 901, platform: 'windows', windows_telemetry: true }); await h.run();
+    assert.equal(h.job().status, 'failed');
+    assert.equal(h.job().telemetry_status, 'incomplete');
+    assert.doesNotMatch(JSON.stringify(h.job()), /secret-text/);
+    assert.match(h.job().error, /monitoring|telemetry/i);
+  }
+});
+
+test('a lane destroyed or VM migrated during source staging cannot receive enrollment stdin', async () => {
+  for (const stagingHook of [state => { state.lane.config.wazuh_teardown_started = true; }, state => { state.resources[0].node = 'different-node'; }]) {
+    const h = harness({ stagingHook });
+    await h.start(); await h.run();
+    assert.equal(h.job().status, 'failed');
+    assert.equal(h.state.calls.some(call => ['windows', 'linux'].includes(call[0])), false);
+  }
 });
 
 test('retry recovers a registration created when the API response was lost', async () => {

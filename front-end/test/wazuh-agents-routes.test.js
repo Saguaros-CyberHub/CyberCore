@@ -113,6 +113,18 @@ test('batch resolves only selected lanes and strips browser-supplied scripts, co
   assert.doesNotMatch(JSON.stringify(state.audits[0].metadata), /browser-secret|private-lane-password|malicious/);
 });
 
+test('monitoring profiles are strictly typed and tied to the target OS before any job is queued', async () => {
+  for (const extra of [{ windows_telemetry: 'true' }, { windows_telemetry: {} }, { linux_suricata: true },
+    { platform: 'linux', windows_telemetry: true }, { platform: 'linux', linux_suricata: 'yes' }]) {
+    assert.equal((await post({ targets: [{ ...target(), ...extra }] })).status, 400);
+  }
+  assert.equal(state.queries.length, 0);
+  for (const extra of [{ windows_telemetry: true }, { windows_telemetry: false }, { platform: 'linux', linux_suricata: true }]) {
+    assert.equal((await post({ targets: [{ ...target(), ...extra }] })).status, 202);
+    assert.deepEqual(state.calls.at(-1).input.targets[0], { ...target(), ...extra });
+  }
+});
+
 test('a disappeared lane prevents the whole request from queueing any sibling', async () => {
   state.lanes = state.lanes.filter(lane => lane.lane_id === LANE);
   const result = await post({ targets: [target(), { lane_id: OTHER, vm_id: 201, platform: 'linux' }] });

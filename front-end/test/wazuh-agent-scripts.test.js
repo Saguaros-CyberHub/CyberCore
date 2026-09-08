@@ -22,6 +22,16 @@ const readableRecord = '017 ' + readableAgentName + ' any ' + 'c'.repeat(64);
 const readableAgentKey = Buffer.from(readableRecord).toString('base64');
 const migrationOptions = { ...options, agentName: readableAgentName, agentKey: readableAgentKey, previousAgentName, previousAgentKey };
 
+// Fixture credentials are data supplied by dispatch, never part of production
+// script source. These helpers emulate stdin for isolated configuration tests.
+function pythonFixture(script, keys = options) {
+  return script.split("exec python3 - 3<&0 <<'CYBERCORE_WAZUH_PY'\n")[1].split('\nCYBERCORE_WAZUH_PY\n')[0]
+    .replace("os.fdopen(3, 'r', encoding='ascii')", `__import__('io').StringIO(${JSON.stringify(keys.agentKey + '\n' + (keys.previousAgentKey || '') + '\n')})`);
+}
+function windowsFixture(script, keys = options) {
+  return `$agentKey = '${keys.agentKey}'\n$previousAgentKey = '${keys.previousAgentKey || ''}'\n` + script;
+}
+
 test('installer rejects malformed, mismatched and shell-bearing arguments', () => {
   const invalid = {
     platform: [undefined, {}, 'darwin', 'linux;id'],
@@ -89,11 +99,13 @@ function maximumWindowsMigrationScripts() {
   });
 }
 
-test('Windows migration remains within the guest command limit at maximum accepted argument lengths', () => {
+test('installer source contains neither current nor previous enrollment credentials', () => {
+  for (const platform of ['windows', 'linux']) {
+    const script = buildInstallScript({ ...migrationOptions, platform });
+    for (const secret of [readableAgentKey, previousAgentKey, 'c'.repeat(64), 'b'.repeat(64)]) assert.ok(!script.includes(secret));
+  }
   for (const script of maximumWindowsMigrationScripts()) {
-    const command = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand '
-      + Buffer.from(script, 'utf16le').toString('base64');
-    assert.ok(command.length < 32000, `Windows command contains ${command.length} characters`);
+    assert.ok(Buffer.byteLength(script, 'ascii') < 256 * 1024);
   }
 });
 
@@ -112,7 +124,8 @@ test('both installers pin official packages, verify SHA512 and import keys throu
     assert.doesNotMatch(script, /['"]-i['"]/);
   }
   assert.match(linux, /input_data=\('I\\n' \+ AGENT_KEY/);
-  assert.match(windows, /StandardInput\.Write\(\$InputText\)/);
+  assert.match(windows, /StandardInput\.Write\('I' \+ \[Environment\]::NewLine \+ \$agentKey/);
+  assert.doesNotMatch(windows, /-InputText|\[string\]\$InputText/);
   assert.match(linux, /enrollment = add\(client, 'enrollment'\)\n    add\(enrollment, 'enabled', 'no'\)/);
   assert.match(windows, /\$enabled.InnerText = 'no'/);
   assert.match(linux, /'amd64'.*'x86_64'/);
@@ -127,11 +140,11 @@ const shell = process.platform === 'win32'
   : '/bin/sh';
 const python = ['python3', 'python'].find(command => spawnSync(command, ['--version'], { encoding: 'utf8', timeout: 5000 }).status === 0);
 const powershell = process.platform === 'win32' ? 'powershell.exe' : null;
-const pythonSource = linux.split("exec python3 - <<'CYBERCORE_WAZUH_PY'\n")[1].split('\nCYBERCORE_WAZUH_PY\n')[0];
+const pythonSource = pythonFixture(linux);
 
 test('Linux downloads published package/checksum paths and rejects a corrupted package', { skip: !python }, () => {
   const script = buildInstallScript({ ...options, version: '4.14.1-1' });
-  const source = script.split("exec python3 - <<'CYBERCORE_WAZUH_PY'\n")[1].split('\nCYBERCORE_WAZUH_PY\n')[0];
+  const source = pythonFixture(script);
   const downloadSection = source.slice(source.indexOf('            deb_arch ='), source.indexOf("                STAGE = 'package-install-failed'"));
   const helpers = source.split("if __name__ == '__main__':")[0].replace('import fcntl', 'fcntl = None');
   for (const [packageManager, architecture, filename, packageDirectory] of [
@@ -177,7 +190,7 @@ print(json.dumps({'requested': requested, 'error': error}))
 test('Windows downloads the published checksum path and rejects a corrupted MSI', { skip: !powershell }, t => {
   const script = buildInstallScript({ ...options, platform: 'windows', version: '4.14.1-1' });
   const downloadSection = script.slice(script.indexOf("$package = Join-Path $workDir"), script.indexOf("$script:stage = 'package-install-failed'"));
-  const helpers = script.split('\ntry {\n$identity =')[0];
+  const helpers = windowsFixture(script).split('\ntry {\n$identity =')[0];
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'wazuh-download-test-'));
   t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
   for (const corrupt of [false, true]) {
@@ -280,7 +293,7 @@ except InstallError as error:
     result = spawnSync(python, ['-'], { input: code, encoding: 'utf8', timeout: 10000,
       env: { ...process.env, WAZUH_TEST_DIRECTORY: temporary, WAZUH_TEST_ACTION: action } });
   } else {
-    const helpers = windows.split('\ntry {\n$identity =')[0];
+    const helpers = windowsFixture(windows).split('\ntry {\n$identity =')[0];
     const code = helpers + `
 $agentDir = $env:WAZUH_TEST_DIRECTORY
 $configFile = Join-Path $agentDir 'ossec.conf'
@@ -324,7 +337,7 @@ function runMigrationFixture(t, platform, { manager = options.manager, legacyRec
   const script = buildInstallScript(scriptOptions);
   let result;
   if (platform === 'linux') {
-    const source = script.split("exec python3 - <<'CYBERCORE_WAZUH_PY'\n")[1].split('\nCYBERCORE_WAZUH_PY\n')[0];
+    const source = pythonFixture(script, scriptOptions);
     const section = source.slice(source.indexOf("        STAGE = 'configuration-failed'"), source.indexOf("        STAGE = 'service-start-failed'"));
     assert.ok(section.includes('manage_agents'));
     const code = source.split("if __name__ == '__main__':")[0].replace('import fcntl', 'fcntl = None') + `
@@ -355,14 +368,13 @@ print(json.dumps({'imports': imports, 'error': error}))
   } else {
     const section = script.slice(script.indexOf("$script:stage = 'configuration-failed'"), script.indexOf("$script:stage = 'service-start-failed'"));
     assert.ok(section.includes('manage_agents.exe'));
-    const code = script.split('\ntry {\n$identity =')[0] + `
+    const code = windowsFixture(script, scriptOptions).split('\ntry {\n$identity =')[0] + `
 $agentDir = $env:WAZUH_TEST_DIRECTORY
 $configFile = Join-Path $agentDir 'ossec.conf'
 $script:imports = 0
-function Invoke-WazuhProcess([string]$FilePath, [string]$Arguments, [string]$InputText, [int]$Timeout = 60) {
+function Invoke-WazuhProcess([string]$FilePath, [string]$Arguments, [switch]$ImportKey, [int]$Timeout = 60) {
   if ($FilePath -cne (Join-Path $agentDir 'manage_agents.exe') -or $Arguments -or $Timeout -ne 30) { throw 'unexpected key import invocation' }
-  $expectedInput = 'I' + [Environment]::NewLine + $agentKey + [Environment]::NewLine + 'y' + [Environment]::NewLine + 'Q' + [Environment]::NewLine
-  if ($InputText -cne $expectedInput) { throw 'unexpected key import input' }
+  if (-not $ImportKey) { throw 'unexpected key import invocation' }
   $script:imports += 1
   if ($${importSucceeds}) { [IO.File]::WriteAllText((Join-Path $agentDir 'client.keys'), $expectedRecord + [Environment]::NewLine) }
   return 0

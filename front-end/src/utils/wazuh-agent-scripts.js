@@ -8,7 +8,8 @@ const { isAgentName } = require('./wazuh-agent-identity');
 // Checksums live under /4.x/checksums/wazuh/<version>/, separately from packages.
 // https://documentation.wazuh.com/current/user-manual/agent/agent-enrollment/enrollment-methods/via-manager-API/importing-the-key.html
 // manage_agents also supports interactive I / key / y / Q on stdin. This keeps
-// the per-agent credential out of child process arguments and temporary files:
+// the per-agent credential out of child process arguments and temporary files.
+// Dispatch supplies keys on guest stdin, never inside this executable source:
 // https://github.com/wazuh/wazuh/blob/v4.14.0/src/addagent/main.c
 // https://github.com/wazuh/wazuh/blob/v4.14.0/src/addagent/manage_keys.c
 
@@ -25,7 +26,7 @@ function validateKeyRecord(agentName, agentKey) {
   }
 }
 
-function validateOptions({ platform, manager, version, agentName, agentKey, previousAgentName, previousAgentKey } = {}) {
+function validateOptions({ platform, manager, version, agentName, agentKey, previousAgentName, previousAgentKey, windowsTelemetry = false, linuxSuricata = false } = {}) {
   if (platform !== 'linux' && platform !== 'windows') throw new TypeError('Wazuh agent platform must be windows or linux');
   if (typeof manager !== 'string' || manager.length > 253 || /[^a-zA-Z0-9.:-]/.test(manager) ||
       (!isIP(manager) && !manager.split('.').every(label => /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(label)))) {
@@ -38,6 +39,12 @@ function validateOptions({ platform, manager, version, agentName, agentKey, prev
     throw new TypeError('Wazuh agent name must be a safe managed identity of at most 128 characters');
   }
   validateKeyRecord(agentName, agentKey);
+  if (typeof windowsTelemetry !== 'boolean' || (windowsTelemetry && platform !== 'windows')) {
+    throw new TypeError('Windows telemetry can only be enabled for Windows agents');
+  }
+  if (typeof linuxSuricata !== 'boolean' || (linuxSuricata && platform !== 'linux')) {
+    throw new TypeError('Suricata can only be enabled for Linux agents');
+  }
   if (previousAgentName !== undefined || previousAgentKey !== undefined) {
     const legacy = typeof previousAgentName === 'string'
       && /^cc-[a-f0-9]{32}-([1-9][0-9]{0,15})-[a-f0-9]{32}$/.exec(previousAgentName);
@@ -48,17 +55,17 @@ function validateOptions({ platform, manager, version, agentName, agentKey, prev
     }
     validateKeyRecord(previousAgentName, previousAgentKey);
   }
-  return { platform, manager, version, agentName, agentKey, previousAgentName, previousAgentKey };
+  return { platform, manager, version, agentName, agentKey, previousAgentName, previousAgentKey, windowsTelemetry, linuxSuricata };
 }
 
-function buildLinuxScript({ manager, version, agentName, agentKey, previousAgentKey }) {
+function buildLinuxScript({ manager, version, agentName, linuxSuricata }) {
   // Python's XML parser preserves Wazuh's multiple ossec_config roots and its
   // collection settings. No ad-hoc XML substitution and no Python dependencies.
   return `#!/bin/sh
 set -eu
 umask 077
 command -v python3 >/dev/null 2>&1 || { printf '%s\\n' 'CYBERCORE_WAZUH_ERROR:python3-missing' >&2; exit 1; }
-exec python3 - <<'CYBERCORE_WAZUH_PY'
+exec python3 - 3<&0 <<'CYBERCORE_WAZUH_PY'
 import base64
 import fcntl
 import hashlib
@@ -80,11 +87,14 @@ MANAGER = '${manager}'
 VERSION = '${version}'
 CHECKSUM_BASE = 'https://packages.wazuh.com/4.x/checksums/wazuh/${version.split('-')[0]}/'
 AGENT_NAME = '${agentName}'
-AGENT_KEY = '${agentKey}'
+with os.fdopen(3, 'r', encoding='ascii') as enrollment_input:
+    AGENT_KEY = enrollment_input.readline(2049).rstrip('\\n')
+    PREVIOUS_KEY = enrollment_input.readline(2049).rstrip('\\n')
 EXPECTED_RECORD = base64.b64decode(AGENT_KEY).decode('ascii').split()
-PREVIOUS_RECORD = base64.b64decode('${previousAgentKey || ''}').decode('ascii').split()
+PREVIOUS_RECORD = base64.b64decode(PREVIOUS_KEY).decode('ascii').split()
 AGENT_DIR = Path('/var/ossec')
 STAGE = 'preflight-failed'
+SURICATA_READY = False
 
 class InstallError(Exception):
     pass
@@ -160,6 +170,7 @@ def configure():
     add(server, 'protocol', 'tcp')
     enrollment = add(client, 'enrollment')
     add(enrollment, 'enabled', 'no')
+${linuxSuricata ? '    if SURICATA_READY:\n        add_suricata_collector(document)\n' : ''}
     config_file = AGENT_DIR / 'etc/ossec.conf'
     metadata = config_file.stat()
     handle, staging = tempfile.mkstemp(prefix='.cybercore-wazuh-', dir=str(config_file.parent))
@@ -195,8 +206,10 @@ def download(url, destination, max_bytes):
             output.write(block)
         require(total > 0, 'download-failed')
 
+${linuxSuricata ? require('./wazuh-linux-suricata').buildLinuxSuricataFunctions() : ''}
 def main():
     global STAGE
+    global SURICATA_READY
     require(os.geteuid() == 0, 'root-required')
     require(platform.system() == 'Linux', 'unsupported-platform')
     architecture = platform.machine().lower()
@@ -248,12 +261,34 @@ def main():
             run([str(AGENT_DIR / 'bin/manage_agents')], timeout=30,
                 input_data=('I\\n' + AGENT_KEY + '\\ny\\nQ\\n').encode('ascii'))
             require(key_rows() == [EXPECTED_RECORD], 'key-import-failed')
+${linuxSuricata ? `        # Keep endpoint monitoring online during package and IDS rule downloads.
+        STAGE = 'service-start-failed'
+        run(['systemctl', 'enable', 'wazuh-agent'])
+        run(['systemctl', 'start', 'wazuh-agent'])
+        run(['systemctl', 'is-active', '--quiet', 'wazuh-agent'])
+        telemetry = {'complete': False, 'warnings': ['suricata-setup-failed']}
+        try:
+            telemetry = configure_suricata()
+            SURICATA_READY = telemetry.get('complete') is True
+            if SURICATA_READY:
+                configure()
+        except Exception:
+            telemetry = {'complete': False, 'warnings': ['suricata-setup-failed']}
+` : ''}
         STAGE = 'service-start-failed'
         run(['systemctl', 'daemon-reload'])
         run(['systemctl', 'enable', 'wazuh-agent'])
         run(['systemctl', 'restart', 'wazuh-agent'])
         run(['systemctl', 'is-active', '--quiet', 'wazuh-agent'])
         print('CYBERCORE_WAZUH_STARTED:' + AGENT_NAME)
+${linuxSuricata ? `        for warning in telemetry.get('warnings', []):
+            if re.fullmatch('[a-z0-9-]{1,80}', warning):
+                print('CYBERCORE_WAZUH_TELEMETRY_WARNING:' + warning)
+        if not telemetry.get('complete'):
+            print('CYBERCORE_WAZUH_TELEMETRY:incomplete')
+            raise InstallError('suricata-incomplete')
+        print('CYBERCORE_WAZUH_TELEMETRY:configured')
+` : ''}
 
 if __name__ == '__main__':
     try:
@@ -267,24 +302,24 @@ CYBERCORE_WAZUH_PY
 `;
 }
 
-function buildWindowsScript({ manager, version, agentName, agentKey, previousAgentKey }) {
-  // Strip only indentation and blank lines to keep the UTF-16 encoded command
-  // below Windows limits. The generated script contains no multiline literals.
+function buildWindowsScript({ manager, version, agentName, windowsTelemetry }) {
+  // Dispatch reads keys separately from stdin and invokes this non-secret source.
+  // PowerShell script block logging must never see enrollment key literals.
   return `$ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $manager = '${manager}'
 $version = '${version}'
 $checksumBase = 'https://packages.wazuh.com/4.x/checksums/wazuh/${version.split('-')[0]}/'
 $agentName = '${agentName}'
-$agentKey = '${agentKey}'
 $expectedRecord = [Text.Encoding]::ASCII.GetString([Convert]::FromBase64String($agentKey))
-$previousRecord = [Text.Encoding]::ASCII.GetString([Convert]::FromBase64String('${previousAgentKey || ''}'))
+$previousRecord = [Text.Encoding]::ASCII.GetString([Convert]::FromBase64String($previousAgentKey))
 $script:stage = 'preflight-failed'
 $script:publicError = $null
 $installLock = $null
 $package = $null
 $checksumFile = $null
 $configStaging = $null
+${windowsTelemetry ? "$telemetryResult = $null\n" : ''}
 
 function Stop-WazuhInstall([string]$Code) {
   $script:publicError = $Code
@@ -299,7 +334,7 @@ function Assert-RegularPath([string]$Path) {
     $current = [IO.Path]::GetDirectoryName($current)
   }
 }
-function Invoke-WazuhProcess([string]$FilePath, [string]$Arguments, [string]$InputText, [int]$Timeout = 60) {
+function Invoke-WazuhProcess([string]$FilePath, [string]$Arguments, [switch]$ImportKey, [int]$Timeout = 60) {
   $info = New-Object Diagnostics.ProcessStartInfo
   $info.FileName = $FilePath
   $info.Arguments = $Arguments
@@ -317,7 +352,9 @@ function Invoke-WazuhProcess([string]$FilePath, [string]$Arguments, [string]$Inp
     if (-not $process.Start()) { Stop-WazuhInstall $script:stage }
     $stdout = $process.StandardOutput.ReadToEndAsync()
     $stderr = $process.StandardError.ReadToEndAsync()
-    if ($InputText) { $process.StandardInput.Write($InputText) }
+    # Read the key from scope, rather than binding it to a PowerShell function
+    # parameter that an existing module-logging policy might record.
+    if ($ImportKey) { $process.StandardInput.Write('I' + [Environment]::NewLine + $agentKey + [Environment]::NewLine + 'y' + [Environment]::NewLine + 'Q' + [Environment]::NewLine) }
     $process.StandardInput.Close()
     if (-not $process.WaitForExit($Timeout * 1000)) {
       $process.Kill()
@@ -333,7 +370,12 @@ function Read-WazuhKeys {
   $keyFile = Join-Path $agentDir 'client.keys'
   Assert-RegularPath $keyFile
   if (-not (Test-Path -LiteralPath $keyFile)) { return @() }
-  return @(Get-Content -LiteralPath $keyFile | Where-Object { $_.Trim() -and -not $_.TrimStart().StartsWith('#') } | ForEach-Object { ($_.Trim() -split '\\s+') -join ' ' })
+  $rows = New-Object 'Collections.Generic.List[string]'
+  foreach ($line in [IO.File]::ReadAllLines($keyFile)) {
+    $trimmed = $line.Trim()
+    if ($trimmed -and -not $trimmed.StartsWith('#')) { $rows.Add([regex]::Replace($trimmed, '\\s+', ' ')) }
+  }
+  return $rows.ToArray()
 }
 function Read-WazuhConfiguration {
   if (-not (Test-Path -LiteralPath $configFile)) { Stop-WazuhInstall 'existing-installation-invalid' }
@@ -373,12 +415,19 @@ function Set-WazuhConfiguration {
   $enrollment = $document.CreateElement('enrollment')
   $enabled = $document.CreateElement('enabled'); $enabled.InnerText = 'no'
   $null = $enrollment.AppendChild($enabled); $null = $client.AppendChild($enrollment)
+${windowsTelemetry ? `  if ($telemetryResult) {
+    $collectors = Set-CyberCoreWindowsTelemetryCollectors -Document $document -Channels $telemetryResult.Channels
+    $telemetryResult.Warnings = @($telemetryResult.Warnings) + @($collectors.Warnings)
+    if (-not $collectors.Complete) { $telemetryResult.Complete = $false }
+  }
+` : ''}
   $script:configStaging = Join-Path $agentDir ('.cybercore-wazuh-' + [Guid]::NewGuid().ToString('N') + '.conf')
   [IO.File]::WriteAllText($script:configStaging, $document.DocumentElement.InnerXml, (New-Object Text.UTF8Encoding($false)))
   Set-Acl -LiteralPath $script:configStaging -AclObject (Get-Acl -LiteralPath $configFile)
   [IO.File]::Replace($script:configStaging, $configFile, [NullString]::Value)
 }
 
+${windowsTelemetry ? require('./wazuh-windows-telemetry').buildWindowsTelemetryFunctions() : ''}
 try {
   $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
   $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -446,16 +495,42 @@ try {
   $keys = @(Read-WazuhKeys)
   if ($keys.Count -ne 1 -or $keys[0] -cne $expectedRecord) {
     $script:stage = 'key-import-failed'
-    $inputText = 'I' + [Environment]::NewLine + $agentKey + [Environment]::NewLine + 'y' + [Environment]::NewLine + 'Q' + [Environment]::NewLine
-    $exitCode = Invoke-WazuhProcess -FilePath (Join-Path $agentDir 'manage_agents.exe') -InputText $inputText -Timeout 30
+    $exitCode = Invoke-WazuhProcess -FilePath (Join-Path $agentDir 'manage_agents.exe') -ImportKey -Timeout 30
     $keys = @(Read-WazuhKeys)
     if ($exitCode -ne 0 -or $keys.Count -ne 1 -or $keys[0] -cne $expectedRecord) { Stop-WazuhInstall 'key-import-failed' }
   }
+${windowsTelemetry ? `  # Keep the base agent online while the Windows feature and Sysmon are prepared.
   $script:stage = 'service-start-failed'
   Set-Service -Name 'WazuhSvc' -StartupType Automatic
   $service.Start()
   $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(60))
+  try {
+    $telemetryResult = Enable-CyberCoreWindowsTelemetry -AgentRoot $workDir
+    Set-WazuhConfiguration
+  } catch {
+    $telemetryResult = [PSCustomObject]@{ Complete = $false; Warnings = @('windows-telemetry-setup-failed') }
+  }
+` : ''}
+  $script:stage = 'service-start-failed'
+  Set-Service -Name 'WazuhSvc' -StartupType Automatic
+${windowsTelemetry ? `  $service.Refresh()
+  if ($service.Status -ne 'Stopped') {
+    $service.Stop()
+    $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(60))
+  }
+` : ''}
+  $service.Start()
+  $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(60))
   Write-Output ('CYBERCORE_WAZUH_STARTED:' + $agentName)
+${windowsTelemetry ? `  foreach ($warning in $telemetryResult.Warnings) {
+    if ($warning -match '^[a-z0-9-]{1,80}$') { Write-Output ('CYBERCORE_WAZUH_TELEMETRY_WARNING:' + $warning) }
+  }
+  if (-not $telemetryResult.Complete) {
+    Write-Output 'CYBERCORE_WAZUH_TELEMETRY:incomplete'
+    Stop-WazuhInstall 'windows-telemetry-incomplete'
+  }
+  Write-Output 'CYBERCORE_WAZUH_TELEMETRY:configured'
+` : ''}
 } catch {
   $code = if ($script:publicError) { $script:publicError } else { $script:stage }
   [Console]::Error.WriteLine('CYBERCORE_WAZUH_ERROR:' + $code)

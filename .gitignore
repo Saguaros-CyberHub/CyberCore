@@ -1,4 +1,5 @@
 .DS_Store
+/infrastructure/wazuh-dashboards/
 proxmox-automated-install/
 .continue/
 **/data/*
