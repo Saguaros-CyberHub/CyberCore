@@ -153,13 +153,43 @@ Hidden: False
     return $text
 }
 
+# One definition of "fatal", shared by the startup poll and the status re-read so
+# the two can never disagree about what a dead FakeNet looks like.
+#
+# CASE IS LOAD-BEARING. A FakeNet log line carries no level field -- it is
+# "<time> [<listener>] <message>" -- so the wording is all there is to go on.
+# fakenet.py writes its own fatal messages as all-caps "ERROR:", while a listener
+# that survives an exception writes "Error: <msg>". The bundled DNSListener writes
+#   [ DNS Server] Error: 'ThreadedUDPServer' object has no attribute 'diverterListenerCallbacks'
+# about a second into EVERY run, then goes on answering every query. Matching
+# case-insensitively read that healthy line as a fatal one, so Start Analysis
+# reported "FakeNet could not initialize" while FakeNet was up, diverting,
+# serving DNS and HTTP, and writing a PCAP.
+#
+# THE "] " ANCHOR MATTERS TOO. FakeNet logs diverted request headers and POST
+# bodies through this same logger -- same prefix, further indented -- so without
+# the anchor a sample could put "ERROR:" on the wire and be read as FakeNet's
+# diagnosis of itself. Traceback stays unanchored: a Python crash reaches stderr
+# with no prefix at all.
+$script:FakeNetFatalPattern = 'Traceback \(most recent call last\)|(?m:^.*\] (?:ERROR:|(?i:Error starting .+ listener|Stopping\b)))'
+
+# Either marker means the listeners and the diverter are up: -v logs the
+# unimplemented acceptListeners/acceptDiverter callback per listener, and the
+# Windows diverter logs its port list once it is actually intercepting.
+$script:FakeNetReadyPattern = 'accept(?:Listeners|Diverter)\(\) not implemented by Listener|\] Diverting ports:'
+
+function Test-FakeNetFatal {
+    param([string]$Text)
+    # -cmatch, not -match. See above: the whole feature turned on this operator.
+    return [bool]($Text -cmatch $script:FakeNetFatalPattern)
+}
+
 function Test-FakeNetStartup {
     param([string]$LogText, [bool]$ProcessAlive, [double]$AgeSeconds)
-    # -v emits these callbacks after listeners and the diverter have started.
-    # A banner/config-load line alone occurs before driver/listener failures.
+    # A banner/config-load line alone appears before driver and listener failures,
+    # so it is never enough on its own.
     return $ProcessAlive -and $AgeSeconds -ge 5 -and
-        $LogText -match 'accept(?:Listeners|Diverter)\(\) not implemented by Listener' -and
-        $LogText -notmatch '(?im)Traceback \(most recent call last\)|\bERROR:|Error starting .* listener|\[\s*FakeNet\]\s+Stopping'
+        $LogText -match $script:FakeNetReadyPattern -and -not (Test-FakeNetFatal $LogText)
 }
 
 function Write-CyberCoreFakeNetResult {
@@ -275,7 +305,7 @@ function Start-CyberCoreFakeNet {
         $process.Refresh()
         $logText = if (Test-Path -LiteralPath $logPath) { Get-Content -LiteralPath $logPath -Raw } else { '' }
         $stderrText = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
-        if ($process.HasExited -or ($logText + $stderrText) -match '(?im)Traceback \(most recent call last\)|\bERROR:|Error starting .* listener') {
+        if ($process.HasExited -or (Test-FakeNetFatal ($logText + "`r`n" + $stderrText))) {
             throw "FakeNet could not initialize. Check $logPath and $stderrPath."
         }
         $age = ((Get-Date) - $startedAt).TotalSeconds
