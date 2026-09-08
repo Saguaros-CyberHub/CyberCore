@@ -1,0 +1,19 @@
+<!-- Additive Wazuh 4.14.1 decoder for the router's RFC3164 Suricata EVE output.
+     Pre-decoding removes the syslog header and sets program_name=suricata.
+     Wazuh then uses its program-name decoder list, so the ordinary JSON decoder
+     (which has no program_name) is not selected for these wrapped events.
+
+     The json name is intentional: native Suricata parent rule 86600 requires
+     decoded_as=json. This supplements that decoder family without replacing
+     the stock decoder or duplicating the native 86600/86601 rules.
+     Raw EVE JSON continues through the stock no-program-name JSON decoder.
+
+     References:
+     https://documentation.wazuh.com/current/user-manual/ruleset/decoders/json-decoder.html
+     https://github.com/wazuh/wazuh/blob/v4.14.1/ruleset/decoders/0006-json_decoders.xml
+     https://github.com/wazuh/wazuh/blob/v4.14.1/ruleset/rules/0475-suricata_rules.xml -->
+<decoder name="json">
+  <program_name type="pcre2">^suricata$</program_name>
+  <prematch type="pcre2">^\s*\{\s*"</prematch>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>

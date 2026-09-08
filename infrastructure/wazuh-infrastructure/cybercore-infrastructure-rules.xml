@@ -9,14 +9,25 @@
     <description>Infrastructure Wazuh agent disconnected; check host and monitoring availability.</description>
     <group>agent_health,agent_disconnected,</group>
   </rule>
+  <!-- Keep 87701 as the built-in correlation input. Escalate only AFTER 87702 fires;
+       its counter includes all blocked destinations for this source, not only management. -->
+  <rule id="111901" level="12" ignore="240">
+    <if_sid>87702</if_sid>
+    <location type="pcre2">^100\.100\.20\.1$</location>
+    <srcip>100.100.60.0/22</srcip>
+    <dstip>100.100.10.0/24</dstip>
+    <dstip>100.100.20.10/32</dstip>
+    <description>Lane gateway repeated firewall blocks include infrastructure destination $(dstip):$(dstport); review source and required service connectivity.</description>
+    <group>firewall,network_boundary,</group>
+  </rule>
 </group>
 
 <group name="cybercore,application_security,">
-  <!-- This trusted host path is only collected on CyberCore. For incident routing also require
-       agent.id=012: a student with root can forge application-shaped endpoint telemetry. -->
+  <!-- Wazuh matches the FULL authenticated agent location, before stripping its prefix for
+       the alert JSON. Require CyberCore's current registered name and registration IP (any). -->
   <rule id="111920" level="0">
     <decoded_as>json</decoded_as>
-    <location type="pcre2">^/home/cactus-admin/CyberCore/logs/security-[0-9]{4}-[0-9]{2}-[0-9]{2}\.jsonl$</location>
+    <location type="pcre2">^\(250-CyberCore\) any->/home/cactus-admin/CyberCore/logs/security-[0-9]{4}-[0-9]{2}-[0-9]{2}\.jsonl$</location>
     <field name="integration" type="pcre2">^cybercore$</field>
     <field name="schema_version" type="pcre2">^1$</field>
     <description>CyberCore sanitized security event.</description>
