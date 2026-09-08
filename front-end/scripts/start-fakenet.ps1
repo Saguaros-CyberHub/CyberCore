@@ -153,34 +153,27 @@ Hidden: False
     return $text
 }
 
-# One definition of "fatal", shared by the startup poll and the status re-read so
-# the two can never disagree about what a dead FakeNet looks like.
-#
-# CASE IS LOAD-BEARING. A FakeNet log line carries no level field -- it is
-# "<time> [<listener>] <message>" -- so the wording is all there is to go on.
-# fakenet.py writes its own fatal messages as all-caps "ERROR:", while a listener
-# that survives an exception writes "Error: <msg>". The bundled DNSListener writes
+# CASE IS LOAD-BEARING, hence -cmatch below. A FakeNet log line has no level field
+# -- it is "<time> [<listener>] <message>" -- so wording is all there is. fakenet.py
+# writes its own fatal messages as all-caps "ERROR:"; a listener that survives an
+# exception writes "Error: <msg>". The bundled DNSListener writes
 #   [ DNS Server] Error: 'ThreadedUDPServer' object has no attribute 'diverterListenerCallbacks'
-# about a second into EVERY run, then goes on answering every query. Matching
-# case-insensitively read that healthy line as a fatal one, so Start Analysis
-# reported "FakeNet could not initialize" while FakeNet was up, diverting,
-# serving DNS and HTTP, and writing a PCAP.
-#
-# THE "] " ANCHOR MATTERS TOO. FakeNet logs diverted request headers and POST
-# bodies through this same logger -- same prefix, further indented -- so without
-# the anchor a sample could put "ERROR:" on the wire and be read as FakeNet's
-# diagnosis of itself. Traceback stays unanchored: a Python crash reaches stderr
-# with no prefix at all.
+# a second into EVERY run, then answers every query regardless. Matching that
+# case-insensitively made Start Analysis report "FakeNet could not initialize"
+# while FakeNet was up, diverting, serving DNS and HTTP, and writing a PCAP.
+# The "] " anchor matters too: FakeNet logs diverted request headers and POST
+# bodies through this same logger, further indented, so without it a sample could
+# put "ERROR:" on the wire and be read as FakeNet's diagnosis of itself. Traceback
+# stays unanchored -- a Python crash reaches stderr with no prefix at all.
 $script:FakeNetFatalPattern = 'Traceback \(most recent call last\)|(?m:^.*\] (?:ERROR:|(?i:Error starting .+ listener|Stopping\b)))'
 
-# Either marker means the listeners and the diverter are up: -v logs the
-# unimplemented acceptListeners/acceptDiverter callback per listener, and the
-# Windows diverter logs its port list once it is actually intercepting.
+# Either marker means listeners and diverter are up: -v logs the unimplemented
+# acceptListeners/acceptDiverter callback per listener, and the Windows diverter
+# logs its port list once it is actually intercepting.
 $script:FakeNetReadyPattern = 'accept(?:Listeners|Diverter)\(\) not implemented by Listener|\] Diverting ports:'
 
 function Test-FakeNetFatal {
     param([string]$Text)
-    # -cmatch, not -match. See above: the whole feature turned on this operator.
     return [bool]($Text -cmatch $script:FakeNetFatalPattern)
 }
 
@@ -246,6 +239,61 @@ function Read-CyberCoreFakeNetResult {
     return $result
 }
 
+function Get-CyberCoreFakeNetLogPath {
+    param([string]$CommandLine)
+    # The command line is the authority on where a running instance logs. The state
+    # file cannot be: a startup that throws after Start-Process never writes one.
+    if ($CommandLine -match '\s-l\s+"?([^"]+?\.log)"?(?:\s|$)') { return $Matches[1] }
+    return ''
+}
+
+function Resolve-CyberCoreFakeNetInstance {
+    # Return the reuse payload for an adoptable instance, or $null to start fresh.
+    #
+    # Reuse used to be gated on C:\Analysis\cybercore-fakenet.json existing, and
+    # refused outright when it did not. But that file was written only AFTER
+    # readiness, ~45s past Start-Process, so any failure in that window left
+    # FakeNet running with nothing pointing at it and every later Retry Setup
+    # answered "already running outside Start Analysis" however healthy it was --
+    # Reset Lab the only way out. The state file is now a RECORD of what runs,
+    # never the gate on reusing it: identity comes from the process itself, our
+    # executable with our config path on its command line.
+    param([string]$Executable, [string]$ConfigPath, [string]$CaptureDirectory, [double]$StartupWindowSeconds = 60)
+    $running = @(Get-CimInstance Win32_Process -Filter "Name = 'fakenet.exe'" |
+        Where-Object { $_.ExecutablePath -ieq $Executable })
+    if (-not $running.Count) { return $null }
+    $managed = @($running | Where-Object { $_.CommandLine -like "*$ConfigPath*" })
+    if (-not $managed.Count) {
+        # Started by hand, running a configuration this lane knows nothing about.
+        # Adopting it would report an analysis environment we cannot describe.
+        throw 'FakeNet is already running outside Start Analysis. Close that instance and try again, or Reset Lab.'
+    }
+    $instance = $managed[0]
+    $age = ((Get-Date) - $instance.CreationDate).TotalSeconds
+    $logPath = Get-CyberCoreFakeNetLogPath $instance.CommandLine
+    $logText = ''
+    if ($logPath -and (Test-Path -LiteralPath $logPath -PathType Leaf)) {
+        $logText = Get-Content -LiteralPath $logPath -Raw
+    }
+    if (Test-FakeNetStartup $logText $true $age) {
+        return @{ ready = $true; pid = [int]$instance.ProcessId; captureDirectory = $CaptureDirectory
+            logPath = $logPath; reused = $true
+            configHash = (Get-FileHash -LiteralPath $ConfigPath -Algorithm SHA256).Hash
+            processCreatedUtc = $instance.CreationDate.ToUniversalTime().ToString('o') }
+    }
+    if ($age -lt $StartupWindowSeconds) {
+        # A second attempt can overlap the first: each one registers its own task.
+        throw "FakeNet is still starting after $([int]$age) seconds. Use Retry Setup in a moment."
+    }
+    # Ours, past its startup window, and never became ready. Retry Setup means
+    # retry: stop it and start clean rather than leaving the lane with no way
+    # forward. Nothing is lost -- the previous capture is already on disk in
+    # C:\Analysis, and a fresh run opens a new one.
+    Stop-Process -Id $instance.ProcessId -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    return $null
+}
+
 function Start-CyberCoreFakeNet {
     $ErrorActionPreference = 'Stop'
     if (-not [Security.Principal.WindowsIdentity]::GetCurrent().IsSystem) {
@@ -261,24 +309,12 @@ function Start-CyberCoreFakeNet {
     }
     New-Item -ItemType Directory -Path $captureDir -Force | Out-Null
     New-Item -ItemType Directory -Path $configDir -Force | Out-Null
-    $existing = @(Get-CimInstance Win32_Process -Filter "Name = 'fakenet.exe'" |
-        Where-Object { $_.ExecutablePath -ieq $executable })
-    if ($existing.Count) {
-        if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
-            throw 'FakeNet is already running outside Start Analysis. Close that instance and try again, or Reset Lab.'
-        }
-        $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-        $matching = @($existing | Where-Object { $_.ProcessId -eq $state.pid -and $_.CommandLine -like "*$configPath*" })
-        if (-not $matching.Count -or -not (Test-Path -LiteralPath $configPath -PathType Leaf) -or
-            (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash -ne $state.configHash -or
-            ($state.processCreatedUtc -and $matching[0].CreationDate.ToUniversalTime().ToString('o') -ne $state.processCreatedUtc)) {
-            throw 'The running FakeNet configuration has changed. Reset Lab before continuing.'
-        }
-        $logText = Get-Content -LiteralPath $state.logPath -Raw
-        $age = ((Get-Date) - $matching[0].CreationDate).TotalSeconds
-        if (-not (Test-FakeNetStartup $logText $true $age)) { throw 'The existing FakeNet instance is not ready. Check C:\Analysis or Reset Lab.' }
-        return @{ ready = $true; pid = [int]$state.pid; captureDirectory = $captureDir; logPath = $state.logPath; reused = $true;
-            configHash = $state.configHash; processCreatedUtc = $matching[0].CreationDate.ToUniversalTime().ToString('o') }
+    $reusable = Resolve-CyberCoreFakeNetInstance $executable $configPath $captureDir
+    if ($reusable) {
+        [IO.File]::WriteAllText($statePath, (@{ pid = $reusable.pid; configHash = $reusable.configHash
+            logPath = $reusable.logPath; processCreatedUtc = $reusable.processCreatedUtc } | ConvertTo-Json -Compress),
+            [Text.UTF8Encoding]::new($false))
+        return $reusable
     }
     $sourceText = ''
     foreach ($candidate in @((Join-Path $configDir 'cybercore.ini.template'), (Join-Path $configDir 'default.ini'))) {
@@ -300,6 +336,15 @@ function Start-CyberCoreFakeNet {
         -WorkingDirectory $captureDir -WindowStyle Hidden -PassThru `
         -RedirectStandardInput $stdinPath -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
     $startedAt = Get-Date
+    # Record the launch BEFORE waiting on readiness. Everything between here and the
+    # confirmation below can throw, and until this write existed a failure there
+    # left FakeNet running with nothing on disk naming it.
+    $launched = Get-CimInstance Win32_Process -Filter "ProcessId = $($process.Id)"
+    $launchedUtc = ''
+    if ($launched) { $launchedUtc = $launched.CreationDate.ToUniversalTime().ToString('o') }
+    [IO.File]::WriteAllText($statePath, (@{ pid = $process.Id; logPath = $logPath; phase = 'starting'
+        configHash = (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash
+        processCreatedUtc = $launchedUtc } | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
     while (((Get-Date) - $startedAt).TotalSeconds -lt 45) {
         Start-Sleep -Seconds 1
         $process.Refresh()
