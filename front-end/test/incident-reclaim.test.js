@@ -72,3 +72,40 @@ test('reclaim claims the unused disk, not just deleted files', () => {
     assert.ok(cmd.includes(step), `LVM step ${step} is missing; the disk stays 10G`);
   }
 });
+
+test('the guest stdout is read from the field the executor actually returns', () => {
+  // This shipped broken. script-executor normalises Proxmox's `out-data` into
+  // `stdout` before returning; reading `out-data` here looked correct against
+  // the raw `qm guest exec` JSON and yielded an empty string on every lane, so
+  // an instructor got twenty-four rows of "no reclaim line in guest output"
+  // from guests that had actually done the work. Nothing failed loudly -- the
+  // command ran, the space was freed, and the console reported nothing.
+  const executorShape = {
+    exitcode: 0,
+    exited: 1,
+    stdout: 'reclaim before_kb=850612 after_kb=18874368 total_kb=23068672',
+  };
+  assert.deepEqual(
+    runner.parseReclaim(runner.stdoutOf(executorShape)),
+    { before_kb: 850612, after_kb: 18874368, total_kb: 23068672 }
+  );
+
+  // Tolerated in case a future executor stops normalising, but not the contract.
+  assert.equal(runner.stdoutOf({ 'out-data': 'x' }), 'x');
+  assert.equal(runner.stdoutOf(undefined), '');
+  assert.equal(runner.stdoutOf({}), '');
+});
+
+test('script-executor really does normalise out-data to stdout', () => {
+  // The assumption the test above rests on, asserted against the source rather
+  // than trusted, so a change there fails here instead of in a live class.
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, '..', 'src', 'utils', 'script-executor.js'),
+    'utf8'
+  );
+  assert.match(
+    src,
+    /stdout:\s*status\['out-data'\]/,
+    'script-executor no longer maps out-data to stdout; stdoutOf() needs revisiting'
+  );
+});
