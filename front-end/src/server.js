@@ -144,6 +144,7 @@ if (guacPublicBase.startsWith('http')) {
 
 // HTTP request logging (before all routes)
 const requestLogger = require('./middleware/request-logger');
+const { safeRequestPath } = require('./utils/security-events');
 app.use(requestLogger);
 
 app.use(helmet({
@@ -249,7 +250,7 @@ const limiter = rateLimit({
   handler: (req, res, next, opts) => {
     const payload = peekJwt(req);
     const who = payload?.sub ? `user:${payload.sub} (${payload.email || 'no-email'})` : `ip:${req.ip}`;
-    console.warn(`[RATE LIMIT] ${req.method} ${req.originalUrl} from ${who} — bucket exhausted`);
+    console.warn(`[RATE LIMIT] ${req.method} ${safeRequestPath(req)} from ${who} — bucket exhausted`);
     res.status(opts.statusCode).json(opts.message);
   }
 });

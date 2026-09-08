@@ -6,16 +6,20 @@
  */
 
 const createLogger = require('../utils/logger');
+const crypto = require('node:crypto');
+const securityEvents = require('../utils/security-events');
 const log = createLogger('http');
 
 module.exports = function requestLogger(req, res, next) {
   const start = Date.now();
+  // Server-generated correlation only; a request header is attacker-controlled.
+  req.id = crypto.randomUUID();
 
   res.on('finish', () => {
     const ms      = Date.now() - start;
     const status  = res.statusCode;
     const method  = req.method;
-    const url     = req.originalUrl || req.url;
+    const url     = securityEvents.safeRequestPath(req);
     // 404 is "not found", not a problem — vuln-range orchestrators get
     // walked by .env/secrets scanners constantly, and logging every miss at
     // warn floods stderr (and docker logs). Map 404 to http so it's hidden at
@@ -30,6 +34,8 @@ module.exports = function requestLogger(req, res, next) {
     if (userId) meta.user = userId;
 
     log[level](`${method} ${url}`, meta);
+    const security = securityEvents.httpSummary(req, status);
+    if (security) securityEvents.emit(security);
   });
 
   next();

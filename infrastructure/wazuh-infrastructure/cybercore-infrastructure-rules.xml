@@ -1,0 +1,120 @@
+<!-- Local additions for Wazuh 4.14.1. No built-in rule is overwritten.
+     Reserve 111900-111919 for infrastructure health and 111920-111939 for CyberCore JSONL.
+     These rules do not configure active response or notification delivery. -->
+<group name="cybercore,infrastructure,">
+  <rule id="111900" level="10">
+    <if_sid>504</if_sid>
+    <location type="pcre2">^wazuh-monitord$</location>
+    <match type="pcre2">^ossec: Agent disconnected: '(?:cyberhub-node-(?:[0-6]|10|11)|250-CyberCore|251-netbox|252-heimdall-dashboard)-(?:any|[0-9a-fA-F:.]+)'\.$</match>
+    <description>Infrastructure Wazuh agent disconnected; check host and monitoring availability.</description>
+    <group>agent_health,agent_disconnected,</group>
+  </rule>
+</group>
+
+<group name="cybercore,application_security,">
+  <!-- This trusted host path is only collected on CyberCore. For incident routing also require
+       agent.id=012: a student with root can forge application-shaped endpoint telemetry. -->
+  <rule id="111920" level="0">
+    <decoded_as>json</decoded_as>
+    <location type="pcre2">^/home/cactus-admin/CyberCore/logs/security-[0-9]{4}-[0-9]{2}-[0-9]{2}\.jsonl$</location>
+    <field name="integration" type="pcre2">^cybercore$</field>
+    <field name="schema_version" type="pcre2">^1$</field>
+    <description>CyberCore sanitized security event.</description>
+  </rule>
+  <rule id="111921" level="3">
+    <if_sid>111920</if_sid>
+    <field name="cybercore_event" type="pcre2">^audit$</field>
+    <description>CyberCore audit action: $(action).</description>
+    <options>no_full_log</options>
+    <group>application_audit,</group>
+  </rule>
+  <rule id="111922" level="8">
+    <if_sid>111921</if_sid>
+    <field name="db_recorded" type="pcre2">^false$</field>
+    <description>CyberCore audit database write failed; sanitized security event retained.</description>
+    <options>no_full_log</options>
+    <group>application_health,audit_write_failed,</group>
+  </rule>
+  <rule id="111923" level="5">
+    <if_sid>111921</if_sid>
+    <field name="db_recorded" type="pcre2">^true$</field>
+    <field name="outcome" type="pcre2">^(?:failure|denied)$</field>
+    <description>CyberCore audit action failed or was denied: $(action).</description>
+    <options>no_full_log</options>
+    <group>application_denied,</group>
+  </rule>
+  <rule id="111924" level="5">
+    <if_sid>111923</if_sid>
+    <field name="category" type="pcre2">^auth$</field>
+    <description>CyberCore authentication failed or was denied.</description>
+    <options>no_full_log</options>
+    <group>authentication_failed,</group>
+  </rule>
+  <rule id="111925" level="10" frequency="10" timeframe="120" ignore="120">
+    <if_matched_sid>111924</if_matched_sid>
+    <same_srcip />
+    <description>Repeated CyberCore authentication failures from one source; review user and proxy context.</description>
+    <options>no_full_log</options>
+    <group>authentication_failures,</group>
+  </rule>
+  <rule id="111926" level="5">
+    <if_sid>111921</if_sid>
+    <field name="db_recorded" type="pcre2">^true$</field>
+    <field name="outcome" type="pcre2">^success$</field>
+    <field name="actor_role" type="pcre2">^admin$</field>
+    <field name="category" type="pcre2">^(?:user|config)$</field>
+    <description>CyberCore administrator account or configuration action: $(action).</description>
+    <options>no_full_log</options>
+    <group>administrator_activity,</group>
+  </rule>
+  <rule id="111929" level="8">
+    <if_sid>111920</if_sid>
+    <field name="cybercore_event" type="pcre2">^health$</field>
+    <action type="pcre2">^telemetry\.dropped$</action>
+    <description>CyberCore security events were dropped; investigate collection capacity or file availability.</description>
+    <options>no_full_log</options>
+    <group>application_health,telemetry_loss,</group>
+  </rule>
+  <rule id="111930" level="3">
+    <if_sid>111920</if_sid>
+    <field name="cybercore_event" type="pcre2">^http$</field>
+    <description>CyberCore HTTP security event.</description>
+    <options>no_full_log</options>
+    <group>web,</group>
+  </rule>
+  <rule id="111931" level="5">
+    <if_sid>111930</if_sid>
+    <field name="reason" type="pcre2">^(?:authentication_required|access_denied)$</field>
+    <description>CyberCore rejected an unauthenticated or unauthorized request.</description>
+    <options>no_full_log</options>
+    <group>access_denied,</group>
+  </rule>
+  <rule id="111932" level="5">
+    <if_sid>111930</if_sid>
+    <field name="reason" type="pcre2">^rate_limited$</field>
+    <description>CyberCore rate limit reached.</description>
+    <options>no_full_log</options>
+    <group>rate_limited,</group>
+  </rule>
+  <rule id="111933" level="7">
+    <if_sid>111930</if_sid>
+    <field name="reason" type="pcre2">^server_error$</field>
+    <description>CyberCore returned a server error.</description>
+    <options>no_full_log</options>
+    <group>application_health,</group>
+  </rule>
+  <rule id="111934" level="7">
+    <if_sid>111930</if_sid>
+    <field name="reason" type="pcre2">^probe_(?:environment|vcs|traversal|common_exploit)$</field>
+    <description>CyberCore received a request matching a sensitive-file or exploit probe.</description>
+    <options>no_full_log</options>
+    <group>web_probe,</group>
+  </rule>
+  <rule id="111935" level="8">
+    <if_sid>111934</if_sid>
+    <field name="http_status" type="pcre2">^2[0-9]{2}$</field>
+    <description>CyberCore probe received HTTP 2xx; review route handling before inferring exposure.</description>
+    <options>no_full_log</options>
+    <group>web_probe,</group>
+  </rule>
+</group>

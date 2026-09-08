@@ -25,6 +25,7 @@
 
 const crypto = require('crypto');
 const { cybercoreQuery } = require('./cybercore-db');
+const securityEvents = require('./security-events');
 
 // ---------------------------------------------------------------------------
 // Vocabulary
@@ -275,20 +276,24 @@ function placeholders(rowCount) {
  * because the audit write did.
  */
 async function log(evt) {
+  let summary;
+  let recorded = false;
   try {
+    summary = securityEvents.auditSummary(evt, LEGACY_ACTION_MAP[evt?.action] || evt?.action,
+      CATEGORY_BY_PREFIX[String(LEGACY_ACTION_MAP[evt?.action] || evt?.action || '').split('.')[0]]);
     const values = buildValues(evt);
     await cybercoreQuery(
       `INSERT INTO cybercore_audit_log (${COLUMNS.join(', ')}) VALUES ${placeholders(1)}`,
       values
     );
+    recorded = true;
   } catch (error) {
     droppedCount++;
-    // Degrade to the rotating file log (src/utils/logger.js) rather than
-    // silence, so a failing writer is recoverable after the fact.
-    console.error('[Audit] dropped:', evt?.action, error.message, JSON.stringify({
-      actor: evt?.actor?.email || evt?.req?.user?.email || null,
-      target: evt?.target || null,
-    }));
+    // The SIEM summary below remains available if PostgreSQL is unavailable.
+    // Neither database diagnostics nor arbitrary target values belong in logs.
+    console.error('[Audit] Database audit write failed; emitting security summary.');
+  } finally {
+    securityEvents.emit({ ...(summary || securityEvents.auditSummary(null)), db_recorded: recorded });
   }
 }
 
@@ -300,15 +305,23 @@ async function log(evt) {
  */
 async function logMany(events) {
   if (!Array.isArray(events) || events.length === 0) return;
+  let summaries = [];
+  let recorded = false;
   try {
+    summaries = events.map(evt => securityEvents.auditSummary(evt,
+      LEGACY_ACTION_MAP[evt?.action] || evt?.action,
+      CATEGORY_BY_PREFIX[String(LEGACY_ACTION_MAP[evt?.action] || evt?.action || '').split('.')[0]]));
     const values = events.flatMap(buildValues);
     await cybercoreQuery(
       `INSERT INTO cybercore_audit_log (${COLUMNS.join(', ')}) VALUES ${placeholders(events.length)}`,
       values
     );
+    recorded = true;
   } catch (error) {
     droppedCount += events.length;
-    console.error('[Audit] dropped batch:', events.length, events[0]?.action, error.message);
+    console.error('[Audit] Database audit batch failed; emitting security summaries.');
+  } finally {
+    for (const summary of summaries) securityEvents.emit({ ...summary, db_recorded: recorded });
   }
 }
 

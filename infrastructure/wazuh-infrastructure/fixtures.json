@@ -1,0 +1,22 @@
+[
+  {"name":"proxmox disconnect", "location":"wazuh-monitord", "log":"ossec: Agent disconnected: 'cyberhub-node-1-any'.", "rule":111900, "level":10, "decoder":"ossec"},
+  {"name":"new proxmox disconnect", "location":"wazuh-monitord", "log":"ossec: Agent disconnected: 'cyberhub-node-11-100.100.10.21'.", "rule":111900, "level":10, "decoder":"ossec"},
+  {"name":"application disconnect", "location":"wazuh-monitord", "log":"ossec: Agent disconnected: '250-CyberCore-any'.", "rule":111900, "level":10, "decoder":"ossec"},
+  {"name":"student disconnect remains built in", "location":"wazuh-monitord", "log":"ossec: Agent disconnected: 'cle-cybr400-inperson-10811-610811-any'.", "rule":504, "level":3, "decoder":"ossec"},
+  {"name":"prefix collision remains built in", "location":"wazuh-monitord", "log":"ossec: Agent disconnected: 'cyberhub-node-100-any'.", "rule":504, "level":3, "decoder":"ossec"},
+  {"name":"wrong sender remains built in", "location":"/tmp/student.log", "log":"ossec: Agent disconnected: 'cyberhub-node-1-any'.", "rule":504, "level":3, "decoder":"ossec"},
+  {"name":"successful student audit", "event":{"cybercore_event":"audit","action":"lane.started","category":"infra","outcome":"success","actor_role":"student","db_recorded":true}, "rule":111921, "level":3},
+  {"name":"audit database failed", "event":{"cybercore_event":"audit","action":"auth.login","category":"auth","outcome":"failure","db_recorded":false}, "rule":111922, "level":8},
+  {"name":"access audit denied", "event":{"cybercore_event":"audit","action":"access.denied","category":"access","outcome":"denied","db_recorded":true}, "rule":111923, "level":5},
+  {"name":"authentication failed", "event":{"cybercore_event":"audit","action":"auth.login","category":"auth","outcome":"failure","reason":"bad_password","srcip":"192.0.2.20","db_recorded":true}, "rule":111924, "level":5},
+  {"name":"administrator configuration action", "event":{"cybercore_event":"audit","action":"config.updated","category":"config","outcome":"success","actor_role":"admin","db_recorded":true}, "rule":111926, "level":5},
+  {"name":"feed capacity loss", "event":{"cybercore_event":"health","action":"telemetry.dropped","category":"config","outcome":"failure","reason":"daily_capacity","dropped_count":1}, "rule":111929, "level":8},
+  {"name":"ordinary missing route", "event":{"cybercore_event":"http","action":"http.request","reason":"not_found","http_status":404}, "rule":111930, "level":3},
+  {"name":"unauthenticated request", "event":{"cybercore_event":"http","action":"http.request","reason":"authentication_required","http_status":401}, "rule":111931, "level":5},
+  {"name":"unauthorized request", "event":{"cybercore_event":"http","action":"http.request","reason":"access_denied","http_status":403}, "rule":111931, "level":5},
+  {"name":"rate limit", "event":{"cybercore_event":"http","action":"http.request","reason":"rate_limited","http_status":429}, "rule":111932, "level":5},
+  {"name":"server error", "event":{"cybercore_event":"http","action":"http.request","reason":"server_error","http_status":503}, "rule":111933, "level":7},
+  {"name":"environment probe denied", "event":{"cybercore_event":"http","action":"http.request","reason":"probe_environment","http_status":404}, "rule":111934, "level":7},
+  {"name":"vcs probe denied", "event":{"cybercore_event":"http","action":"http.request","reason":"probe_vcs","http_status":403}, "rule":111934, "level":7},
+  {"name":"traversal probe 2xx needs review", "event":{"cybercore_event":"http","action":"http.request","reason":"probe_traversal","http_status":200}, "rule":111935, "level":8}
+]
