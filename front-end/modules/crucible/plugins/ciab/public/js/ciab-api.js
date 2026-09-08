@@ -12,7 +12,14 @@ API.profiles = {
   },
 
   async get(id) {
-    return API.request(`/profiles/${id}`);
+    // GET /profiles/:id responds { success, profile }, not the profile itself
+    // (list()/recent() already unwrap to .profiles server-side; this endpoint
+    // doesn't). Every caller — the dashboard's Profile Details modal chief
+    // among them — expects a flat profile object, so unwrap it here once
+    // rather than at each call site. Matches the same data.profile || data
+    // fallback download() already uses below.
+    const data = await API.request(`/profiles/${id}`);
+    return data.profile || data;
   },
 
   async create(data) {
