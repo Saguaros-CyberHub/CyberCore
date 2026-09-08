@@ -62,6 +62,7 @@ const { query } = require('../utils/db');                       // cle_db — LE
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const { getManagedCourse } = require('../utils/course-access');
 const audit = require('../../../../../src/utils/audit');
+const answerBook = require('../../../../../src/incident/answer-book');
 // The engine moved to shared core in E1 and the re-export shims that stood in
 // cle/utils/ were deleted in E2. A plugin requiring core is the allowed
 // direction; the reverse is what test/incident-engine-locality.test.js forbids.
@@ -531,6 +532,55 @@ router.get('/:runId/status', instructorOnly, async (req, res) => {
       total_events: t.rows.reduce((s, r) => s + (Number(r.event_count) || 0), 0),
       targets: t.rows,
     });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /:runId/answer-book — what the attack actually wrote, for marking
+// ---------------------------------------------------------------------------
+/**
+ * instructorOnly, and that gate is the ONLY thing between this and a student.
+ *
+ * Everything here is the answer: the adversary's address, the accounts it tried,
+ * the exact messages, and queries that return them. There is deliberately no
+ * field in the index that isolates the attack -- closing those oracles is most
+ * of what the telemetry design is for -- so this response is strictly more than
+ * a student could ever derive from their own lane.
+ *
+ * It is recomputed per request rather than stored. The run row carries the seed
+ * (run_id), the selection and the duration, and cc-emit is deterministic on the
+ * seed, so the book is a pure function of the row -- there is nothing to persist
+ * and nothing to go stale. Costs one planTimeline() call, which is the same work
+ * one lane's guest already did.
+ */
+router.get('/:runId/answer-book', instructorOnly, async (req, res) => {
+  try {
+    const courseId = courseIdOf(req, res);
+    if (!(await getManagedCourse(courseId, req.user))) {
+      return res.status(403).json({ error: 'Course not found or access denied' });
+    }
+    const run = await getRunForCourse(req.params.runId, courseId);
+    if (!run) return res.status(404).json({ error: 'Attack run not found' });
+
+    const selection = selectionOf(run);
+    const compiled = runner.playbookFor(selection);
+    if (!compiled) {
+      // A generic (non-playbook) technique runs through log-generator's keyword
+      // filter, which synthesises nothing and therefore cannot be reproduced.
+      // Say so, rather than returning an empty book that reads like a bug.
+      return res.status(409).json({
+        error: 'This run used the generic log-generator path, which produces no reproducible event list. '
+             + 'Answer books exist for playbook-backed techniques and chains.',
+      });
+    }
+
+    const book = answerBook.buildAnswerBook(run, {
+      playbook: compiled,
+      label: selection.label || null,
+    });
+    res.json(book);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

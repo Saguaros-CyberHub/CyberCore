@@ -348,6 +348,8 @@
           ${retryable ? `<button class="btn btn-secondary" onclick="CleAttack.retry()">Retry ${retryable} lane(s)</button>` : ''}
           ${outOfSpace.length ? `<button class="btn btn-secondary" onclick="CleAttack.reclaim()"
               title="These lanes refused because the sensor is nearly full. Free space, then Retry.">Free space on ${outOfSpace.length} lane(s)</button>` : ''}
+          <button class="btn btn-secondary" onclick="CleAttack.answerBook()"
+              title="Exactly what this attack wrote to every lane: the messages, the adversary, and the queries that return them.">Answer book</button>
         </div>
         ${startsIn !== null && startsIn > 0
           ? `<p style="margin-top:.5rem;font-size:.9rem;">Starts on every lane in
@@ -503,6 +505,124 @@
   }
 
   /**
+   * Show what the attack actually wrote, for marking.
+   *
+   * Rendered into the existing reclaim panel rather than a modal: the console
+   * has no modal of its own, and an instructor marking thirty submissions wants
+   * this on screen NEXT TO the lane table, not covering it.
+   */
+  async function answerBook() {
+    if (!activeRunId) return;
+    const box = el('acReclaim');
+    if (box) box.innerHTML = '<p style="font-size:.85rem;color:var(--text-secondary);margin:.5rem 0;">Compiling the answer book...</p>';
+    try {
+      const b = await api('GET', `/courses/${currentCourseId}/attacks/${activeRunId}/answer-book`);
+      lastBook = b;
+      renderAnswerBook(b);
+    } catch (e) {
+      if (box) box.innerHTML = `<p style="margin:.5rem 0;color:#c53030;font-size:.85rem;">${escHtml(e.message)}</p>`;
+    }
+  }
+
+  let lastBook = null;
+
+  /** Plain text, so it can go straight into a grading sheet or an email. */
+  function bookAsText(b) {
+    const L = [];
+    L.push(`ANSWER BOOK - ${b.selection.label || b.selection.mode}`);
+    L.push(`run ${b.run_id}`);
+    L.push(`${b.totals.events_per_lane} events on every lane, over ${b.selection.duration_seconds}s`);
+    L.push('');
+    L.push('ADVERSARY');
+    for (const [k, v] of Object.entries(b.adversary || {})) L.push(`  ${k}: ${v}`);
+    L.push('');
+    L.push('WHAT IT WROTE');
+    for (const a of b.activity) {
+      L.push(`  [${a.level}] ${a.source_type}/${a.source_name} on ${a.hosts.join(', ')} - ${a.event_count} events (${a.first_offset_s}s-${a.last_offset_s}s)`);
+      for (const m of a.messages) L.push(`     x${m.count}  ${m.examples[0]}`);
+    }
+    L.push('');
+    L.push('QUERIES (paste into Discover, set the time range to the run window)');
+    for (const q of b.queries) L.push(`  ${q.kql}\n     expect ${q.expect_events} events - ${q.label}`);
+    if ((b.look_alikes || []).length) {
+      L.push('');
+      L.push('BENIGN LOOK-ALIKES - a student reporting these is not simply wrong');
+      for (const l of b.look_alikes) L.push(`  ${l.source_type}/${l.source_name}${l.technique ? ` (tagged ${l.technique})` : ''} - ${l.why}`);
+    }
+    return L.join('\n');
+  }
+
+  function copyBook() {
+    if (!lastBook) return;
+    const text = bookAsText(lastBook);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(() => toast('Answer book copied'), () => toast('Could not copy', true));
+    } else {
+      // Older browsers in a lab image. A textarea + execCommand still works and
+      // is better than telling the instructor to select it by hand.
+      const ta = document.createElement('textarea');
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); toast('Answer book copied'); }
+      catch (e) { toast('Could not copy', true); }
+      document.body.removeChild(ta);
+    }
+  }
+
+  function renderAnswerBook(b) {
+    const box = el('acReclaim');
+    if (!box) return;
+    const adversary = Object.entries(b.adversary || {})
+      .map(([k, v]) => `<code style="font-size:.78rem;">${escHtml(k)}=${escHtml(String(v))}</code>`).join(' &nbsp; ');
+
+    box.innerHTML = `
+      <div style="margin:.5rem 0;padding:.75rem;border:1px solid var(--border,#ddd);border-radius:6px;">
+        <div style="display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;">
+          <strong style="font-size:.95rem;">Answer book — ${escHtml(b.selection.label || b.selection.mode || '')}</strong>
+          <span style="font-size:.8rem;color:var(--text-secondary);">
+            ${b.totals.events_per_lane} events on every lane · ${b.totals.iocs} indicator(s)</span>
+          <span style="flex:1"></span>
+          <button class="btn btn-secondary" onclick="CleAttack.copyBook()">Copy as text</button>
+        </div>
+        <p style="margin:.5rem 0 .25rem;font-size:.8rem;color:var(--text-secondary);">Adversary</p>
+        <div>${adversary || '<span style="font-size:.8rem;color:var(--text-secondary);">none resolved</span>'}</div>
+
+        <p style="margin:.75rem 0 .25rem;font-size:.8rem;color:var(--text-secondary);">What it wrote</p>
+        ${b.activity.map((a) => `
+          <div style="margin-bottom:.5rem;padding:.4rem .5rem;background:var(--bg-secondary,#f7f7f7);border-radius:4px;">
+            <div style="font-size:.8rem;">
+              <strong>${escHtml(a.source_type)}/${escHtml(a.source_name)}</strong>
+              <span style="color:var(--text-secondary);">
+                ${escHtml(a.level)} · ${a.event_count} events · ${a.first_offset_s}s–${a.last_offset_s}s
+                · ${escHtml(a.hosts.join(', '))}</span>
+            </div>
+            ${a.messages.map((m) => `
+              <div style="font-family:monospace;font-size:.72rem;margin-top:.2rem;color:var(--text-secondary);">
+                <span style="display:inline-block;min-width:3.5rem;">×${m.count}</span>${escHtml(m.examples[0])}
+              </div>`).join('')}
+          </div>`).join('')}
+
+        <p style="margin:.75rem 0 .25rem;font-size:.8rem;color:var(--text-secondary);">
+          Queries — set the time range to the run window, then paste into Discover</p>
+        ${b.queries.length ? b.queries.map((q) => `
+          <div style="margin-bottom:.3rem;font-size:.78rem;">
+            <code style="font-family:monospace;">${escHtml(q.kql)}</code>
+            <span style="color:var(--text-secondary);"> → expect <strong>${q.expect_events}</strong></span>
+          </div>`).join('')
+          : '<p style="font-size:.78rem;color:var(--text-secondary);">No indicator is unique to this run.</p>'}
+
+        ${(b.look_alikes || []).length ? `
+          <p style="margin:.75rem 0 .25rem;font-size:.8rem;color:var(--text-secondary);">
+            Benign look-alikes — a student reporting one of these is not simply wrong</p>
+          ${b.look_alikes.map((l) => `
+            <div style="font-size:.78rem;margin-bottom:.2rem;">
+              <code>${escHtml(l.source_type)}/${escHtml(l.source_name)}</code>
+              ${l.technique ? `<span style="color:#975a16;"> tagged ${escHtml(l.technique)}</span>` : ''}
+              <span style="color:var(--text-secondary);"> — ${escHtml(l.why)}</span>
+            </div>`).join('')}` : ''}
+      </div>`;
+  }
+
+  /**
    * Free disk on every resolvable sensor in the course.
    *
    * Synchronous on purpose. abort() and retry() fire-and-poll because a run
@@ -634,6 +754,8 @@
     abort,
     retry,
     reclaim,
+    answerBook,
+    copyBook,
     setMode(m) { mode = m; selectedId = null; renderShell(); },
     select(id) { selectedId = id; renderShell(); },
     setSearch(v) {
