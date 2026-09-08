@@ -1,129 +1,152 @@
-# Windows network IDS options for CyberCore
+# WinDivert and Suricata on existing Windows VMs
 
-Research verified on **2026-09-07** against Suricata **8.0.6**, its official
-Windows MSI, and the upstream WinDivert documentation. No Suricata executable,
-MSI installer action, or capture driver was run or installed during this review.
+Research verified on **2026-09-07** against the official Suricata **8.0.6**
+packages, stable/development source, and WinDivert documentation. Inspection was
+limited to package extraction, static imports/build strings, file hashes, and
+Authenticode verification. No Suricata executable, installer action, or capture
+driver was run or installed.
 
-For this range, use endpoint Sysmon/PowerShell/Defender telemetry together with
-a shared network sensor. A Linux Suricata sensor receiving mirrored lane traffic
-gives packet visibility without installing a Windows capture driver on every
-student VM. OPNsense IDS is a useful first source for traffic that crosses it;
-it does not observe traffic that stays inside a lane's virtual switch.
+The requested architecture is **each existing Windows VM -> local Suricata EVE
+JSON -> its existing Wazuh agent -> Wazuh**. It needs no additional sensor VM or
+traffic mirror. WinDivert captures that endpoint's IP traffic; it does not give
+one endpoint visibility into every other VM. Sysmon, PowerShell and Defender
+remain complementary endpoint sources.
 
-## Options compared
+## Current package choices
 
-| Option | Npcap needed on student Windows VMs? | Visibility | Practical assessment |
-| --- | --- | --- | --- |
-| Official Windows Suricata MSI with normal live capture | Yes, a compatible live-capture runtime/driver | Traffic reaching that Windows capture interface | Supported Windows capture approach, but requires managing its capture dependency and deployment terms |
-| Official Windows MSI with `--windivert` | Not a working option in the inspected 8.0.6 binary | None: WinDivert support is compiled out | Bundled WinDivert files do not mean the executable supports that backend |
-| Custom Suricata build with WinDivert | Can avoid Npcap live capture when built with the appropriate dependencies | Host IP traffic, or forwarded IP traffic when explicitly configured | Upstream backend is inline; requires a maintained build, matching API/driver, and isolation/performance testing |
-| Custom passive WinDivert integration | No Npcap driver | Host IP packets copied to a capture consumer | Possible engineering work, not a supported passive switch in the inspected Suricata backend |
-| Pktmon capture and offline Suricata analysis on Linux | No | Recorded packets from the selected Windows networking component | Good investigation/teaching option; delayed analysis rather than a continuous IDS |
-| OPNsense Suricata in IDS mode | No | Traffic crossing the selected firewall interface | Fastest shared boundary-monitoring option; lane NAT limits guest attribution |
-| Linux Suricata with mirrored lane traffic | No | The traffic explicitly copied from the chosen virtual bridges/taps | Recommended for scalable, passive visibility into Windows/Linux lab traffic |
+| Option | What is available | Remaining consideration |
+| --- | --- | --- |
+| Ordinary Suricata 8.0.6 Windows MSI | WinDivert disabled; Npcap capture enabled | Uses the conventional Windows capture dependency |
+| Separate Suricata 8.0.6 WinDivert MSI | Official current package; WinDivert enabled | Still imports `wpcap.dll`; bundled driver uses WinDivert 1.4.3 |
+| Build Suricata with WinDivert and without Npcap support | Upstream build options permit selecting different libpcap dependencies | Requires a verified build/runtime package and endpoint compatibility testing |
+| Existing Sysmon/Wazuh only | Endpoint connection and DNS events, plus security detections | Provides metadata, not Suricata packet inspection |
 
-The official Windows build guide identifies Npcap as the live-capture dependency;
-it also describes building with the MSYS2 libpcap implementation for offline
-processing without Npcap. Npcap's vendor provides an OEM silent installer for
-unattended deployment; choose a distribution and license suitable for the range
-before packaging it into automation. [Suricata Windows build guide](https://docs.suricata.io/en/suricata-8.0.6/install/windows.html),
-[Npcap OEM deployment](https://npcap.com/oem/).
+**Correction to the initial research:** the main download page links the ordinary
+MSI, but the official Windows directory also publishes a separate current
+WinDivert MSI and ZIP. A custom build is not inherently required to obtain
+Suricata with WinDivert enabled. The ZIP inspected here contains the MSI, not a
+portable directory of loose binaries. The main page labels 8.0.6 stable and
+7.0.17 end-of-life. [Official releases](https://suricata.io/download/),
+[all official Windows packages](https://www.openinfosecfoundation.org/download/windows/).
 
-## What the current Windows MSI actually contains
+## Static inspection of both 8.0.6 packages
 
-The official download page lists `Suricata-8.0.6-1-64bit.msi`. The downloaded
-artifact was 36,577,280 bytes, with observed SHA-256:
+| Finding | Ordinary MSI | WinDivert MSI |
+| --- | --- | --- |
+| Filename | `Suricata-8.0.6-1-64bit.msi` | `Suricata-8.0.6-windivert-1-64bit.msi` |
+| Size | 36,577,280 bytes | 36,683,776 bytes |
+| Embedded WinDivert build flag | `no` | `yes` |
+| Embedded Npcap build flag | `yes` | `yes` |
+| Main executable imports `wpcap.dll` | Yes | Yes |
+| Main executable imports `WinDivert.dll` | No | Yes |
+| Package supplies `wpcap.dll` | No | No |
+
+Observed SHA-256 hashes, identifying the inspected downloads:
 
 ```text
+Ordinary MSI:
 AC7E2DB129FCBC5136BC15E4A40BEFA6435253523780D5D4E97E3E7B172AB442
+WinDivert MSI:
+60F7D617DE2AD8938D98A25F86F42026E78EDDF665CE3A8059E253C753197574
 ```
 
-This hash identifies the inspected download; it is not a separately published
-vendor signature. [Official Suricata downloads](https://suricata.io/download/),
-[inspected MSI](https://www.openinfosecfoundation.org/download/windows/Suricata-8.0.6-1-64bit.msi).
+These observed hashes are not separately published vendor checksums.
+[Ordinary MSI](https://www.openinfosecfoundation.org/download/windows/Suricata-8.0.6-1-64bit.msi),
+[WinDivert MSI](https://www.openinfosecfoundation.org/download/windows/Suricata-8.0.6-windivert-1-64bit.msi).
 
-Read-only inspection used the Windows Installer database in mode `0`, selected
-CAB file extraction, and static Portable Executable import/string inspection:
+The WinDivert package's `suricata.exe` directly imports both capture libraries.
+Inspection of every bundled DLL found no additional `wpcap.dll` import:
+`WinDivert.dll` itself imports only `ADVAPI32.dll` and `KERNEL32.dll`. Thus the
+pcap-runtime dependency comes from this Suricata build, not from WinDivert itself.
+Windows must resolve that dependency even when selecting `--windivert` or asking
+for `--build-info`. This does **not** prove the Npcap driver is used by WinDivert;
+it means the official MSI is not yet a verified deployment without the external
+pcap runtime. Do not assume copying a different DLL or renaming an unrelated
+libpcap build produces a compatible runtime.
 
-- The MSI File table contains `WinDivert.dll` and `WinDivert64.sys`.
-- The packaged `suricata.exe` directly imports **`wpcap.dll`**.
-- Its embedded build information states **`WinDivert enabled: no`** and
-  **`Npcap support: yes`**, and includes **`WINDIVERT(DISABLED)`**.
-- The MSI File table does not supply `wpcap.dll`, `Packet.dll`, or an Npcap
-  installer. A compatible external capture runtime is still needed.
+The MSI's Authenticode status was **Valid**, signed by Open Information Security
+Foundation Inc. Its extracted executable and `WinDivert.dll` were individually
+**NotSigned**. The bundled `WinDivert64.sys` was **Valid**, signed by Ars Nova
+Systems, with resource version `1.4`. Both the DLL and driver matched the files
+in the official **WinDivert 1.4.3-A** archive byte-for-byte. Signature verification
+on this workstation does not establish driver acceptance under every target
+Windows 11, Secure Boot, or memory-integrity configuration.
+[Official matching WinDivert release](https://github.com/basil00/Divert/releases/tag/v1.4.3).
 
-Therefore, installing the bundled WinDivert driver or copying a newer WinDivert
-DLL beside this executable cannot enable its missing backend. Even invoking
-`--build-info` or offline PCAP mode on this particular binary remains subject to
-Windows resolving its direct DLL imports. The executable was not run; actual
-capture, driver loading, and Windows 11 compatibility were not validated.
+## Stable versus development compatibility
 
-## Why a custom WinDivert build needs care
+Suricata 8.0.6's WinDivert backend uses the 1.x API and its CI builds against
+WinDivert 1.4.3-A. The `main-8.0.x` branch inspected on September 7 still did so.
+Current development `main` has already been ported to the 2.x API and its CI uses
+WinDivert **2.2.2-A**; the current development documentation identifies itself as
+**9.0.0-dev**. This work should not be mistaken for a released 8.0.6 capability.
+Do not replace the stable package's 1.4.3 DLL/driver with 2.2: the receive-call
+argument order and address structure differ.
+[Stable backend](https://github.com/OISF/suricata/blob/suricata-8.0.6/src/source-windivert.c),
+[stable CI](https://github.com/OISF/suricata/blob/suricata-8.0.6/.github/workflows/builds.yml),
+[development backend at the inspected commit](https://github.com/OISF/suricata/blob/928ac012156fb8d393ce5ac4a496fde3c2e87b00/src/source-windivert.c),
+[development CI](https://github.com/OISF/suricata/blob/928ac012156fb8d393ce5ac4a496fde3c2e87b00/.github/workflows/builds.yml).
 
-Suricata's Windows IPS guide describes a separate build with
-`--enable-windivert=yes` and matching include/library paths. Its backend is
-explicitly for inline processing. In the tagged 8.0.6 source, the queue uses
-flags `0`, which diverts packets for processing/reinjection instead of copying
-them for passive observation. Alert-only detection rules do not remove that
-packet-path dependency. [Suricata Windows IPS guide](https://docs.suricata.io/en/suricata-8.0.6/ips/setting-up-ipsinline-for-windows.html),
-[8.0.6 WinDivert backend](https://github.com/OISF/suricata/blob/suricata-8.0.6/src/source-windivert.c#L292).
+Both inspected backends set WinDivert flags to `0`: **inline processing**.
+Packets selected by the filter enter Suricata's receive/verdict/reinjection
+path. Using only alert rules avoids intentional rule-based blocking, but does
+not turn this into passive packet copying. WinDivert itself supports a sniff
+flag; the existing Suricata backend does not expose a passive switch. Changing
+that flag alone without changing reinjection behavior can duplicate traffic.
+[Stable Windows IPS guide](https://docs.suricata.io/en/suricata-8.0.6/ips/setting-up-ipsinline-for-windows.html),
+[WinDivert API and flags](https://www.reqrypt.org/windivert-doc.html#divert_open).
 
-The tagged 8.0.6 CI workflow uses **WinDivert 1.4.3-A**. Current WinDivert
-documentation describes **2.2**, whose `WinDivertRecv` argument order and address
-structure differ from the calls in the 8.0.6 backend. Treat 2.2 as a porting and
-testing task, not a replacement DLL. The old build recipe establishes the API
-used by CI; it does not establish that its driver will load under every current
-Windows 11 security configuration. Do not disable driver-signing or platform
-protections to force an incompatible driver to load.
-[Suricata 8.0.6 build workflow](https://github.com/OISF/suricata/blob/suricata-8.0.6/.github/workflows/builds.yml#L3316),
-[WinDivert 2.2 API](https://www.reqrypt.org/windivert-doc.html#divert_recv).
+## Bounded endpoint pilot path
 
-WinDivert itself supports a sniff flag that copies packets. Suricata's existing
-inline receive/verdict path does not expose that as a passive capture option;
-changing a flag alone without changing reinjection behavior can duplicate traffic.
-A maintained passive adapter would need to handle those semantics, loss/backlog,
-shutdown, and API compatibility. WinDivert also loads a signed kernel driver on
-demand and requires administrative privileges: it avoids Npcap, not capture
-drivers altogether. [WinDivert flags and installation](https://www.reqrypt.org/windivert-doc.html#divert_open).
+1. Use the separate official WinDivert package, verifying its signature and
+   complete DLL dependencies. If avoiding the Npcap runtime is mandatory,
+   evaluate a build linked against the MSYS2 offline libpcap implementation
+   while explicitly enabling WinDivert; do not declare that combination working
+   before a Windows runtime test. Upstream documents the libpcap choice and
+   WinDivert build flags, but that does not validate this exact deployment.
+   [Stable Windows build guide](https://docs.suricata.io/en/suricata-8.0.6/install/windows.html),
+   [development build guide](https://docs.suricata.io/en/latest/install/windows.html).
+2. On one existing test VM, prepare a reviewed configuration, current detection
+   rules, restricted log directory, and bounded EVE rotation. Begin with alert
+   rules and no packet/body/file payload output. The commands below assume this
+   preparation and a working WinDivert-enabled binary; they are not an installer.
+3. Test configuration, then run an elevated foreground pilot. For endpoint
+   traffic, use `--windivert`; `--windivert-forward` is for a Windows gateway.
 
-## Sensor placement in this environment
+```powershell
+$suricata = 'C:\Program Files\Suricata\suricata.exe'
+$config = 'C:\ProgramData\CyberCore\Suricata\suricata.yaml'
+$logs = 'C:\ProgramData\CyberCore\Suricata'
+& $suricata --build-info
+& $suricata -T -c $config -l $logs
+& $suricata -c $config -l $logs --windivert 'true'
+```
 
-The known example lane uses guest addresses **`10.42.59.0/24`** behind gateway
-**`100.100.62.68`**. Its gateway translates outbound traffic before OPNsense sees
-it on `vlan060_lab`. Thus an OPNsense alert sourced from `100.100.62.68` identifies
-the lane gateway; it does not by itself identify VM 610811 or a student.
+`true` selects endpoint IP traffic in both directions. WinDivert loads its kernel
+driver when opened and requires administrator privileges. A foreground pilot
+must verify normal networking, DNS, agent reporting, expected benign detection,
+service stop/restart behavior, and driver acceptance before any unattended
+rollout. [Documented endpoint command](https://docs.suricata.io/en/suricata-8.0.6/ips/setting-up-ipsinline-for-windows.html),
+[WinDivert driver loading](https://www.reqrypt.org/windivert-doc.html#installing).
 
-Keep time-bounded gateway-to-lane ownership history in CyberCore and correlate
-it with endpoint connection events. To observe original guest addresses and
-traffic between guests in the same lane, capture before that translation or
-mirror the relevant virtual bridge/tap traffic to a sensor. A VM attached to a
-switched network does not automatically receive every other guest's packets:
-the mirror must explicitly supply both directions and retain lane identity.
-Overlapping/reused address ranges require the lane/deployment identity as well
-as an IP address. [OPNsense interface and NAT guidance](https://docs.opnsense.org/manual/ips.html#choosing-an-interface).
+Configure Suricata to write regular EVE JSON to `eve.json` in the log directory.
+The existing Wazuh agent can collect it with the following localfile entry;
+preserve unrelated collectors and confirm the actual file path:
 
-For the OPNsense path, begin with **IDS/alert-only capture**, selected rules, and
-EVE syslog forwarding. Its documented EVE syslog option exports alerts; do not
-assume it supplies every DNS, flow, or packet event. Configure the receiving
-collector and verify decoding before using the Wazuh network dashboard.
-[OPNsense Suricata settings](https://docs.opnsense.org/manual/ips.html#general-setup),
+```xml
+<localfile>
+  <log_format>json</log_format>
+  <location>C:\ProgramData\CyberCore\Suricata\eve.json</location>
+</localfile>
+```
+
+Wazuh's Suricata integration demonstrates JSON collection and decoding of EVE
+alerts. Inspect a harmless test alert through the complete endpoint-to-index
+path. EVE flow/DNS metadata is not automatically guaranteed to enter the default
+Wazuh alert index merely because the file is collected.
 [Wazuh Suricata integration](https://documentation.wazuh.com/current/proof-of-concept-guide/integrate-network-ids-suricata.html).
 
-For a short Windows investigation, built-in Pktmon can record traffic and export
-PCAPNG for analysis elsewhere. Select an appropriate capture component to avoid
-counting copies of the same packet at multiple stack layers; the export loses
-some ETL drop/component detail. Apply capture duration/size limits and restricted
-storage because packet payloads can contain sensitive data.
-[Microsoft Pktmon](https://learn.microsoft.com/en-us/windows-server/networking/technologies/pktmon/pktmon),
-[PCAPNG conversion](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/pktmon-etl2pcap).
-
-## Before a broad rollout
-
-Pilot one class with a harmless detection test; confirm the sensor receives the
-intended traffic, the Wazuh decoder preserves source/destination fields, and the
-dashboard distinguishes expected exercises from traffic crossing lane boundaries.
-Measure capture loss, CPU, event volume, disk growth, and detection latency during
-simultaneous class activity. Check encrypted-traffic limits: packet inspection
-does not automatically reveal TLS application payloads. Keep response decisions
-separate from student detections so expected lessons do not trigger blanket
-blocking across a shared lane gateway.
+Before expanding to hundreds of VMs, measure added CPU/RAM, packet loss, network
+latency, EVE volume and index growth during normal class activity. Define service
+startup, rule updates, log rotation and retry/rollback behavior. These are
+remaining deployment tasks, not capabilities installed by this research.
