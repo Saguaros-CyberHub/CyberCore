@@ -844,10 +844,17 @@ async function recoverInterruptedResizes() {
     const { proxmoxAPI, getPowerState } = require('./utils/proxmox');
     const { vmApiBase } = require('./utils/vm-paths');
 
+    // BOTH markers. A resize and a restart write the same shape under different
+    // keys, and both leave a machine powered off if the process dies between the
+    // stop and the start. Missing either one is a student with a dead machine
+    // and nothing anywhere that knows to turn it back on.
     const stranded = await cybercoreQuery(`
-      SELECT lane_id, name, config->'resize'->'in_flight' AS marker
+      SELECT lane_id, name,
+             COALESCE(config->'resize'->'in_flight', config->'restart'->'in_flight') AS marker,
+             (config->'resize'->'in_flight' IS NOT NULL) AS from_resize
         FROM cybercore_lane
-       WHERE config->'resize'->'in_flight' IS NOT NULL
+       WHERE (config->'resize'->'in_flight' IS NOT NULL
+              OR config->'restart'->'in_flight' IS NOT NULL)
          AND status <> 'deleted'
     `);
     if (stranded.rowCount === 0) return;
@@ -855,7 +862,7 @@ async function recoverInterruptedResizes() {
     // Two ways a marker survives: the process died mid-resize, or the resize
     // finished but could not switch the machine back on. Both want the same
     // remedy, so neither is singled out in the message.
-    console.warn(`⚠️  ${stranded.rowCount} lane(s) have a machine left down by a resize — restoring power.`);
+    console.warn(`⚠️  ${stranded.rowCount} lane(s) have a machine left down by a resize or restart — restoring power.`);
 
     for (const row of stranded.rows) {
       const m = row.marker || {};
@@ -870,21 +877,26 @@ async function recoverInterruptedResizes() {
         }
         // The marker is cleared either way. Leaving it would make every
         // subsequent boot retry a start that already happened.
+        // Clear whichever key carried the marker, and only that one.
+        const key = row.from_resize ? 'resize' : 'restart';
+        const note = row.from_resize
+          ? 'A resize did not finish cleanly and the machine was left switched off. '
+            + 'It has been powered back on; its size may not have changed.'
+          : 'A restart did not finish cleanly and the machine was left switched off. '
+            + 'It has been powered back on.';
         await cybercoreQuery(`
           UPDATE cybercore_lane
              SET config = jsonb_set(
                             config,
-                            '{resize}',
-                            (COALESCE(config->'resize', '{}'::jsonb) - 'in_flight')
+                            ARRAY[$2],
+                            (COALESCE(config->$2, '{}'::jsonb) - 'in_flight')
                               || jsonb_build_object(
                                    'status', 'interrupted',
-                                   'error', 'A resize did not finish cleanly and the machine was left '
-                                         || 'switched off. It has been powered back on; its size may '
-                                         || 'not have changed.',
+                                   'error', $3::text,
                                    'at', to_jsonb(NOW()))),
                  updated_at = NOW()
            WHERE lane_id = $1
-        `, [row.lane_id]);
+        `, [row.lane_id, key, note]);
         if (started.length) {
           console.warn(`    ${row.name || row.lane_id}: started vmid ${started.join(', ')}`);
         }

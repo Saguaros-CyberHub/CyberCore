@@ -28,6 +28,7 @@ const {
   buildDeployPreview, buildResizePreview,
 } = require('../../../../../src/middleware/deployment-guards');
 const vmResize = require('../../../../../src/utils/vm-resize');
+const restartUtil = require('../utils/restart');
 const { runBatch } = require('../../../../../src/utils/batch-deployer');
 const laneDeployer = require('../../../../../src/utils/lane-deployer');
 const workstationRedeploy = require('../../../../../src/utils/workstation-lane-redeploy');
@@ -1892,6 +1893,222 @@ router.get('/resize-progress', adminOnly, async (req, res) => {
     }
     const progress = laneProvision.getResizeProgress(courseId, laneId);
     if (!progress) return res.status(404).json({ error: 'No active resize for this course' });
+    res.json(progress);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /restart — Power-cycle the machines on the selected lanes.
+ *
+ * Stop each guest cleanly, then start it again. Nothing is destroyed, nothing
+ * is re-cloned, no configuration changes and the disk is never touched — so
+ * unlike /redeploy this is safe to point at a whole class, and unlike /resize
+ * it commits no cluster resources, which is why it is instructorOnly rather
+ * than adminOnly.
+ *
+ * THE GATEWAY IS NEVER INCLUDED. It is excluded in laneMachines(), not here, so
+ * every caller inherits the rule. Power-cycling it would drop every student's
+ * console, take DHCP away from the machines rebooting alongside it, and fix
+ * nothing — the problem an instructor is restarting to clear is inside the
+ * guests.
+ *
+ * Body:
+ *   {
+ *     lane_ids: [...],           // required
+ *     machines: [{ vmid }],      // optional, narrows to specific machines
+ *     start_stopped: true,       // default true — see below
+ *     confirm: true              // omit for a dry-run summary
+ *   }
+ *
+ * `start_stopped` defaults TRUE, which is the opposite of what /resize does
+ * with a stopped machine, and deliberately so. A resize is a change applied to
+ * whatever is there and must not switch machines on as a side effect; a restart
+ * is asked for to reach a known-good all-up state before a class, and leaving
+ * three machines off because they happened to be off is not that.
+ */
+router.post('/restart', instructorOnly, async (req, res) => {
+  let claimed = null;
+  try {
+    const { courseId } = req.params;
+    const course = await getManagedCourse(courseId, req.user);
+    if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
+
+    const { ids, skipped: badIds } = parseLaneIds(req.body);
+    const startStopped = req.body.start_stopped !== false;
+
+    const found = await laneProvision.findCourseWorkstationLanes(courseId, ids);
+    const foundIds = new Set(found.map(l => l.lane_id));
+    let skipped = badIds.slice();
+    for (const id of ids) {
+      if (!foundIds.has(id)) skipped.push({ lane_id: id, reason: 'not in this course' });
+    }
+    if (!found.length) {
+      return res.status(404).json({
+        error: 'None of the selected lanes are in this course', skipped,
+      });
+    }
+
+    const resolved = restartUtil.resolveRestartTargets(found, {
+      machines: req.body.machines || null,
+    });
+    skipped = skipped.concat(resolved.skipped);
+    if (!resolved.targets.length) {
+      const e = new Error('None of the selected lanes have a machine that can be restarted.');
+      e.status = 409; throw e;
+    }
+
+    // One cluster read for the batch: the live node (a migrated VM's recorded
+    // node is stale) and whether each machine is running, which is what the
+    // dialog's "N will restart" count is built from.
+    let live, liveSkipped;
+    try {
+      ({ live, skipped: liveSkipped } = await restartUtil.attachLiveState(resolved.targets));
+    } catch (e) {
+      const err = new Error(
+        `Could not read the cluster to see where these machines are (${e.message}). Nothing was changed.`);
+      err.status = 503; throw err;
+    }
+    skipped = skipped.concat(liveSkipped);
+    if (!live.length) {
+      const e = new Error('None of the selected machines exist in the cluster.');
+      e.status = 409; throw e;
+    }
+
+    const willCycle = live.filter(t => t.running || startStopped);
+    const summary = {
+      machines: live.length,
+      running: live.filter(t => t.running).length,
+      stopped: live.filter(t => !t.running).length,
+      will_restart: willCycle.length,
+      lanes: [...new Set(live.map(t => t.lane_id))].length,
+      start_stopped: startStopped,
+    };
+
+    // ── step one: a dry run, so the count is seen before it is spent ────────
+    if (req.body.confirm !== true) {
+      return res.json({
+        success: true,
+        preview: true,
+        summary,
+        machines: live.map(t => ({
+          lane_id: t.lane_id, vmid: t.vmid, name: t.name, kind: t.kind,
+          slot: t.slot, node: t.node, running: t.running,
+          student_email: t.student_email,
+        })),
+        ...(skipped.length ? { skipped } : {}),
+      });
+    }
+
+    if (!willCycle.length) {
+      const e = new Error(
+        'Every selected machine is already powered off, and "also power on machines that are off" is unticked.');
+      e.status = 409; throw e;
+    }
+
+    const laneIds = [...new Set(willCycle.map(t => t.lane_id))];
+    const single = laneIds.length === 1 ? laneIds[0] : null;
+
+    // Check and claim in ONE synchronous block, every await already done — the
+    // progress registry is the only mutex this app has.
+    laneProvision.assertNoConflictingWorkstationOperation({ courseId, laneId: single });
+    claimed = single
+      ? laneProvision.progressIdForLane(courseId, single)
+      : laneProvision.progressIdForCourseRestart(courseId);
+    const progress = laneDeployer.initProgress(
+      claimed, `Restart — ${course.course_name}`, willCycle.length);
+    laneDeployer.setPhase(progress, 'preparing', `Restarting ${willCycle.length} machine(s)`);
+    for (const t of willCycle) {
+      progress.lanes[`${t.lane_id}:${t.vmid}`] = {
+        user: t.student_email, vxlan: t.vxlan_id, node: t.node,
+        status: 'pending', workstations: 1, slots: [t.slot], error: null,
+      };
+    }
+
+    const progressUrl =
+      `/api/cle/courses/${courseId}/vms/restart-progress${single ? `?lane_id=${single}` : ''}`;
+
+    audit.batch({
+      req,
+      source: 'cle',
+      action: 'lane.restarted_bulk',
+      targetAction: 'lane.restarted',
+      target: { type: 'course', id: courseId, label: course.course_name },
+      metadata: {
+        course_id: courseId,
+        machine_count: willCycle.length,
+        lane_count: laneIds.length,
+        start_stopped: startStopped,
+        // Nothing is destroyed and no address changes, so there is no
+        // endpoint_changed or data-loss flag to record — which is itself worth
+        // being able to see when tracing "what happened to this class".
+        destructive: false,
+      },
+      targets: laneIds.map(id => {
+        const t = willCycle.find(x => x.lane_id === id);
+        return {
+          id: t.user_id, label: t.student_email,
+          metadata: {
+            course_id: courseId, lane_id: id,
+            vmids: willCycle.filter(x => x.lane_id === id).map(x => x.vmid),
+          },
+        };
+      }),
+    });
+
+    res.status(202).json({
+      success: true,
+      message: `Restarting ${willCycle.length} machine(s) on ${laneIds.length} lane(s)`,
+      count: willCycle.length,
+      summary,
+      lanes: laneIds,
+      progress_id: claimed,
+      progress_url: progressUrl,
+      ...(skipped.length ? { skipped } : {}),
+    });
+
+    const claimedId = claimed;
+    claimed = null;   // ownership handed to the background block
+    const ctx = Object.freeze({ live: willCycle, startStopped, progress });
+
+    (async () => {
+      try {
+        await restartUtil.runRestartBatch(ctx);
+      } catch (e) {
+        console.error('[CLE] Restart batch failed:', e.message);
+        if (ctx.progress) ctx.progress.error = e.message;
+      } finally {
+        laneDeployer.finishProgress(claimedId);
+      }
+    })();
+  } catch (error) {
+    console.error('[CLE] Restart error:', error.message);
+    if (claimed) { laneDeployer.finishProgress(claimed); claimed = null; }
+    if (res.headersSent) return;
+    res.status(error.status || 500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /restart-progress — Live progress for a restart.
+ *
+ * Its own endpoint and registry key rather than sharing /redeploy-progress or
+ * /resize-progress: the client stops polling on phase === 'complete', so
+ * multiplexing would let a finishing rebuild tear down the restart banner.
+ */
+router.get('/restart-progress', instructorOnly, async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    const course = await getManagedCourse(courseId, req.user);
+    if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
+
+    const laneId = req.query.lane_id ? String(req.query.lane_id) : null;
+    if (laneId && !LANE_ID_RE.test(laneId)) {
+      return res.status(400).json({ error: 'lane_id is not a lane id' });
+    }
+    const progress = laneProvision.getRestartProgress(courseId, laneId);
+    if (!progress) return res.status(404).json({ error: 'No active restart for this course' });
     res.json(progress);
   } catch (error) {
     res.status(500).json({ error: error.message });

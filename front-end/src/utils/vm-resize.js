@@ -42,22 +42,16 @@ const {
 } = require('./proxmox');
 const { vmApiBase } = require('./vm-paths');
 const { applyResources } = require('./lane-deployer');
+// stopGuest and the two timeouts moved to ./vm-power when the restart feature
+// needed the identical graceful-shutdown-then-escalate sequence. One copy, so
+// the escalation rule cannot drift between "resize" and "restart".
+const {
+  stopGuest, SHUTDOWN_TIMEOUT_MS, START_TIMEOUT_MS, POWER_CONCURRENCY,
+} = require('./vm-power');
 
 const LOG = '[VM Resize]';
 
-/**
- * How long a guest gets to shut down cleanly before we pull the power.
- *
- * Generous on purpose. A Windows guest mid-update, or one showing a "you have
- * unsaved work" dialog, can sit at the ACPI request for minutes, and hard-
- * stopping it is exactly the case this timeout exists to postpone: the disk
- * survives a power-pull, but whatever was only in memory does not.
- */
-const SHUTDOWN_TIMEOUT_MS = Number(process.env.VM_RESIZE_SHUTDOWN_TIMEOUT_MS) || 180000;
-/** After escalating to a hard stop, qemu should be gone in seconds. */
-const HARD_STOP_TIMEOUT_MS = 60000;
-/** Long enough for a Windows boot; the VM is usable before this elapses. */
-const START_TIMEOUT_MS = Number(process.env.VM_RESIZE_START_TIMEOUT_MS) || 120000;
+
 
 /**
  * How many machines to resize at once inside one batch.
@@ -68,7 +62,7 @@ const START_TIMEOUT_MS = Number(process.env.VM_RESIZE_START_TIMEOUT_MS) || 12000
  * a 30-machine class at ~90s each is 45 minutes serially, and 30 simultaneous
  * Windows boots is a thundering herd on the nodes' CPU.
  */
-const RESIZE_CONCURRENCY = Number(process.env.VM_RESIZE_CONCURRENCY) || 4;
+const RESIZE_CONCURRENCY = Number(process.env.VM_RESIZE_CONCURRENCY) || POWER_CONCURRENCY;
 
 /** The sizing fields this engine will touch. Disk is deliberately absent. */
 const RESIZABLE_FIELDS = ['cores', 'memory_mb'];
@@ -139,41 +133,6 @@ function describeMismatch(after, target, warnings) {
     .filter(f => target[f] != null && Number(after[f]) !== Number(target[f]))
     .map(f => `${f} is ${after[f]}, expected ${target[f]}`);
   return `Proxmox accepted the change but the machine did not take it (${bits.join('; ')})`;
-}
-
-/**
- * Bring a guest to a stop, gracefully first.
- *
- * ACPI/guest-agent shutdown is what lets open files flush and what makes
- * "the student's work is safe" true for work that was only in memory. It is
- * also the request a guest is allowed to ignore, so it cannot be the only
- * attempt — hence the escalation. Leading with `stop` would be simpler and
- * would silently discard unsaved work on every single resize.
- *
- * @returns {Promise<{escalated: boolean}>}
- * @throws if the guest is still running after the hard stop
- */
-async function stopGuest(node, vmid, providerType, onPhase) {
-  const base = vmApiBase(node, vmid, providerType);
-
-  if (onPhase) onPhase('shutting-down');
-  await proxmoxAPI('POST', `${base}/status/shutdown`);
-  try {
-    await waitForPowerState(node, vmid, providerType, 'stopped', { timeoutMs: SHUTDOWN_TIMEOUT_MS });
-    return { escalated: false };
-  } catch (e) {
-    if (e.code !== 'POWER_STATE_TIMEOUT') throw e;
-  }
-
-  // The guest ignored the request. Pull the power — the disk is consistent
-  // either way, but anything unsaved in an open application is gone, which is
-  // why the confirm dialog says so before any of this runs.
-  console.warn(`${LOG} VM ${vmid} ignored the shutdown request after ` +
-    `${Math.round(SHUTDOWN_TIMEOUT_MS / 1000)}s — escalating to a hard stop`);
-  if (onPhase) onPhase('force-stopping');
-  await proxmoxAPI('POST', `${base}/status/stop`);
-  await waitForPowerState(node, vmid, providerType, 'stopped', { timeoutMs: HARD_STOP_TIMEOUT_MS });
-  return { escalated: true };
 }
 
 /**

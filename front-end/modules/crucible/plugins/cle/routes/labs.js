@@ -33,6 +33,7 @@ const { getManagedCourse } = require('../utils/course-access');
 const { resolveTargetStudents, excludeStudentsWithLab, combineExclusions, courseStaffIds } = require('../utils/students');
 const vulnLab = require('../utils/vuln-lab-provision');
 const audit = require('../../../../../src/utils/audit');
+const restartUtil = require('../utils/restart');
 
 const instructorOnly = requireRole('instructor', 'admin');
 
@@ -1474,6 +1475,194 @@ router.post('/:labId/students/bulk-remove', instructorOnly, async (req, res) => 
     // A leaked claim would 409 every future operation on this lab for an hour.
     if (claimed) laneDeployer.finishProgress(claimed);
   }
+});
+
+/**
+ * POST /:labId/restart — Power-cycle THIS environment's machines for the
+ * selected students.
+ *
+ * Stop each guest cleanly, then start it again. Nothing is destroyed and no
+ * flags are touched, so unlike bulk-redeploy this is safe to point at a whole
+ * class: it is the "the DVWA box has wedged again" button, not the "start the
+ * exercise over" one.
+ *
+ * SCOPED TO THIS ENVIRONMENT'S MACHINES, and that is the whole reason this
+ * route exists separately from the VM Management one. In attach mode a
+ * student's lane carries their own Windows workstation, this lab's boxes, and
+ * possibly another lab's — all in one config. resolveRestartTargets filters on
+ * material_id so "restart this environment" cannot power-cycle the student's
+ * workstation as a side effect.
+ *
+ * The gateway is excluded by laneMachines(), as everywhere else.
+ *
+ * Body: { user_ids: [...], start_stopped?: true, confirm?: true }
+ */
+router.post('/:labId/restart', instructorOnly, async (req, res) => {
+  const { courseId, labId } = req.params;
+  let claimed = null;
+  let ctx = null;
+  try {
+    const userIds = parseBulkUserIds(req.body);
+    const startStopped = req.body.start_stopped !== false;
+
+    const course = await getCourse(courseId, req.user);
+    if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
+    const lab = await getOwnedLab(labId, courseId);
+    if (!lab) return res.status(404).json({ error: 'Environment not found in this course' });
+
+    const { students, skipped: studentSkips } = await resolveTargetStudents(courseId, userIds, {
+      extraUserIds: courseStaffIds(course, req.user),
+    });
+    if (!students.length) {
+      return res.status(404).json({
+        error: 'None of the selected students can be acted on in this course',
+        skipped: studentSkips,
+      });
+    }
+    const byUser = new Map(students.map(s => [s.id, s]));
+
+    // Both modes in one read, mirroring teardownLabScoped's pair of queries: a
+    // dedicated lab lane carries config.material_id, an attached one carries the
+    // id inside attached_modules[]. Missing either would silently restart half a
+    // class. jsonb_array_elements rather than a JS scan, for the same reason it
+    // does: a course has dozens of lanes and only some carry this lab.
+    const laneRows = await cybercoreQuery(
+      `SELECT lane_id, vxlan_id, user_id, name, status, config
+         FROM cybercore_lane
+        WHERE status <> 'deleted'
+          AND user_id = ANY($2::uuid[])
+          AND (config->>'material_id' = $1
+               OR (jsonb_typeof(config->'attached_modules') = 'array'
+                   AND EXISTS (
+                     SELECT 1 FROM jsonb_array_elements(config->'attached_modules') AS m
+                      WHERE m->>'material_id' = $1)))`,
+      [labId, students.map(s => s.id)]
+    );
+    const lanes = laneRows.rows.map(r => ({
+      ...r,
+      config: typeof r.config === 'string' ? JSON.parse(r.config || '{}') : (r.config || {}),
+      student_email: (byUser.get(r.user_id) || {}).email || null,
+    }));
+    if (!lanes.length) {
+      return res.status(404).json({
+        error: 'None of the selected students hold this environment',
+        skipped: studentSkips,
+      });
+    }
+
+    const resolved = restartUtil.resolveRestartTargets(lanes, { materialId: labId });
+    let skipped = studentSkips.concat(resolved.skipped);
+    if (!resolved.targets.length) {
+      const e = new Error('None of the selected students have a machine that can be restarted.');
+      e.status = 409; throw e;
+    }
+
+    let live, liveSkipped;
+    try {
+      ({ live, skipped: liveSkipped } = await restartUtil.attachLiveState(resolved.targets));
+    } catch (e) {
+      const err = new Error(
+        `Could not read the cluster to see where these machines are (${e.message}). Nothing was changed.`);
+      err.status = 503; throw err;
+    }
+    skipped = skipped.concat(liveSkipped);
+    if (!live.length) {
+      const e = new Error('None of these machines exist in the cluster.');
+      e.status = 409; throw e;
+    }
+
+    const willCycle = live.filter(t => t.running || startStopped);
+    const summary = {
+      machines: live.length,
+      running: live.filter(t => t.running).length,
+      stopped: live.filter(t => !t.running).length,
+      will_restart: willCycle.length,
+      students: [...new Set(live.map(t => t.user_id))].length,
+      start_stopped: startStopped,
+    };
+
+    if (req.body.confirm !== true) {
+      return res.json({
+        success: true, preview: true, summary,
+        machines: live.map(t => ({
+          lane_id: t.lane_id, vmid: t.vmid, name: t.name, kind: t.kind,
+          node: t.node, running: t.running, student_email: t.student_email,
+        })),
+        ...(skipped.length ? { skipped } : {}),
+      });
+    }
+    if (!willCycle.length) {
+      const e = new Error(
+        'Every selected machine is already powered off, and "also power on machines that are off" is unticked.');
+      e.status = 409; throw e;
+    }
+
+    // Lab-scoped claim, like every other bulk route here: while this runs, no
+    // per-student redeploy or teardown on this environment may start.
+    vulnLab.assertNoConflictingLabOperation({ materialId: labId });
+    claimed = vulnLab.progressIdForLab(labId);
+    const progress = laneDeployer.initProgress(
+      claimed, `Restart — ${lab.content?.title || 'environment'}`, willCycle.length);
+    laneDeployer.setPhase(progress, 'preparing', `Restarting ${willCycle.length} machine(s)`);
+    for (const t of willCycle) {
+      progress.lanes[`${t.lane_id}:${t.vmid}`] = {
+        user: t.student_email, vxlan: t.vxlan_id, node: t.node,
+        status: 'pending', workstations: 1, slots: [], error: null,
+      };
+    }
+
+    audit.batch({
+      req,
+      source: 'cle',
+      action: 'lane.restarted_bulk',
+      targetAction: 'lane.restarted',
+      target: { type: 'material', id: labId },
+      metadata: {
+        course_id: courseId, material_id: labId,
+        machine_count: willCycle.length, student_count: summary.students,
+        start_stopped: startStopped, destructive: false,
+      },
+      targets: students
+        .filter(s => willCycle.some(t => t.user_id === s.id))
+        .map(s => ({
+          id: s.id, label: s.email,
+          metadata: {
+            course_id: courseId, material_id: labId,
+            vmids: willCycle.filter(t => t.user_id === s.id).map(t => t.vmid),
+          },
+        })),
+    });
+
+    res.status(202).json({
+      success: true,
+      message: `Restarting ${willCycle.length} machine(s) for ${summary.students} student(s)`,
+      lab_id: labId,
+      count: willCycle.length,
+      summary,
+      ...(skipped.length ? { skipped } : {}),
+      progress_url: `/api/cle/courses/${courseId}/labs/${labId}/progress`,
+    });
+
+    ctx = Object.freeze({ live: willCycle, startStopped, progress });
+  } catch (error) {
+    console.error('[CLE] Environment restart error:', error.message);
+    if (claimed) { laneDeployer.finishProgress(claimed); claimed = null; }
+    if (res.headersSent) return;
+    return res.status(error.status || 500).json({ error: error.message });
+  }
+
+  // ── background ───────────────────────────────────────────────────────────
+  const claimedId = claimed;
+  (async () => {
+    try {
+      await restartUtil.runRestartBatch(ctx);
+    } catch (e) {
+      console.error('[CLE] Environment restart batch failed:', e.message);
+      if (ctx.progress) ctx.progress.error = e.message;
+    } finally {
+      laneDeployer.finishProgress(claimedId);
+    }
+  })();
 });
 
 /**

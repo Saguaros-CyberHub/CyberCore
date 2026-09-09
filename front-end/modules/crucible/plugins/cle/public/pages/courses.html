@@ -2566,12 +2566,12 @@
             + (hidden
                 ? ' <span class="bulk-hidden-note">(' + hidden + ' hidden by search)</span>'
                 : ' of ' + total)
-          : (_canResize() ? 'Select lanes to resize, redeploy or delete'
-                            : 'Select lanes to redeploy or delete');
+          : (_canResize() ? 'Select lanes to restart, resize, redeploy or delete'
+                            : 'Select lanes to restart, redeploy or delete');
       }
       // vmBulkResizeBtn is absent for a non-admin — getElementById returns null
       // and the guard below already handles that, so no separate branch.
-      ['vmBulkResizeBtn', 'vmBulkRedeployBtn', 'vmBulkDeleteBtn', 'vmClearBtn'].forEach(id => {
+      ['vmBulkRestartBtn', 'vmBulkResizeBtn', 'vmBulkRedeployBtn', 'vmBulkDeleteBtn', 'vmClearBtn'].forEach(id => {
         const b = document.getElementById(id);
         // _vmBulkBusy outranks the count: a re-render mid-flight must not
         // re-enable a button the in-flight operation has taken.
@@ -2675,6 +2675,9 @@
               onclick="selectVMErrorLanes()">Select ${errCount} broken lane${errCount === 1 ? '' : 's'}</button>` : ''}
           <button type="button" class="btn btn-sm btn-outline" id="vmClearBtn"
                   onclick="clearVMSelection()"${dis}>Clear</button>
+          <button type="button" class="btn btn-sm btn-outline" id="vmBulkRestartBtn"
+                  title="Power every machine off and on again — the gateway is left running"
+                  onclick="bulkRestartLanes(this)"${dis}>Restart</button>
           ${_canResize() ? `<button type="button" class="btn btn-sm btn-outline" id="vmBulkResizeBtn"
                   title="Change CPU and memory without losing anything on the machines"
                   onclick="bulkResizeLanes(this)"${dis}>Resize</button>` : ''}
@@ -2958,7 +2961,7 @@
             + (hidden
                 ? ' <span class="bulk-hidden-note">(' + hidden + ' hidden by search)</span>'
                 : ' of ' + total)
-          : 'Select students to redeploy or tear down';
+          : 'Select students to restart, redeploy or tear down';
       }
       document.querySelectorAll(`#vulnerableLabsContent .lab-bulk-btn${sel}`).forEach(b => {
         // _labBulkBusy outranks the count: a re-render mid-flight must not
@@ -3177,7 +3180,7 @@
             html += `<div class="vm-bulkbar" style="margin-top:0.75rem;">
               <span class="vm-bulkbar-count lab-bulk-count" ${labAttr} aria-live="polite">
                 ${selN ? `<strong>${selN}</strong> of ${selTotal} student${selTotal === 1 ? '' : 's'} selected`
-                      : 'Select students to redeploy or tear down'}
+                      : 'Select students to restart, redeploy or tear down'}
               </span>
               <span style="flex:1"></span>
               ${brokenN ? `<button type="button" class="btn btn-sm btn-outline" ${labAttr}
@@ -3185,6 +3188,9 @@
                     onclick="selectBrokenLabRows(this)">Select ${brokenN} broken</button>` : ''}
               <button type="button" class="btn btn-sm btn-outline lab-bulk-btn" ${labAttr}
                       onclick="clearLabSelection(this.dataset.labId)"${labDis}>Clear</button>
+              <button type="button" class="btn btn-sm btn-outline lab-bulk-btn" ${labAttr}
+                      title="Power this environment's machines off and on again — nothing is rebuilt"
+                      onclick="bulkRestartStudentLabs(this)"${labDis}>Restart</button>
               <button type="button" class="btn btn-sm btn-outline lab-bulk-btn" ${labAttr}
                       style="color:var(--primary-light, #1e5288);border-color:var(--primary-light, #1e5288);"
                       onclick="bulkRedeployStudentLabs(this)"${labDis}>Redeploy</button>
@@ -5533,6 +5539,190 @@
         // below is the durable record either way.
         banner.style.display = 'none';
         loadVMManagement();
+      }
+    }
+
+    // ── restart (power off / power on, non-destructive) ──────────────────────
+    //
+    // Deliberately NOT a modal. A restart has exactly one decision in it — what
+    // to do about machines that are already off — and that fits in Confirm's
+    // checkbox. The two-step is still there (a preview call, then the commit)
+    // because the counts in the dialog have to be real: "restart 84 machines"
+    // and "restart 84 machines, 3 of which are currently off" are different
+    // things to agree to, and only the server knows which it is.
+
+    /**
+     * The confirm body, shared by both tabs.
+     *
+     * Leads with what does NOT happen, because this button sits next to
+     * Redeploy and Tear down and nobody reads a dialog carefully enough to
+     * notice which one they opened. Then the gateway, because "will this break
+     * the links I sent my students" is the first thing an instructor thinks and
+     * the answer is no.
+     */
+    function _restartConfirmBody(s, whoLine) {
+      const running = s.running || 0;
+      const stopped = s.stopped || 0;
+      return `Each machine is shut down cleanly and started again — about a minute or two `
+        + `each. Nothing is deleted and nothing is rebuilt: files, installed software and `
+        + `configuration are all exactly as they were, and captured flags are untouched. `
+        + `The lane gateway is NOT restarted, so every console address, port and link keeps `
+        + `working. `
+        + (running ? `${running} machine${running === 1 ? ' is' : 's are'} running now and will `
+            + `restart, so anyone connected is disconnected and can reconnect once it is back. `
+            + `Work already saved to disk is kept; anything unsaved in an open application may `
+            + `not be. ` : '')
+        + (stopped ? `${stopped} ${stopped === 1 ? 'is' : 'are'} currently powered off. ` : '')
+        + whoLine;
+    }
+
+    /** The "also power on the ones that are off" checkbox, when it applies. */
+    function _restartCheckbox(s) {
+      const stopped = s.stopped || 0;
+      if (!stopped) return null;
+      return {
+        label: `Also power on the ${stopped} machine${stopped === 1 ? '' : 's'} that `
+             + `${stopped === 1 ? 'is' : 'are'} currently off`,
+        checked: true,
+      };
+    }
+
+    /**
+     * Restart the machines on the selected lanes (VM Management tab).
+     *
+     * Instructor-visible, unlike Resize. A restart commits no cluster resources
+     * and destroys nothing, so an instructor unsticking their own class does not
+     * need to find an admin.
+     */
+    async function bulkRestartLanes(btn) {
+      if (_vmBulkBusy) return;
+      const rows = _selectedVMRows();
+      if (!rows.length) return;
+      const courseId = currentCourseId;
+      const laneIds = rows.map(v => v.lane_id);
+
+      _vmBulkBusy = true; _syncVMBulkBar();
+      try {
+        Utils.setBtnLoading(btn, true, 'Checking…');
+        const pv = await api('POST', `/courses/${courseId}/vms/restart`, { lane_ids: laneIds });
+        Utils.setBtnLoading(btn, false);
+
+        const s = pv.summary || {};
+        const r = await Confirm.show({
+          title: `Restart ${s.machines} machine${s.machines === 1 ? '' : 's'}?`,
+          message: _restartConfirmBody(s, `Restarting: ${_vmSelectionNames(rows)}.`),
+          confirmText: `Restart ${s.machines} machine${s.machines === 1 ? '' : 's'}`,
+          checkbox: _restartCheckbox(s),
+        });
+        if (!r) return;
+        // Confirm resolves `true` with no checkbox and `{checked}` with one.
+        const startStopped = s.stopped ? !!r.checked : true;
+
+        Utils.setBtnLoading(btn, true, 'Starting…');
+        const res = await api('POST', `/courses/${courseId}/vms/restart`, {
+          lane_ids: laneIds, start_stopped: startStopped, confirm: true,
+        });
+        // Dim the per-row buttons NOW rather than waiting for the server, the
+        // same reason the redeploy path does: the gap is several seconds of live
+        // buttons aimed at machines that are already going down.
+        (res.lanes || laneIds).forEach(id => _vmBusyLanes.add(id));
+        toast(res.message || 'Restart started');
+        (res.skipped || []).slice(0, 3).forEach(sk =>
+          toast(`Skipped ${sk.lane_id}: ${sk.reason}`, true));
+        if (res.progress_url) pollRestartProgress(res.progress_url);
+      } catch (e) {
+        toast('Error restarting: ' + e.message, true);
+      } finally {
+        _vmBulkBusy = false;
+        Utils.setBtnLoading(btn, false);   // BEFORE the reload detaches btn
+        if (currentCourseId === courseId) { clearVMSelection(); loadVMManagement(); }
+      }
+    }
+
+    let _vmRestartProgressTimer = null;
+
+    /**
+     * Poll a restart, into the SAME banner the deploy, rebuild and resize use.
+     *
+     * A FOURTH timer. All four read different registry keys and each stops on
+     * phase === 'complete', so sharing a poller would let whichever finishes
+     * first hide another's banner. The banner element is re-read on every tick
+     * because #provisionProgressBanner lives inside #vmManagementContent, which
+     * loadVMManagement() replaces on its own 8s poll.
+     */
+    async function pollRestartProgress(url) {
+      clearTimeout(_vmRestartProgressTimer);
+      const banner = document.getElementById('provisionProgressBanner');
+      if (!banner) return;
+      try {
+        const p = await api('GET', url.replace(/^\/api\/cle/, ''));
+        banner.style.display = 'block';
+        const eta = p.eta_s ? ` &middot; ~${Math.ceil(p.eta_s / 60)} min left` : '';
+        banner.innerHTML =
+          `<strong>${escHtml(p.error || p.phase_detail || p.phase || 'Restarting')}</strong> &mdash; `
+          + `${p.completed}/${p.total} complete (${p.succeeded} ok, ${p.failed} failed)${eta}`;
+        if (p.phase !== 'complete') {
+          _vmRestartProgressTimer = setTimeout(() => pollRestartProgress(url), 5000);
+        } else {
+          toast(p.failed
+            ? `Restart finished with ${p.failed} failure(s) — check those machines`
+            : 'Restart complete');
+          setTimeout(() => { banner.style.display = 'none'; }, 8000);
+          loadVMManagement();
+        }
+      } catch (e) {
+        banner.style.display = 'none';
+      }
+    }
+
+    /**
+     * Restart ONE environment's machines for the selected students.
+     *
+     * Scoped to this environment server-side (material_id), so a student's own
+     * workstation on the same lane is not power-cycled as a side effect.
+     */
+    async function bulkRestartStudentLabs(btn) {
+      if (_labBulkBusy) return;
+      const labId = btn.dataset.labId;
+      const rows = _selectedLabRows(labId);
+      if (!rows.length) return;
+      const courseId = currentCourseId;
+      const userIds = rows.map(d => d.user_id);
+
+      _labBulkBusy = true; _syncLabBulkBar(labId);
+      try {
+        Utils.setBtnLoading(btn, true, 'Checking…');
+        const pv = await api('POST', `/courses/${courseId}/labs/${labId}/restart`, {
+          user_ids: userIds,
+        });
+        Utils.setBtnLoading(btn, false);
+
+        const s = pv.summary || {};
+        const r = await Confirm.show({
+          title: `Restart ${s.machines} machine${s.machines === 1 ? '' : 's'}?`,
+          message: _restartConfirmBody(s,
+            `Only this environment's machines are restarted — each student's own `
+            + `workstation is left alone. Restarting for: ${_labSelectionNames(rows)}.`),
+          confirmText: `Restart ${s.machines} machine${s.machines === 1 ? '' : 's'}`,
+          checkbox: _restartCheckbox(s),
+        });
+        if (!r) return;
+        const startStopped = s.stopped ? !!r.checked : true;
+
+        Utils.setBtnLoading(btn, true, 'Starting…');
+        const res = await api('POST', `/courses/${courseId}/labs/${labId}/restart`, {
+          user_ids: userIds, start_stopped: startStopped, confirm: true,
+        });
+        toast(res.message || 'Restart started');
+        (res.skipped || []).slice(0, 3).forEach(sk =>
+          toast(`Skipped ${sk.user_id || sk.lane_id}: ${sk.reason}`, true));
+        if (res.progress_url) pollLabProgress(labId, null);
+      } catch (e) {
+        toast('Error restarting: ' + e.message, true);
+      } finally {
+        _labBulkBusy = false;
+        Utils.setBtnLoading(btn, false);
+        if (currentCourseId === courseId) { clearLabSelection(labId); loadVulnerableLabs(); }
       }
     }
 

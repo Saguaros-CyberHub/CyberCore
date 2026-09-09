@@ -70,6 +70,23 @@ function progressIdForCourseResize(courseId) {
 }
 
 /**
+ * Progress key for a course-scope RESTART.
+ *
+ * Its own key for the same reason the resize has one: the client stops polling
+ * a progress URL the moment it reads phase === 'complete', so sharing a key
+ * with the rebuild or the resize would let whichever finishes first tear down
+ * the other's banner. The MUTEX still treats all three as course scope, so they
+ * refuse to run together.
+ *
+ * IF YOU ADD ANOTHER KEY IN THIS FAMILY, ADD ITS ARM TO courseOperationsInFlight
+ * BELOW — a key without a matching arm is not a new scope, it is an operation
+ * the mutex cannot see at all.
+ */
+function progressIdForCourseRestart(courseId) {
+  return `${progressIdForCourse(courseId)}-restart`;
+}
+
+/**
  * Progress key for an operation on ONE lane, so two instructors fixing two
  * students do not block each other — and, more importantly, do not share an
  * entry. initProgress replaces the entry wholesale, so a shared key means the
@@ -115,6 +132,10 @@ function courseOperationsInFlight(courseId) {
     // a bulk delete or provision running underneath it would be enumerating or
     // creating the very lanes it is power-cycling.
     else if (suffix === '-resize') scope = 'course';
+    // Course-scope as well: a restart powers machines off and on, and a bulk
+    // delete or a rebuild running underneath it would be destroying or
+    // re-cloning the very guests it is power-cycling.
+    else if (suffix === '-restart') scope = 'course';
     else if (suffix.startsWith('-lane-')) { scope = 'lane'; laneId = suffix.slice('-lane-'.length); }
     // Anything else shares our prefix without belonging to this family. A
     // fixed-length UUID cannot prefix another, so this is unreachable today —
@@ -315,6 +336,13 @@ function getResizeProgress(courseId, laneId = null) {
   );
 }
 
+/** Live progress for a restart, or null once it has aged out. */
+function getRestartProgress(courseId, laneId = null) {
+  return laneDeployer.readProgress(
+    laneId ? progressIdForLane(courseId, laneId) : progressIdForCourseRestart(courseId)
+  );
+}
+
 /**
  * Every WORKSTATION lane of a course, or just the named ones.
  *
@@ -387,11 +415,13 @@ module.exports = {
   progressIdForCourse,
   progressIdForCourseRebuild,
   progressIdForCourseResize,
+  progressIdForCourseRestart,
   progressIdForLane,
   courseOperationsInFlight,
   assertNoConflictingWorkstationOperation,
   getRebuildProgress,
   getResizeProgress,
+  getRestartProgress,
   findCourseWorkstationLanes,
   provisionLanes,
   getProvisionProgress,

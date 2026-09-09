@@ -289,13 +289,13 @@ test('every extraUserIds in labs.js is the shared staff set, not the caller', ()
     .map(m => m[1].trim().replace(/,$/, ''));
   // deploy, per-student teardown, planStudentRedeploy (shared by the
   // per-student and bulk redeploy routes), bulk teardown, per-machine rebuild,
-  // bulk per-machine rebuild.
+  // bulk per-machine rebuild, environment restart.
   //
   // The count is a census, not a limit: the loop below already enforces that
   // every site passes the same staff set. What it catches is a NEW site being
   // added without anyone looking at this rule -- so when it trips, confirm the
   // new site is in the list above and then update the number.
-  assert.strictEqual(extras.length, 6, `expected 6 extraUserIds sites, found ${extras.length}`);
+  assert.strictEqual(extras.length, 7, `expected 7 extraUserIds sites, found ${extras.length}`);
   for (const e of extras) {
     assert.strictEqual(e, 'courseStaffIds(course, req.user)',
       `an extraUserIds site passes ${e} — every site must pass the same staff set`);
