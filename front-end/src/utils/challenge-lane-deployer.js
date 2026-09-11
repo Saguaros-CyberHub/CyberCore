@@ -92,6 +92,10 @@ const { findGoadHostMismatch, findVmOffsetCollision } = require('./topology-vali
 
 const GATEWAY_VMID_OFFSET = 100000;   // gateway LXC = 100000 + vxlanId
 const TEMP_GW_TEMPLATE_BASE = 169200; // per-node temp gateway template copies
+// Pause before re-cloning a gateway. Sized for the udev symlink race in
+// cloneGatewayWithRecovery, which resolves in milliseconds -- seconds are
+// generous, and only a lane that already failed once ever waits.
+const GATEWAY_CLONE_RETRY_MS = 5000;
 // DEFAULT_VM_OFFSET moved to lane-networking so topology-validate can use it
 // without importing a deployer. Re-exported below; still 600000.
 
@@ -845,6 +849,96 @@ async function cloneGateway(job, sourceNode, sourceVmid, ctx) {
   await configureLaneTailscale({
     subnetScheme, vxlanId, wanIp: net.wan.ip.split('/')[0], laneName, claimSecret, logTag,
   });
+}
+
+/**
+ * Clone one lane gateway, surviving a transient failure on the target node.
+ *
+ * THE FAILURE THIS EXISTS FOR
+ * `pct clone` maps the source RBD image and immediately mounts
+ * /dev/rbd-pve/<fsid>/<pool>/<image> to copy from it. That path is a SYMLINK
+ * created by udev (50-rbd-pve.rules -> ceph-rbdnamer-pve), not by the kernel, so
+ * there is a race between the map and the symlink appearing. Most nodes win it.
+ * A node under heavy load -- measured on one doing 282 MiB/s of Ceph backfill --
+ * loses it, and every clone scheduled there dies instantly with
+ *
+ *     mount: ... fsconfig() failed: /dev/rbd-pve/.../vm-<id>-disk-0:
+ *            Can't lookup blockdev ... exit code 32
+ *
+ * The symlink DOES appear a moment later, so the same clone succeeds on a second
+ * attempt. Before this, one such node failed every lane scheduled onto it while
+ * ten other nodes were healthy -- and node-selector kept choosing it, because a
+ * backfilling node has idle CPU and free RAM and therefore scores BEST.
+ *
+ * Three attempts, in this order:
+ *   1. the node-local replica    (fast path, no cross-node copy)
+ *   2. the same source again     (beats the udev race)
+ *   3. the ORIGIN template       (cross-node; survives a node-local replica that
+ *                                 is itself unreadable)
+ *
+ * Step 3 is the gap that made this fatal rather than slow:
+ * replicateGatewayTemplate already falls back to the origin when REPLICATION
+ * throws, but a clone that fails from a SUCCESSFUL replica had no fallback at
+ * all, so the lane simply died.
+ *
+ * The target VMID is cleared between attempts. A failed clone usually removes
+ * its own destination image, but "usually" is not something a retry can be built
+ * on -- a survivor makes attempt 2 fail with "CT already exists", which reads as
+ * a completely different fault.
+ *
+ * @returns {Promise<{attempts:number, usedOrigin:boolean}>}
+ */
+async function cloneGatewayWithRecovery({
+  job, node, localTemplateId, gwSourceNode, gatewayVmid, ctx, logTag,
+  // Injectable so the test can exercise the ladder without sleeping through it.
+  // Production never passes this.
+  retryMs = GATEWAY_CLONE_RETRY_MS,
+}) {
+  const gatewayVmId = GATEWAY_VMID_OFFSET + job.vxlanId;
+  const isReplica = localTemplateId !== gatewayVmid;
+
+  // Each attempt is [sourceNode, sourceVmid]. The origin attempt is only
+  // meaningful when we were using a replica -- otherwise it is the same clone a
+  // third time, which is just a slower failure.
+  const plan = [
+    [isReplica ? node : gwSourceNode, localTemplateId],
+    [isReplica ? node : gwSourceNode, localTemplateId],
+  ];
+  if (isReplica) plan.push([gwSourceNode, gatewayVmid]);
+
+  let lastErr = null;
+  for (let i = 0; i < plan.length; i++) {
+    const [sourceNode, sourceVmid] = plan[i];
+    if (i > 0) {
+      // Clear a partial clone, then pause. The pause is the point on attempt 1->2:
+      // the udev symlink lands in milliseconds, so anything measured in seconds
+      // is ample, and this path is already the slow one.
+      await forceDestroyVM(gatewayVmId, 'lxc', job.targetNode).catch(() => {});
+      await new Promise(r => setTimeout(r, retryMs));
+      console.warn(
+        `${logTag} Gateway clone attempt ${i + 1}/${plan.length} for ${job.user.email} ` +
+        `from ${sourceVmid}@${sourceNode}` +
+        (sourceVmid === gatewayVmid && isReplica ? ' (falling back to the origin template)' : '') +
+        ` — previous attempt: ${lastErr && lastErr.message}`
+      );
+    }
+    try {
+      await cloneGateway(job, sourceNode, sourceVmid, ctx);
+      return { attempts: i + 1, usedOrigin: sourceVmid === gatewayVmid && isReplica };
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+
+  // Every attempt failed. Name what was tried, so the next reader is not left
+  // deducing it from the one error string Proxmox returned.
+  const e = new Error(
+    `${lastErr && lastErr.message} (after ${plan.length} attempts on ${node}` +
+    (isReplica ? ', including a fallback to the origin template' : '') + ')'
+  );
+  e.attempts = plan.length;
+  e.node = node;
+  throw e;
 }
 
 // ── phase 2: per-lane VMs ────────────────────────────────────────────────────
@@ -2754,15 +2848,29 @@ async function deployChallengeLanesInner({
 
   await Promise.all(Object.entries(jobsByNode).map(async ([node, nodeJobs]) => {
     const localTemplateId = gwTemplateByNode[node];
-    // When replication fell back to the origin template, clone across nodes from
-    // where it actually lives; otherwise the node-local copy is the source.
-    const sourceNode = localTemplateId === gatewayVmid ? gwSourceNode : node;
+    // A node that has just failed a gateway clone for a reason that is not
+    // lane-specific -- a lost udev race, a wedged storage path -- will fail the
+    // next one the same way. Once one lane here has had to fall back to the
+    // origin template, send the rest of this node's lanes straight there rather
+    // than paying the full retry ladder per student.
+    let preferOrigin = false;
+
     for (const job of nodeJobs) {
       try {
-        await cloneGateway(job, sourceNode, localTemplateId, ctx);
+        const r = await cloneGatewayWithRecovery({
+          job, node, gwSourceNode, gatewayVmid, ctx, logTag,
+          localTemplateId: preferOrigin ? gatewayVmid : localTemplateId,
+        });
+        if (r.usedOrigin) preferOrigin = true;
         gatewayResults[job.laneId] = { success: true };
-        console.log(`${logTag} Gateway ${GATEWAY_VMID_OFFSET + job.vxlanId} cloned on ${node}`);
+        console.log(
+          `${logTag} Gateway ${GATEWAY_VMID_OFFSET + job.vxlanId} cloned on ${node}` +
+          (r.attempts > 1 ? ` (attempt ${r.attempts}${r.usedOrigin ? ', via the origin template' : ''})` : '')
+        );
       } catch (err) {
+        // The node itself is suspect now, so the lanes behind this one skip
+        // straight to the origin rather than repeating a ladder that just failed.
+        preferOrigin = true;
         console.error(`${logTag} Gateway clone failed for ${job.user.email}: ${err.message}`);
         gatewayResults[job.laneId] = { success: false, error: err.message };
       }
@@ -3258,6 +3366,10 @@ module.exports = {
   KALI_TEMPLATE_VMID,
   parseSpec,
   resolveSpecVms,
+  // Exported for test/gateway-clone-recovery.test.js — the retry ladder is the
+  // difference between a transient node fault costing a lane and costing seconds.
+  cloneGatewayWithRecovery,
+  GATEWAY_CLONE_RETRY_MS,
   resolveConsolePlan,
   resolveSpecAddressing,
   resolveGoadExternalPins,
