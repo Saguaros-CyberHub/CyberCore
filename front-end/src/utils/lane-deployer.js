@@ -996,6 +996,11 @@ async function waitForGatewayFirstboot(node, gatewayVmid, { timeoutMs = 180000 }
       // key into a class-wide stall. Anything that names a broken channel stops
       // immediately; everything else gets a few retries.
       lastErr = e;
+      // "container not running" is the DEFINITION of not-ready-yet, not a broken
+      // channel. Counting it toward the give-up budget is what made a slow boot
+      // look like an unreachable node: five of these inside 15s and the probe
+      // abandoned a gateway that was still starting.
+      if (/not running/i.test(e.message)) continue;
       consecutiveErrors++;
       const fatal = /missing or unreadable|permission denied|could not resolve|connection refused|no route to host/i
         .test(e.message);
@@ -1727,7 +1732,71 @@ async function cloneGateway(job) {
   await configureLaneTailscale({
     subnetScheme, vxlanId, wanIp: net.wan.ip.split('/')[0], laneName, claimSecret, logTag: LOG,
   });
-  await proxmoxAPI('POST', `${vmApiBase(targetNode, gatewayVmid, 'lxc')}/status/start`);
+  // AWAIT the start task. The POST returns a UPID and the start happens
+  // asynchronously, so without this the code races its own container: probing
+  // begins while the LXC is still booting, `pct exec` answers
+  // "container not running", and waitForGatewayFirstboot spends its 5-error
+  // budget in ~15s on a gateway that was always going to come up.
+  //
+  // For most courses that only costs a warning. For a MALWARE profile it is
+  // fatal -- cloneGateway's caller refuses to start workstations against a
+  // gateway whose isolation config was never verified -- so a lane failed
+  // outright for a gateway that boots fine by hand. Awaiting also surfaces a
+  // genuine start failure with Proxmox's own error instead of as a later,
+  // unrelated-looking SSH fault.
+  const startUpid = await proxmoxAPI('POST', `${vmApiBase(targetNode, gatewayVmid, 'lxc')}/status/start`);
+  if (startUpid) await waitForTask(targetNode, startUpid, 120000).catch((e) => {
+    // Not fatal on its own: the status poll below is the authority on whether it
+    // actually came up, and a task that reports oddly is not proof that it did not.
+    console.warn(`${LOG} Gateway ${gatewayVmid} start task on ${targetNode}: ${e.message}`);
+  });
+
+  // Confirm it actually RUNS before waiting on anything inside it.
+  //
+  // Without this a gateway that fails to boot costs three minutes and then
+  // reports something else entirely: waitForGatewayFirstboot probes over
+  // `pct exec`, every probe fails because the container is stopped, it gives up
+  // at its 180s timeout WITHOUT throwing (deliberately — a slow firstboot is
+  // survivable), and the failure finally surfaces from
+  // applyGatewayWorkstationAccess as
+  //
+  //     nodeExec exit 255 ... pct exec <id> -- /bin/sh -c mkdir -p /etc/dnsmasq.d
+  //     container '<id>' not running!
+  //
+  // which reads as an SSH or dnsmasq fault rather than a gateway that never
+  // started. Fail here instead, in seconds, naming the actual thing.
+  // Fail on EVIDENCE, never on its absence. Proxmox reports {status:'stopped'}
+  // for a container that did not start, so a definite non-running status is
+  // grounds to stop; a response we cannot read is not, and blocking on one would
+  // make every caller that mocks this endpoint wait out the whole budget.
+  let gwRunning = false;
+  let lastStatus = null;
+  let statusReadable = true;
+  for (let i = 0; i < 15; i++) {
+    let st = null;
+    try {
+      st = await proxmoxAPI('GET', `${vmApiBase(targetNode, gatewayVmid, 'lxc')}/status/current`);
+    } catch (_) { /* the node may still be settling the clone; keep polling */ }
+    const cur = st && typeof st.status === 'string' ? st.status : null;
+    if (cur === 'running') { gwRunning = true; break; }
+    if (cur === null) { statusReadable = false; break; }
+    lastStatus = cur;
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  if (!gwRunning && statusReadable) {
+    throw new Error(
+      `Lane gateway ${gatewayVmid} on ${targetNode} is '${lastStatus}', not running, after start. ` +
+      `Nothing inside it can be configured, so the lane would come up with no DHCP and no ` +
+      `console. Check \`pct start ${gatewayVmid}\` on ${targetNode} and its task log.`
+    );
+  }
+  if (!statusReadable) {
+    console.warn(
+      `${LOG} Could not read gateway ${gatewayVmid} status on ${targetNode} — continuing; ` +
+      `waitForGatewayFirstboot will report if it is not actually up.`
+    );
+  }
+
   // Wait for the gateway's OWN boot-time config to land before the caller writes
   // the lane's reservations and DNATs over the top of it — see
   // waitForGatewayFirstboot for what happens when these two interleave.

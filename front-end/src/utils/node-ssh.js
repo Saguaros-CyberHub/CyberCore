@@ -131,19 +131,35 @@ function nodeExec(node, args, opts = {}) {
       clearTimeout(t);
       if (killed) return reject(new Error(`nodeExec timed out after ${timeoutMs}ms on ${node}: ${args.join(' ')}`));
       if (code !== 0) {
-        // 255 is ssh's OWN failure code — it never reached the remote command,
-        // so nothing about the command text is the cause. The common reason on
-        // this cluster is a node that exists in Proxmox but not in site.json:
-        // node-selector picks targets from the LIVE cluster API, so a newly
-        // joined node is schedulable the moment it joins, while everything that
-        // opens a socket to it resolves through physical_cluster_ips. Until that
-        // map is updated, ssh gets a bare hostname its resolvers cannot answer
-        // and the failure reads like a broken command.
+        // 255 is AMBIGUOUS, and assuming otherwise is how this hint used to
+        // mislead. ssh returns 255 for its OWN failures (unresolvable host, auth
+        // refused, connection closed) -- but it also returns whatever the remote
+        // command returned, and `pct exec` against a stopped container exits 255
+        // too. A real case: a gateway that failed to boot produced
+        //
+        //     nodeExec exit 255 ... pct exec 110811 -- /bin/sh -c mkdir -p /etc/dnsmasq.d
+        //     ssh could not reach 'cyberhub-node-8' ... check authorized_keys
+        //     container '110811' not running!
+        //
+        // ssh had connected fine. The cause was printed two lines under a hint
+        // pointing at SSH keys, and that is where the reader goes first.
+        //
+        // So: only claim an ssh-layer fault when ssh's OWN stderr says so.
+        // Anything else reached the node, and the remote output is the answer.
+        const SSH_LAYER = /ssh: connect to host|Could not resolve hostname|Permission denied|Host key verification failed|Connection (refused|timed out|closed) by|No route to host|Operation timed out/i;
+        const reachedRemote = code === 255 && !SSH_LAYER.test(stderr);
+
         let hint = '';
-        if (code === 255) {
+        if (code === 255 && !reachedRemote) {
           hint = nodeIsDeclared(node)
             ? `\nssh could not reach '${node}' (${nodeAddress(node)}). It IS declared in site.json, so check that the orchestrator's public key is in ${SSH_USER}@${node}:~/.ssh/authorized_keys and that the node is up.`
-            : `\n'${node}' is NOT declared in site.json cluster.physical_cluster_ips, so ssh was handed the bare name and could not resolve it. Node selection reads the LIVE Proxmox cluster, so a newly joined node becomes schedulable BEFORE this map knows about it. Add \"${node}\": \"<management IP>\" and restart the app.`;
+            : `\n'${node}' is NOT declared in site.json cluster.physical_cluster_ips, so ssh was handed the bare name and could not resolve it. Node selection reads the LIVE Proxmox cluster, so a newly joined node becomes schedulable BEFORE this map knows about it. Add the node and restart the app.`;
+        } else if (reachedRemote) {
+          // Surface the remote's own words instead of a theory about ssh.
+          const remote = (stderr.trim() || stdout.trim()).split(`\n`).filter(Boolean).pop() || '';
+          hint = remote
+            ? `\nssh connected; the REMOTE command failed: ${remote}`
+            : `\nssh connected, but the remote command exited 255 with no output.`;
         }
         const e = new Error(
           `nodeExec exit ${code} on ${node}: ${args.join(' ')}${hint}\nstderr: ${stderr.trim()}\nstdout: ${stdout.trim()}`
