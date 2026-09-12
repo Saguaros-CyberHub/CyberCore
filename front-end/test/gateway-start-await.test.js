@@ -148,3 +148,67 @@ test('an unverified firstboot is still fatal for a malware profile', () => {
   assert.ok(/Malware gateway first boot could not be verified/.test(CLONE_GW),
     'and still refuse to start workstations behind an unverified gateway');
 });
+
+// -- rule 4: a failed start is retried -------------------------------------
+
+test('THE SECOND BUG: a failed start is retried, not taken as final', () => {
+  // `pct start` can fail on a rootfs mount that succeeds moments later:
+  //     run_buffer: 569 Script exited with status 32
+  //     lxc_init: 1037 Failed to run lxc.hook.pre-start for container "110891"
+  // 32 is mount(8)'s exit code, and pre-start is where the rootfs is mounted --
+  // the same udev/RBD symlink race the clone path already retries for.
+  //
+  // Established as transient, not damage: `lxc-start -F --logpriority=DEBUG` on
+  // the failing VMID booted to a login prompt, and `fsck.ext4 -n -f` on its
+  // rootfs was clean.
+  assert.ok(/for \(let attempt = 1; attempt <= GATEWAY_START_ATTEMPTS/.test(CLONE_GW),
+    'the start must be attempted more than once');
+  assert.ok(/&& !gwRunning;/.test(CLONE_GW),
+    'and must stop as soon as it is running');
+
+  // The POST has to be INSIDE the loop -- retrying the status poll alone would
+  // just re-read 'stopped' three times.
+  const loop = CLONE_GW.indexOf('for (let attempt = 1;');
+  const post = CLONE_GW.indexOf("/status/start`");
+  assert.ok(loop > -1 && post > loop, 'the start POST must sit inside the retry loop');
+});
+
+test('only a failed start pays the delay', () => {
+  // A whole cohort must not queue behind a pause that a healthy deploy never
+  // needed. The sleep is reachable only from attempt 2.
+  const at = CLONE_GW.indexOf('GATEWAY_START_RETRY_MS)');
+  assert.ok(at > -1, 'the retry delay must be used');
+  const before = CLONE_GW.slice(0, at);
+  assert.ok(/if \(attempt > 1\) \{/.test(before),
+    'the sleep must be guarded by attempt > 1, never paid on the first pass');
+});
+
+test('an unreadable status breaks the ladder instead of retrying it', () => {
+  // Mirrors rule 3 above. Retrying against a status we cannot read proves
+  // nothing and costs the delay -- and every test that stubs status/current
+  // would sit through the full ladder for no reason.
+  assert.ok(/if \(!statusReadable\) break;/.test(CLONE_GW),
+    'an unreadable status must leave the loop, not drive another attempt');
+});
+
+test('the shipped ladder is bounded, and its numbers are sane', () => {
+  const src2 = src;
+  const attempts = Number(/const GATEWAY_START_ATTEMPTS = (\d+)/.exec(src2)[1]);
+  const delay = Number(/const GATEWAY_START_RETRY_MS = (\d+)/.exec(src2)[1]);
+  assert.ok(attempts >= 2, 'one attempt is not a retry');
+  assert.ok(attempts <= 4, 'a container that failed four starts is not going to start');
+  assert.ok(delay >= 1000, 'the volume needs a moment to settle; an instant retry re-races it');
+  // Worst case is paid per lane, and lanes deploy in batches.
+  assert.ok((attempts - 1) * delay <= 30000,
+    `a failing gateway would stall its lane for ${(attempts - 1) * delay}ms`);
+});
+
+test('the failure message names the cause so it is not re-derived', () => {
+  // This cost several days of chasing "node-8 is broken" and then "some VMIDs
+  // do not work". The error should hand the next person the answer.
+  assert.ok(/start attempts/.test(CLONE_GW), 'say how many times it tried');
+  assert.ok(/lxc\.hook\.pre-start/.test(CLONE_GW), 'name the hook that fails');
+  assert.ok(/not a damaged container/.test(CLONE_GW),
+    'and say plainly that this is not corruption — fsck was clean, it boots by hand');
+  assert.ok(/vzstart:/.test(CLONE_GW), 'and point at the task log that carries the detail');
+});

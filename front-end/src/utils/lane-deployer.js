@@ -70,6 +70,11 @@ const { isHiddenTemplateRow } = require('./workspace-visibility');
 
 const GATEWAY_VMID_OFFSET = 100000;     // gateway LXC = 100000 + vxlanId (matches groups.js)
 const WORKSTATION_VMID_OFFSET = 600000; // slot-0 workstation = 600000 + vxlanId
+// A gateway start can fail on a rootfs mount that succeeds moments later --
+// the same udev/RBD race GATEWAY_CLONE_RETRY_MS exists for. Only a FAILED
+// start ever waits, so a healthy deploy is unchanged.
+const GATEWAY_START_ATTEMPTS = 3;
+const GATEWAY_START_RETRY_MS = 6000;
 const TEMP_GW_TEMPLATE_BASE = 169300;   // per-node temp gateway template copies (clear of groups.js' 169200)
 // GOAD controller = 200000 + vxlanId. Mirrors goad-deploy.js deployController();
 // teardown needs it because the controller is never recorded on the lane.
@@ -1732,62 +1737,108 @@ async function cloneGateway(job) {
   await configureLaneTailscale({
     subnetScheme, vxlanId, wanIp: net.wan.ip.split('/')[0], laneName, claimSecret, logTag: LOG,
   });
-  // AWAIT the start task. The POST returns a UPID and the start happens
+  // START IT, AND RETRY. Two separate failures are handled here.
+  //
+  // (1) The start task is AWAITED. The POST returns a UPID and the start runs
   // asynchronously, so without this the code races its own container: probing
   // begins while the LXC is still booting, `pct exec` answers
   // "container not running", and waitForGatewayFirstboot spends its 5-error
   // budget in ~15s on a gateway that was always going to come up.
   //
-  // For most courses that only costs a warning. For a MALWARE profile it is
-  // fatal -- cloneGateway's caller refuses to start workstations against a
-  // gateway whose isolation config was never verified -- so a lane failed
-  // outright for a gateway that boots fine by hand. Awaiting also surfaces a
-  // genuine start failure with Proxmox's own error instead of as a later,
-  // unrelated-looking SSH fault.
-  const startUpid = await proxmoxAPI('POST', `${vmApiBase(targetNode, gatewayVmid, 'lxc')}/status/start`);
-  if (startUpid) await waitForTask(targetNode, startUpid, 120000).catch((e) => {
-    // Not fatal on its own: the status poll below is the authority on whether it
-    // actually came up, and a task that reports oddly is not proof that it did not.
-    console.warn(`${LOG} Gateway ${gatewayVmid} start task on ${targetNode}: ${e.message}`);
-  });
-
-  // Confirm it actually RUNS before waiting on anything inside it.
+  // (2) The start is RETRIED, because it can fail transiently. Observed on a
+  // lane that failed five deploys in a row:
   //
-  // Without this a gateway that fails to boot costs three minutes and then
-  // reports something else entirely: waitForGatewayFirstboot probes over
-  // `pct exec`, every probe fails because the container is stopped, it gives up
-  // at its 180s timeout WITHOUT throwing (deliberately — a slow firstboot is
-  // survivable), and the failure finally surfaces from
-  // applyGatewayWorkstationAccess as
+  //     run_buffer: 569 Script exited with status 32
+  //     lxc_init: 1037 Failed to run lxc.hook.pre-start for container "110891"
   //
-  //     nodeExec exit 255 ... pct exec <id> -- /bin/sh -c mkdir -p /etc/dnsmasq.d
-  //     container '<id>' not running!
+  // 32 is mount(8)'s exit code. pre-start is where LXC activates and mounts the
+  // rootfs, and this is the SAME mount failure the clone path hits -- `pct
+  // clone` uses /dev/rbd-pve/<fsid>/<pool>/<image> the instant it maps it, and
+  // that path is a udev-created symlink, not a kernel one. See
+  // GATEWAY_CLONE_RETRY_MS and gateway-clone-recovery.test.js.
   //
-  // which reads as an SSH or dnsmasq fault rather than a gateway that never
-  // started. Fail here instead, in seconds, naming the actual thing.
-  // Fail on EVIDENCE, never on its absence. Proxmox reports {status:'stopped'}
-  // for a container that did not start, so a definite non-running status is
-  // grounds to stop; a response we cannot read is not, and blocking on one would
-  // make every caller that mocks this endpoint wait out the whole budget.
+  // That it is transient, not a broken container, was established directly: on
+  // the failing VMID `lxc-start -F --logpriority=DEBUG` booted all the way to a
+  // login prompt, and `fsck.ext4 -n -f` on its rootfs came back clean. Nothing
+  // was wrong with it. The start simply happened seconds after the clone, while
+  // the volume was still settling -- this cluster has been seen holding an image
+  // with `rbd: error: image still has watchers` well after last use.
+  //
+  // For most courses a failed start only costs a warning. For a MALWARE profile
+  // it is fatal by design -- the caller refuses to start workstations behind a
+  // gateway whose isolation config was never verified -- so the whole lane died
+  // for a container that started by hand minutes later.
   let gwRunning = false;
   let lastStatus = null;
   let statusReadable = true;
-  for (let i = 0; i < 15; i++) {
-    let st = null;
+  let startErr = null;
+
+  for (let attempt = 1; attempt <= GATEWAY_START_ATTEMPTS && !gwRunning; attempt++) {
+    if (attempt > 1) {
+      console.warn(
+        `${LOG} Gateway ${gatewayVmid} on ${targetNode} did not start` +
+        (startErr ? ` (${startErr})` : ` (status '${lastStatus}')`) +
+        `; retrying ${attempt}/${GATEWAY_START_ATTEMPTS} in ${GATEWAY_START_RETRY_MS}ms`
+      );
+      await new Promise(r => setTimeout(r, GATEWAY_START_RETRY_MS));
+    }
+
+    startErr = null;
     try {
-      st = await proxmoxAPI('GET', `${vmApiBase(targetNode, gatewayVmid, 'lxc')}/status/current`);
-    } catch (_) { /* the node may still be settling the clone; keep polling */ }
-    const cur = st && typeof st.status === 'string' ? st.status : null;
-    if (cur === 'running') { gwRunning = true; break; }
-    if (cur === null) { statusReadable = false; break; }
-    lastStatus = cur;
-    await new Promise(r => setTimeout(r, 2000));
+      const startUpid = await proxmoxAPI('POST', `${vmApiBase(targetNode, gatewayVmid, 'lxc')}/status/start`);
+      if (startUpid) await waitForTask(targetNode, startUpid, 120000);
+    } catch (e) {
+      // Not decisive on its own -- the status poll below is the authority on
+      // whether it came up, and a task that reports oddly is not proof that it
+      // did not. Kept only to name the cause if every attempt fails.
+      startErr = e.message;
+      console.warn(`${LOG} Gateway ${gatewayVmid} start task on ${targetNode}: ${e.message}`);
+    }
+
+    // Confirm it actually RUNS before waiting on anything inside it.
+    //
+    // Without this a gateway that fails to boot costs three minutes and then
+    // reports something else entirely: waitForGatewayFirstboot probes over
+    // `pct exec`, every probe fails because the container is stopped, it gives
+    // up at its 180s timeout WITHOUT throwing (deliberately -- a slow firstboot
+    // is survivable), and the failure finally surfaces from
+    // applyGatewayWorkstationAccess as
+    //
+    //     nodeExec exit 255 ... pct exec <id> -- /bin/sh -c mkdir -p /etc/dnsmasq.d
+    //     container '<id>' not running!
+    //
+    // which reads as an SSH or dnsmasq fault rather than a gateway that never
+    // started. Fail here instead, in seconds, naming the actual thing.
+    //
+    // Fail on EVIDENCE, never on its absence. Proxmox reports {status:'stopped'}
+    // for a container that did not start, so a definite non-running status is
+    // grounds to retry and then to stop; a response we cannot read is not, and
+    // blocking on one would make every caller that mocks this endpoint wait out
+    // the whole budget.
+    statusReadable = true;
+    for (let i = 0; i < 15; i++) {
+      let st = null;
+      try {
+        st = await proxmoxAPI('GET', `${vmApiBase(targetNode, gatewayVmid, 'lxc')}/status/current`);
+      } catch (_) { /* the node may still be settling the clone; keep polling */ }
+      const cur = st && typeof st.status === 'string' ? st.status : null;
+      if (cur === 'running') { gwRunning = true; break; }
+      if (cur === null) { statusReadable = false; break; }
+      lastStatus = cur;
+      await new Promise(r => setTimeout(r, 2000));
+    }
+    // Retrying on a status we cannot read would prove nothing and cost the delay.
+    if (!statusReadable) break;
   }
+
   if (!gwRunning && statusReadable) {
     throw new Error(
-      `Lane gateway ${gatewayVmid} on ${targetNode} is '${lastStatus}', not running, after start. ` +
+      `Lane gateway ${gatewayVmid} on ${targetNode} is '${lastStatus}', not running, after ` +
+      `${GATEWAY_START_ATTEMPTS} start attempts` + (startErr ? ` (${startErr})` : '') + `. ` +
       `Nothing inside it can be configured, so the lane would come up with no DHCP and no ` +
-      `console. Check \`pct start ${gatewayVmid}\` on ${targetNode} and its task log.`
+      `console. Its start task log names the reason — look for vzstart:${gatewayVmid} under ` +
+      `/var/log/pve/tasks on ${targetNode}; "Failed to run lxc.hook.pre-start" with status 32 ` +
+      `is a rootfs mount that did not come up in time, not a damaged container.`
     );
   }
   if (!statusReadable) {
