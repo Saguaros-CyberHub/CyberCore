@@ -235,6 +235,49 @@ function courseAdded(opts = {}) {
 }
 
 /**
+ * An instructor assigned a Clinic-in-a-Box client profile to a student —
+ * either one the instructor generated themselves (handed over as the
+ * student's own copy) or, less often, one the student had already generated.
+ * Either way the profile now exists in the student's account and is ready to
+ * open in Workspace.
+ */
+function profileAssigned(opts = {}) {
+  const {
+    siteName = 'CyberHub', publicUrl, firstName,
+    companyName, instructorName, dueDate, notes, workspaceUrl,
+  } = opts;
+
+  const client = String(companyName || 'a client').trim() || 'a client';
+  const by = instructorName ? ` by ${instructorName}` : '';
+  const due = formatExpiry(dueDate);
+  const subject = `New assignment: ${client}`;
+  const url = workspaceUrl || publicUrl || '';
+
+  const text = [
+    greeting(firstName),
+    '',
+    `You've been assigned a client profile${by} on ${siteName}: ${client}.`,
+    due ? `Due: ${due}` : null,
+    notes ? `Instructor notes: ${notes}` : null,
+    '',
+    'Open it in your workspace:',
+    url,
+    '',
+    `— ${siteName}`,
+  ].filter((line) => line !== null).join('\n');
+
+  const html = shell(siteName, `
+    <p style="margin:0 0 16px;">${esc(greeting(firstName))}</p>
+    <p style="margin:0 0 16px;">You've been assigned a client profile${esc(by)} on ${esc(siteName)}: <strong>${esc(client)}</strong>.</p>
+    ${due ? `<p style="margin:0 0 8px;">Due: ${esc(due)}</p>` : ''}
+    ${notes ? `<p style="margin:0 0 16px;color:#5a6072;">Instructor notes: ${esc(notes)}</p>` : ''}
+    ${url ? button(url, 'Open in Workspace') : ''}
+  `);
+
+  return { subject, text, html };
+}
+
+/**
  * A password was issued or regenerated for an account by staff.
  *
  * This is the fallback path, used when activation links are unavailable — it
@@ -613,7 +656,7 @@ function ticketReplied(opts = {}) {
 
 const TEMPLATES = {
   activation, passwordReset, courseAdded, credentialsIssued, testMessage, broadcast,
-  ticketSubmitted, ticketStatusChanged, ticketReplied,
+  ticketSubmitted, ticketStatusChanged, ticketReplied, profileAssigned,
 };
 
 module.exports = {
