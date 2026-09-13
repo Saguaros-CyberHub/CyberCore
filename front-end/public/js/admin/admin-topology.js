@@ -130,7 +130,7 @@ function setTopoMode(mode) {
 // ============================================================================
 
 function topoScheme() {
-  return document.getElementById('topoSubnetScheme').value || 'v1';
+  return document.getElementById('topoSubnetScheme').value || 'v2';
 }
 
 /**
@@ -180,7 +180,6 @@ function onTopoSchemeChange() {
   const desc = document.getElementById('topoSchemeDesc');
   if (desc) {
     desc.textContent = ({
-      v1: 'All lane VMs share one flat subnet. Legacy scheme — kept for in-flight classes.',
       v2: 'Each lane gets its own /24. Required for Tailscale BYOD access.',
       v3: 'Two subnets per lane — external (Kali/BYOD) and internal (corp/AD) — with the gateway ' +
           'firewall-blocking traffic between them. Give one machine the role "dmz": it becomes the ' +
@@ -318,7 +317,7 @@ async function applyTopoSeedResult(seed) {
   // difficultyLabel handles both.
   document.getElementById('topoDifficulty').value = difficultyLabel(seed.difficulty);
   document.getElementById('topoModule').value = seed.module || 'crucible';
-  document.getElementById('topoSubnetScheme').value = seed.subnet_scheme || 'v1';
+  document.getElementById('topoSubnetScheme').value = seed.subnet_scheme || 'v2';
 
   await applyTopoGoadFields(seed.goad);
   clearTopoFieldErrors();
@@ -398,7 +397,7 @@ async function applyTopoSeedResult(seed) {
 //   editor()        the CyberCoreTopologyEditor controller, or null
 //   refresh()       re-render this surface's table view
 //   mount()         remount the canvas; mandatory after setVms
-//   getScheme()     'v1' | 'v2' | 'v3'
+//   getScheme()     'v2' | 'v3'
 //   applyScheme(s)  adopt the scheme a seed chose, or say why it cannot
 //   clearNetwork()  drop stored segment positions after a wholesale rebuild
 //

@@ -747,12 +747,11 @@
             <div class="form-group" style="margin-top: 0.25rem;">
               <label>Network Topology</label>
               <select id="newChalSubnetScheme" onchange="onChalSubnetSchemeChange()">
-                <option value="v1" selected>v1 — shared flat subnet (192.18.0.0/24, legacy)</option>
-                <option value="v2">v2 — per-lane flat subnet (10.x.x.0/24, Tailscale BYOD)</option>
+                <option value="v2" selected>v2 — per-lane flat subnet (10.x.x.0/24, Tailscale BYOD)</option>
                 <option value="v3">v3 — segmented "DMZ" (external + internal, forced pivot)</option>
               </select>
               <p id="chalSubnetSchemeDesc" style="font-size: 0.72rem; color: var(--gray-500); margin: 0.35rem 0 0 0;">
-                All lane VMs share one flat subnet. Legacy scheme — kept for in-flight classes.
+                Each lane gets its own /24 (10.x.x.0/24). Required for Tailscale BYOD access.
               </p>
             </div>
 
@@ -919,7 +918,6 @@
                 <div>
                   <label for="topoSubnetScheme">Network topology</label>
                   <select id="topoSubnetScheme" onchange="onTopoSchemeChange()">
-                    <option value="v1">v1 — flat shared subnet</option>
                     <option value="v2">v2 — one /24 per lane</option>
                     <option value="v3">v3 — segmented (ext + int)</option>
                   </select>

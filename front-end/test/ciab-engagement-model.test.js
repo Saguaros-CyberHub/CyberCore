@@ -876,7 +876,7 @@ test('B0-36: an external engagement with nothing bridging the segments is an err
   assert.strictEqual(hit[0].severity, 'error', `${TRACK_B} (B0)`);
 });
 
-test('B0-37: a placement on a flat v1/v2 lane is a warning, not an error', () => {
+test('B0-37: a placement on a flat v2 lane is a warning, not an error', () => {
   const spec = specFrom(ASSETS, { subnet_scheme: 'v2' });
   const plan = compile({
     engagement_type: 'external_blackbox', perspective: 'external', subnet_scheme: 'v2',
@@ -884,7 +884,7 @@ test('B0-37: a placement on a flat v1/v2 lane is a warning, not an error', () =>
   }, spec);
   const hit = codeAt(plan, 'PLACEMENT_REQUIRES_V3');
   assert.strictEqual(hit.length, 1,
-    'resolveVmSegments returns one flat lan0 for every VM on a v1/v2 lane (lane-networking.js:381), so '
+    'resolveVmSegments returns one flat lan0 for every VM on a v2 lane (lane-networking.js:381), so '
     + `there is no ext/int boundary for a pivot to straddle and the placement is a fiction. ${TRACK_B} (B0)`);
   assert.strictEqual(hit[0].severity, 'warn',
     'A WARNING and not an error: the model can be authored before the environment scheme is settled, '
@@ -1636,7 +1636,7 @@ test('B0-77: the model writer validates against the scheme the block was carved 
   const withScheme = MODEL.validateEngagementPlan(patch, { engagementType: 'default', subnetScheme: 'v2' });
   const without = MODEL.validateEngagementPlan(patch, { engagementType: 'default' });
   assert.ok(withScheme.warnings.some(w => w.code === 'EXPOSURE_REQUIRES_V3'),
-    `v1/v2 is one flat lan0, so an 'internal' placement there is a fiction. ${TRACK_B} (B0)`);
+    `v2 is one flat lan0, so an 'internal' placement there is a fiction. ${TRACK_B} (B0)`);
   assert.ok(!without.warnings.some(w => w.code === 'EXPOSURE_REQUIRES_V3'),
     `Which is exactly why the argument has to be passed. ${TRACK_B} (B0)`);
   assert.strictEqual(withScheme.errors.length, 0,
@@ -1771,7 +1771,7 @@ test('B0-82: the segment mirror reproduces resolveVmSegments precedence, rung fo
   assert.ok(/if \(isV3 && vmSpec\?\.role === 'dmz' && type !== 'lxc'\) return \['ext', 'int'\];/.test(core),
     `The dual-homing rung, and the qemu guard on it. ${TRACK_B} (B0)`);
   assert.ok(/return \[isV3 \? 'ext' : 'lan'\];/.test(core),
-    `The fallback: single ext on v3, single lan on v1/v2. ${TRACK_B} (B0)`);
+    `The fallback: single ext on v3, single lan on v2. ${TRACK_B} (B0)`);
 
   const mirror = read(PLAN_REL);
   assert.ok(/lane-networking\.js:374-381/.test(mirror),
@@ -2163,7 +2163,7 @@ test('B0-96: a bridge-role machine the environment does not dual-home is placed,
   // did not catch it, because the environment does NOT dual-home it:
   //   * an LXC marked 'dmz' gets ONE external card — the qemu guard on
   //     lane-networking.js:379, which that file's own comment calls load-bearing
-  //   * on a v1/v2 lane there is one flat segment and nothing is dual-homed
+  //   * on a v2 lane there is one flat segment and nothing is dual-homed
   // It was left the ONE machine in a derived plan with no placement at all,
   // absent from plan.exposure, while EXPOSURE_DERIVED said every other machine
   // sat on the internal segment.
@@ -2635,7 +2635,7 @@ test('B0-101: a container web host is never made the bridge, whatever its role s
 });
 
 test('B0-102: a flat-lane external surface never claims a bridge or an address it cannot have', () => {
-  // On v1/v2 there is ONE lan0 (lane-networking.js:381) and the .240 write is
+  // On v2 there is ONE lan0 (lane-networking.js:381) and the .240 write is
   // gated behind isV3 (challenge-lane-deployer.js:768). The compile used to
   // stamp 'pivot' and nics [{ext},{int}] on the surface while hosts[].ip_octet
   // kept the spec band octet — two statements about one machine that cannot
@@ -2889,7 +2889,7 @@ const SEGMENT_RUNGS = Object.freeze([
   },
   {
     n: 4,
-    what: "otherwise ['ext'] on v3, ['lan'] on v1/v2",
+    what: "otherwise ['ext'] on v3, ['lan'] on v2",
     authority: /return \[isV3 \? 'ext' : 'lan'\];/,
     mirror: /return \[isV3 \? 'ext' : 'lan'\];/,
   },
@@ -3286,7 +3286,7 @@ test('B0-110: a card naming a segment the lane has no bridge for is named offlin
   assert.ok(/return \{ ext: vnetExtName, int: vnetIntName \};/.test(core),
     `v3 has exactly ext and int. ${TRACK_B} (B0)`);
   assert.ok(/return \{ lan: vnetExtName, ext: vnetExtName, int: vnetExtName \};/.test(core),
-    'and v1/v2 maps lan, ext AND int onto its one VNet — deliberately, so a v3-authored spec does not '
+    'and v2 maps lan, ext AND int onto its one VNet — deliberately, so a v3-authored spec does not '
     + `explode when its challenge is switched to v2. The mirror reproduces BOTH rows. ${TRACK_B} (B0)`);
   assert.deepStrictEqual(PLAN.laneSegmentIds(true), ['ext', 'int'], `${TRACK_B} (B0)`);
   assert.deepStrictEqual(PLAN.laneSegmentIds(false), ['lan', 'ext', 'int'], `${TRACK_B} (B0)`);
@@ -3308,7 +3308,7 @@ test('B0-110: a card naming a segment the lane has no bridge for is named offlin
   assert.ok(PLAN.hasBlockingProblem(plan),
     `A lane that cannot come up must not compile clean. ${TRACK_B} (B0)`);
 
-  // 'lan' IS a real bridge on v1/v2, and is NOT one on v3.
+  // 'lan' IS a real bridge on v2, and is NOT one on v3.
   const v2 = compile({ engagement_type: 'default', perspective: 'internal', subnet_scheme: 'v2' }, {
     subnet_scheme: 'v2',
     vms: [vm('web01', 'server', {
@@ -3316,7 +3316,7 @@ test('B0-110: a card naming a segment the lane has no bridge for is named offlin
     })],
   });
   assert.strictEqual(codeAt(v2, 'NICS_UNKNOWN_SEGMENT').length, 0,
-    `resolveSegmentBridges gives v1/v2 a 'lan' key, so this deploys. ${TRACK_B} (B0)`);
+    `resolveSegmentBridges gives v2 a 'lan' key, so this deploys. ${TRACK_B} (B0)`);
   const v3lan = compile(EXT_V3, {
     subnet_scheme: 'v3',
     vms: [vm('web01', 'server', {

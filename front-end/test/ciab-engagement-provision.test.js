@@ -33,11 +33,17 @@ const UTILS = path.join(ROOT, 'src', 'utils');
 // ── stubs ───────────────────────────────────────────────────────────────────
 
 let PVE = { nodes: [], ifacesByNode: {}, failNodes: new Set(), calls: [] };
+let SCHED = { max_concurrent_lanes: 5, max_concurrent_clones: 4 };
 
 require.cache[require.resolve(path.join(UTILS, 'site-config.js'))] = {
   id: 'site-config', filename: 'site-config', loaded: true,
   exports: {
-    getSchedulingConfig: () => ({ max_concurrent_lanes: 5, max_concurrent_clones: 4 }),
+    // Mutable so the excluded_nodes test below can drain a node. Note the
+    // DEFAULT shape has no excluded_nodes key at all — that is deliberate, and
+    // every consumer must survive it: config/site.json is gitignored, so a
+    // checkout has no scheduling block and getSchedulingConfig's own defaults
+    // are what production sees until an operator adds one.
+    getSchedulingConfig: () => SCHED,
     getDefaultTemplateNode: () => 'node-1',
     getClusterNodes: () => [],
     getPhysicalClusterIps: () => ({}),
@@ -70,6 +76,7 @@ const { verifyBridgesOnAllNodes, encodeBase20 } =
 
 function reset() {
   PVE = { nodes: [], ifacesByNode: {}, failNodes: new Set(), calls: [] };
+  SCHED = { max_concurrent_lanes: 5, max_concurrent_clones: 4 };
 }
 const onlineNodes = (...names) => names.map(n => ({ type: 'node', status: 'online', node: n }));
 
@@ -118,6 +125,54 @@ test('A8c: OFFLINE nodes are not checked — a lane can never be placed there', 
   const r = await verifyBridgesOnAllNodes({ tags, timeoutMs: 1000, intervalMs: 10 });
   assert.strictEqual(r.ready, true, 'an offline node must not hold the block back');
   assert.deepStrictEqual(r.nodesReady, ['n1']);
+});
+
+test('A8c: a node in cluster.scheduling.excluded_nodes is not checked either', async () => {
+  // Same rule as the offline case, for the same reason: distributeAcrossNodes
+  // will never place a lane on an excluded node, so its bridges cannot matter.
+  //
+  // This one bites harder than offline, though. A node is normally excluded
+  // BECAUSE it is unwell -- cyberhub-node-8 was drained while a Ceph backfill
+  // made it lose the /dev/rbd-pve udev race and fail every `pct start` -- and an
+  // unwell node is exactly the one whose SDN bridges may never appear. Left in
+  // the set it would pin the whole block at ready:false for the full timeout and
+  // refuse deploys onto the healthy nodes, which is the opposite of what
+  // draining it was supposed to achieve.
+  reset();
+  const tags = [10000];
+  const names = tags.map(encodeBase20);
+  PVE.nodes = onlineNodes('n1', 'cyberhub-node-8');
+  PVE.ifacesByNode = { n1: names };          // node-8 has NO bridges at all
+  SCHED = { ...SCHED, excluded_nodes: ['cyberhub-node-8'] };
+
+  const r = await verifyBridgesOnAllNodes({ tags, timeoutMs: 1000, intervalMs: 10 });
+  assert.strictEqual(r.ready, true, 'an excluded node must not hold the block back');
+  assert.deepStrictEqual(r.nodesReady, ['n1']);
+  assert.deepStrictEqual(r.nodesPending, []);
+  assert.ok(!PVE.calls.some(c => c.includes('cyberhub-node-8')),
+    'an excluded node should never even be polled');
+});
+
+test('A8c: quarantine is SOFT, so a quarantined node is still bridge-checked', async () => {
+  // The distinction that makes the exclusion above safe. node-health quarantine
+  // is advisory -- node-selector drops it rather than leave the cluster with
+  // nowhere to deploy -- so a quarantined node CAN still receive a lane and
+  // therefore still needs its bridges. Only the hard, operator-set exclusion may
+  // be skipped. Encoded here because the two look interchangeable from a
+  // distance and are not.
+  reset();
+  const tags = [10000];
+  const names = tags.map(encodeBase20);
+  PVE.nodes = onlineNodes('n1', 'cyberhub-node-8');
+  PVE.ifacesByNode = { n1: names };
+  const nodeHealth = require(path.join(UTILS, 'node-health.js'));
+  nodeHealth._resetForTests();
+  nodeHealth.markNodeFault('cyberhub-node-8', 'gateway start failed');
+
+  const r = await verifyBridgesOnAllNodes({ tags, timeoutMs: 50, intervalMs: 10 });
+  nodeHealth._resetForTests();
+  assert.strictEqual(r.ready, false, 'a quarantined node can still take a lane, so it must be checked');
+  assert.deepStrictEqual(r.nodesPending, ['cyberhub-node-8']);
 });
 
 test('A8c: an unreachable node is reported as unreachable, NOT as missing bridges', async () => {

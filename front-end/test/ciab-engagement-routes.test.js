@@ -645,7 +645,7 @@ test('B1a-R21: the route\'s warnings re-run really does surface EXPOSURE_REQUIRE
   // THIS IS THE POINT OF THE RE-RUN. updateEngagementModel computes `warnings`
   // and references them only inside its error throw; the success return
   // discards them. So the warning that tells an instructor their pivot
-  // placement is a fiction on a flat v1/v2 lane can never reach the only path
+  // placement is a fiction on a flat v2 lane can never reach the only path
   // an instructor uses — unless the route runs the validator a second time.
   //
   // engagement-model.js has zero requires, so it loads without a database.

@@ -219,7 +219,7 @@ function buildAttachedNet0(vmSpec, vnetName, mac) {
  *   - laneConfig:   parsed JSONB config from the lane row
  *   - challenge:    row from cybercore_challenge (spec already parsed)
  *   - spec:         parsed challenge spec (must have spec.attachable === true)
- *   - laneSubnetBase: e.g., '10.39.17' for v2, '192.18.0' for v1
+ *   - laneSubnetBase: e.g., '10.39.17' for v2, or the internal segment base for v3
  *   - vnetName, bestNode, templateNode, gatewayVmId: from the lane
  *   - proxmoxAPI, waitForTask: orchestration helpers from admin.js
  *

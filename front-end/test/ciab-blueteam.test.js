@@ -541,7 +541,7 @@ test('E3-20: 017 has a DEFAULT, so the read-path adopt keeps working', () => {
     + `separate test pins the column list at eight. ${TRACK_E}`);
 });
 
-test('E3-21: 017 sorts last, after every migration whose table it depends on', () => {
+test('E3-21: 017 sorts after every migration whose table it depends on', () => {
   // The runner is readdirSync().filter('.sql').sort(), so ordering is by FULL
   // FILENAME. ciab_engagement is created by 010; anything that sorted before it
   // would ALTER a table that does not exist yet.
@@ -549,9 +549,17 @@ test('E3-21: 017 sorts last, after every migration whose table it depends on', (
   const me = path.basename(MIG_REL);
   assert.ok(names.includes(me), TRACK_E);
   assert.ok(me > '010_ciab_engagements.sql', TRACK_E);
-  assert.strictEqual(names[names.length - 1], me,
-    `017 is the newest CiAB migration. If a later one has landed, this assertion is the reminder `
-    + `to check the ordering rather than assume it. ${TRACK_E}`);
+  // This used to pin 017 as the LAST file — a tripwire whose whole job is to make
+  // someone read the ordering of the next migration instead of assuming it. That
+  // tripwire fired: 018_retire_v1_subnet_scheme.sql has landed. It was read. It
+  // narrows the subnet_scheme CHECK on ciab_engagement (010) and
+  // ciab_profile_lane_groups (006), so it has to sort after both, and it does.
+  // The pin is therefore MOVED to 018, not removed: the migration after that one
+  // gets the same read-through.
+  assert.strictEqual(names[names.length - 1], '018_retire_v1_subnet_scheme.sql',
+    `A CiAB migration newer than 018 has landed. Read its ordering against every table it `
+    + `touches, then move this pin to it — deleting the pin is how the next 010-dependency `
+    + `lands ahead of 010. ${TRACK_E}`);
   assert.strictEqual(names.filter(n => n.slice(0, 3) === '017').length, 1,
     `Two files sharing a numeric prefix is survivable but confusing; there is no reason to add one. `
     + `${TRACK_E}`);

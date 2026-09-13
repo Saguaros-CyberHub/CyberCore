@@ -58,10 +58,14 @@ async function forceDestroyVM(vmid, type, knownNode) {
 }
 
 // Descriptor copy, NOT `{ ...shared }`. The shared module exports
-// TRANSIT_BY_MODULE and V2_LAB_NETWORK as lazy getters so config/site.json is
-// read on first access rather than at import. A spread INVOKES those getters at
-// require time — which both defeats the laziness and makes this module throw at
-// import on any host where site.json is not readable yet.
+// V2_LAB_NETWORK as a lazy getter so config/site.json is read on first access
+// rather than at import. A spread INVOKES that getter at require time — which
+// both defeats the laziness and makes this module throw at import on any host
+// where site.json is not readable yet.
+//
+// TRANSIT_BY_MODULE used to be named here too. It was the v1 per-module transit
+// map and went out with that scheme; a descriptor copy simply stops copying it,
+// which is why retiring v1 needed no change on this side.
 module.exports = Object.defineProperties({}, {
   ...Object.getOwnPropertyDescriptors(shared),
   // CIAB's deploy logs are read on their own; keep the tag it has always used.

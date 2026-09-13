@@ -189,7 +189,7 @@ pct exec $CTID -- tee /opt/goad-light/run.sh >/dev/null << 'EOF'
 # Usage: run.sh LAB HOST_MAP ADMIN_USER ADMIN_PASSWORD
 #   LAB         — one of: GOAD-Light, GOAD, GOAD-Mini, NHA, SCCM, DRACARYS
 #   HOST_MAP    — comma-separated "vmName:ip" pairs, e.g.
-#                 "DC01:192.18.0.10,DC02:192.18.0.11,SRV02:192.18.0.22"
+#                 "DC01:10.39.16.10,DC02:10.39.16.11,SRV02:10.39.16.22"
 #   ADMIN_USER  — local Administrator user (typically "Administrator")
 #   ADMIN_PASSWORD — local admin pwd baked into the Windows template
 #
@@ -341,7 +341,7 @@ inventory and runs `main.yml`.
 
 ## Usage
 ```
-/opt/goad-light/run.sh 192.18.0.10 192.18.0.11 192.18.0.22 Administrator 'YourPass'
+/opt/goad-light/run.sh 10.39.16.10 10.39.16.11 10.39.16.22 Administrator 'YourPass'
 ```
 
 ## Re-bake source of truth

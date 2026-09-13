@@ -22,7 +22,7 @@ function fixture(routeName, faults = {}) {
     }
     if (sql.includes('SELECT EXISTS')) return { rows: [{ is_installed: true }] };
     if (sql.includes('FROM cybercore_user')) return { rows: [{ user_id: 'u1', email: 'fixture@example.org' }] };
-    if (sql.includes('FROM crucible_challenge')) return { rows: [{ id: 1, challenge_id: 1, challenge_key: 'fixture', name: 'Fixture', spec, subnet_scheme: 'v1' }] };
+    if (sql.includes('FROM crucible_challenge')) return { rows: [{ id: 1, challenge_id: 1, challenge_key: 'fixture', name: 'Fixture', spec, subnet_scheme: 'v2' }] };
     if (sql.includes('WITH used')) return { rows: [{ vxlan_id: 4242 }] };
     if (sql.includes('INSERT INTO cybercore_lane')) return { rows: [{ lane_id: 'lane1', user_id: 'u1', vxlan_id: 4242 }] };
     if (sql.includes('INSERT INTO deployment_vuln_selections')) return { rows: [{ id: 1 }] };
@@ -76,6 +76,44 @@ function fixture(routeName, faults = {}) {
       resolveSegmentBridges: () => ({}),
     },
     '../../utils/lane-claims': { claimsSql: () => "status NOT IN ('error','deleted')" },
+    // The pooled WAN transit address. This fixture used to say subnet_scheme
+    // 'v1' and never needed the stub: v1 was the one scheme that reached the
+    // internet through its module's own transit /16, so both deploy routes
+    // skipped allocation entirely. Migration 038 retired v1, the fixture row is
+    // 'v2', and the allocation now runs on every deploy this file exercises.
+    // Stubbed rather than omitted for the reason the gateway-lifecycle note
+    // below gives: the fake require hands back {} for anything missing, so a gap
+    // here answers 503 on every case and reads as a GOAD regression.
+    '../../utils/lane-wan-allocator': {
+      findWanIpConflicts: async () => [],
+      allocateLaneWanIps: async (n) => {
+        calls.push({ kind: 'wan-allocate', n });
+        return Array.from({ length: n }, (_, i) => ({ address: `100.100.60.${100 + i}` }));
+      },
+      recordLaneWanLease: async () => { calls.push({ kind: 'wan-lease' }); },
+      releaseLaneWanIps: async () => { calls.push({ kind: 'wan-release' }); },
+    },
+    // The gateway start gate. Both admin deploy routes used to fire
+    // POST .../status/start and sleep 5s; they now confirm the container really
+    // reached 'running' before configuring anything inside it, because a gateway
+    // that lost the /dev/rbd-pve udev race on a backfilling node otherwise takes
+    // the whole deploy down three minutes later inside GOAD's prep.sh. Stubbed
+    // rather than omitted: the fake require hands back {} for anything missing,
+    // so a gap here fails every deploy with "is not a function" and reads as a
+    // GOAD regression. See utils/gateway-lifecycle.js.
+    '../../utils/gateway-lifecycle': {
+      ensureGatewayRunning: async () => {
+        calls.push({ kind: 'gateway-running' });
+        if (faults.gateway) {
+          throw Object.assign(
+            new Error("Lane gateway 101701 on node1 is 'stopped', not running, after 3 start attempts"),
+            { gatewayNotRunning: true, node: 'node1', lastStatus: 'stopped' }
+          );
+        }
+        return { running: true, statusReadable: true, lastStatus: 'running' };
+      },
+      waitForGatewayFirstboot: async () => { calls.push({ kind: 'gateway-firstboot' }); return true; },
+    },
   };
   const file = path.join(__dirname, '../src/routes/admin', `${routeName}.js`);
   vm.runInNewContext(fs.readFileSync(file, 'utf8'), {
@@ -128,5 +166,38 @@ for (const route of ['lanes', 'lab-networks']) {
     assert.equal(terminal.config.error, 'DHCP restoration failed');
     assert.equal(terminal.config.goad.status, 'failed');
     assert.equal(terminal.config.goad.controller_vmid, 204242);
+  });
+  test(`${route}: the gateway is proven running, and its firstboot awaited, BEFORE anything is written into it`, async () => {
+    // Ordering, not merely presence. Reservations are pushed into the container
+    // over `pct exec`, so they cannot precede it running; and firstboot REWRITES
+    // /etc/dnsmasq.conf and the nat table from scratch, so a reservation written
+    // ahead of it is silently erased and the lane comes up with dead consoles
+    // while still reporting 'active'.
+    const f = fixture(route);
+    await f.run();
+    const at = (kind) => f.calls.findIndex(call => call.kind === kind);
+    assert.ok(at('gateway-running') >= 0, 'the deploy must confirm the gateway reached running');
+    assert.ok(at('gateway-firstboot') > at('gateway-running'),
+      'firstboot is waited for only once the container is actually up');
+    assert.ok(at('reservations') > at('gateway-firstboot'),
+      'DHCP reservations must be written on top of firstboot, never under it');
+    assert.ok(at('goad') > at('gateway-running'), 'GOAD must never start against an unproven gateway');
+  });
+  test(`${route}: a gateway that never starts suspends the lane before GOAD is ever reached`, async () => {
+    // The cyberhub-node-8 failure. Before the gate, a gateway that lost the
+    // /dev/rbd-pve udev race was never noticed: the deploy wrote reservations
+    // into a stopped container, swallowed that, cloned a GOAD controller, and
+    // died three to five minutes later inside prep.sh with
+    // "ssh: connect to host 10.42.129.1 port 22: No route to host" — an error
+    // about the one machine that was never at fault. It must now fail in seconds,
+    // naming the gateway, having cloned no controller.
+    const f = fixture(route, { gateway: true });
+    const { terminal } = await f.run();
+    assert.equal(terminal?.status, 'suspended');
+    assert.match(terminal.config.error, /not running, after 3 start attempts/);
+    assert.ok(!f.calls.some(call => call.kind === 'goad'),
+      'GOAD provisioning must not run behind a gateway that never started');
+    assert.ok(!f.calls.some(call => call.kind === 'reservations'),
+      'nothing should be written into a container that is not running');
   });
 }

@@ -679,12 +679,14 @@ test('a v2 lane places no machine on a segment at all', () => {
   // pinning (challenge-lane-deployer only runs the .240 pass under v3) — so a
   // nics array there would produce a machine whose spec claims an address it
   // never receives.
-  for (const scheme of ['v1', 'v2']) {
-    const { spec } = synth({ profile: profileWith('acme-clinic.com'), options: { subnetScheme: scheme } });
-    assert.ok(spec.vms.every(vm => !('nics' in vm)), `${scheme} must emit no nics`);
-    assert.ok(spec.vms.every(vm => vm.ipOctet >= SYNTH.SPEC_OCTET_MIN && vm.ipOctet <= SYNTH.SPEC_OCTET_MAX),
-      `${scheme} keeps every machine in the band`);
-  }
+  //
+  // This was a two-scheme loop until migration 038 retired v1. v1 and v2 drew
+  // the identical single flat segment, so the second pass proved nothing the
+  // first did not; with v1 gone the loop is one assertion pair, written out.
+  const { spec } = synth({ profile: profileWith('acme-clinic.com'), options: { subnetScheme: 'v2' } });
+  assert.ok(spec.vms.every(vm => !('nics' in vm)), 'v2 must emit no nics');
+  assert.ok(spec.vms.every(vm => vm.ipOctet >= SYNTH.SPEC_OCTET_MIN && vm.ipOctet <= SYNTH.SPEC_OCTET_MAX),
+    'v2 keeps every machine in the band');
 });
 
 test('assignLaneAddressing is unchanged for every caller that names no DMZ host', () => {

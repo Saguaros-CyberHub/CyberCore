@@ -198,7 +198,7 @@ echo "==> Snippet storage: $SNIPPET_STORAGE"
 
 # ---------- Generate the controller<->gateway SSH keypair ----------
 # This keypair is the trust link used by run.sh inside the controller to
-# talk to the lane's gateway (192.18.0.1) and write DHCP reservations.
+# talk to the lane's gateway (the lane subnet's .1) and write DHCP reservations.
 # The private key is baked into the controller template; the public key
 # must be added to the gateway template's /root/.ssh/authorized_keys.
 # Persist the keypair on this Proxmox node so re-runs are consistent.
@@ -327,7 +327,7 @@ write_files:
 
   # SSH private key for the controller→gateway link. Used by run.sh to
   # write DHCP reservations on the lane gateway (whatever \${GW_IP} resolves
-  # to per-lane — v1: 192.18.0.1 shared, v2: 10.<vxh>.<vxl>.1 unique) without
+  # to per-lane — v2: 10.<vxh>.<vxl>.1, unique per lane) without
   # the orchestrator needing any SSH access. The corresponding public key
   # must be in the gateway template's /root/.ssh/authorized_keys (added by
   # ../sdn-templates/patch-goad-gateway-key.sh for 1692; ../sdn-templates/
@@ -1564,7 +1564,7 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       # is just an upstream omission.
       add_route: "no"
       # GW_IP is computed earlier in run.sh from the FIRST HOST_MAP triple's
-      # /24 base + ".1" — works for v1 (192.18.0.1) and v2 (10.<vxh>.<vxl>.1)
+      # /24 base + ".1" — derived per lane, so it needs no scheme knowledge
       # without modification. The literal \${GW_IP} below is preserved
       # through the cloud-init heredoc into run.sh, which expands it at
       # runtime to whatever the lane's actual gateway IP is.

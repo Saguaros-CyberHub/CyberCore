@@ -400,11 +400,17 @@ test('a lane that is not pre-baked is untouched and never refused', () => {
   }
 });
 
-test('a v1/v2 lane pins its single LAN from the same field', () => {
+test('a v2 lane pins its single LAN from the same field', () => {
   // isV3 false: applyFixedSubnet writes net.lan, and there is no lanExt/lanInt.
+  //
+  // The pin used to read 192.18.0 here, which was the flat subnet EVERY v1 lane
+  // shared. v1 is retired (migration 038) and no allocator hands that block out
+  // any more, so the fixture uses another 10/8 base — the point of the test is
+  // that a pre-baked golden image's baked-in addressing OVERRIDES the allocated
+  // one, whatever it happens to be, not that any particular block is legal.
   const net = { wan: {}, lan: { base3: '10.39.17', cidr: '10.39.17.0/24', gatewayIp: '10.39.17.1' } };
   applyPrebakedFixedSubnet(net, false, {
-    goad: { prebaked: true, fixed_subnet: { int: '192.18.0', ext: '192.18.0' } },
+    goad: { prebaked: true, fixed_subnet: { int: '10.77.88', ext: '10.77.88' } },
   });
-  assert.strictEqual(net.lan.base3, '192.18.0');
+  assert.strictEqual(net.lan.base3, '10.77.88');
 });

@@ -68,9 +68,10 @@ test('external extension absence, wrong IP and wrong v3 network are refused', ()
   }), /external lane network/);
 });
 
-async function runOuter(fail, restoreFails = false) {
+async function runOuter(fail, restoreFails = false, dnatFails = false) {
   let state = { status: 'deploying', config: { existing_marker: 'preserve' } };
   const events = [], audits = [];
+  let dnatAttempted = false;
   const noop = async () => {};
   const spec = fixture();
   const meta = {
@@ -93,6 +94,18 @@ async function runOuter(fail, restoreFails = false) {
     cloneChallengeVm: async ({ vmSpec }) => ({ name: vmSpec.name, vm_id: vmSpec.vm_offset + 10000,
       node: 'node-test', type: 'qemu' }),
     cloneAttackBox: noop, proxmoxAPI: noop, waitForTask: noop,
+    // deployLaneVms no longer POSTs /status/start and sleeps 5s — it goes
+    // through gateway-lifecycle, which awaits the start task and CONFIRMS the
+    // container reached 'running' before anything is written into it. That gate
+    // is the whole point of the change (a gateway that died in
+    // lxc.hook.pre-start used to take three minutes to surface as "No route to
+    // host" from a GOAD controller), so it is stubbed to the healthy answer
+    // here: this file is about GOAD metadata and reservation ORDER, not about
+    // the gateway coming up.
+    gatewayLifecycle: {
+      ensureGatewayRunning: async () => ({ running: true, statusReadable: true, lastStatus: 'running' }),
+      waitForGatewayFirstboot: async () => true,
+    },
     writeLaneReservations: async () => {
       events.push('reservations');
       if (restoreFails && events.filter(e => e === 'reservations').length === 2) {
@@ -101,7 +114,17 @@ async function runOuter(fail, restoreFails = false) {
     },
     resolveGatewayTransitIp: async () => '100.100.60.12',
     discoverKaliIp: async () => '10.39.16.50',
-    laneDeployer: { installConsoleDnat: noop }, createLaneConsole: async () => '42',
+    laneDeployer: {
+      installConsoleDnat: async () => {
+        dnatAttempted = true;
+        // A console DNAT cannot be installed into a container that is not
+        // running, and the gateway's baked wan0:3389 rule covers Kali alone.
+        if (dnatFails) {
+          throw Object.assign(new Error("nodeExec exit 255: container '110000' not running!"),
+            { code: 255, remoteNotRunning: true, reachedRemote: true, sshLayer: false });
+        }
+      },
+    }, createLaneConsole: async () => '42',
     plantFlagsForLane: noop, registerWorkspaceVms: noop,
     audit: { log: async e => audits.push(e) },
     goadDeploy: {
@@ -135,7 +158,7 @@ async function runOuter(fail, restoreFails = false) {
       laneConfig: {}, extraSpecs: [], templateNodeByVmid: {}, logTag: 'test', progress,
     });
   } catch (err) { caught = err; }
-  return { state, events, audits, progress, caught };
+  return { state, events, audits, progress, caught, dnatAttempted };
 }
 
 test('successful outer deployment preserves returned GOAD metadata and other lane config', async () => {
@@ -184,4 +207,33 @@ test('the actual batch entry compiles before any allocation or clone dependency 
   vm.runInNewContext(functionSource('deployChallengeLanesInner') + '\nmodule.exports = deployChallengeLanesInner;', context);
   await assert.rejects(context.module.exports({ users: [{ id: 1 }], challenge: { spec: fixture() } }), /invalid rename/);
   assert.deepEqual(calls, ['compile']);
+});
+
+test('a console DNAT that lands in a stopped gateway fails the lane instead of being logged past', async () => {
+  // The third of the three swallows that hid the cyberhub-node-8 incident, and
+  // the one with the quietest failure mode. installConsoleDnat writes iptables
+  // rules INSIDE the gateway container; if that container is not running the
+  // rules do not exist, and the only thing still forwarding anything is the
+  // gateway's baked wan0:3389 -> <ext>.50 DNAT, which covers Kali on the base RDP
+  // port and nothing else. A spec machine published on 3389 would land the
+  // student on Kali; a second console would have no rule at all.
+  //
+  // Logged rather than thrown, that produces a lane that reports 'active' with
+  // consoles that connect to the wrong machine or to nothing -- which is worse
+  // than a failed deploy, because nobody goes looking.
+  const { caught, state, dnatAttempted } = await runOuter(false, false, true);
+
+  assert.ok(caught, 'a dead gateway must fail the lane, not be recorded as a console note');
+  assert.match(caught.message, /not running/);
+  assert.equal(caught.remoteNotRunning, true, 'the tag must survive so the caller can classify it');
+  assert.ok(dnatAttempted, 'the DNAT install was genuinely attempted');
+  // status stays 'deploying' HERE on purpose: unlike a GOAD failure, which is
+  // caught and carried into deployLaneVms' own final write, this one aborts
+  // before that write and it is deployChallengeLanesInner's batch catch that
+  // marks the row 'suspended' with config.error. What matters for teardown is
+  // that the cleanup inventory was already durable before the abort.
+  assert.equal(state.status, 'deploying');
+  assert.equal(state.config.gateway_vm_id, 110000,
+    'the cleanup inventory must already be persisted, or the abort strands the VMs');
+  assert.equal(state.config.vms.length, 3);
 });

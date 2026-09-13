@@ -255,7 +255,11 @@ async function loadChallenge(challengeId) {
 function describeChallenge(challenge) {
   const spec = challenge.spec || {};
   const vms = challengeLaneDeployer.resolveSpecVms(spec, challenge.challenge_key);
-  const subnetScheme = challenge.subnet_scheme || 'v1';
+  // No scheme on the row reads as v2, never v3: v2 is the one that keeps v1's
+  // shape (a single flat segment), where v3 would describe the challenge as
+  // segmented ext/int and change what this picker tells the instructor. v1 was
+  // retired by migration 038.
+  const subnetScheme = challenge.subnet_scheme || 'v2';
   const goadEnabled = !!spec.goad?.enabled;
 
   const attachBlockers = [];
@@ -462,12 +466,21 @@ async function deployLabLanes({
  */
 async function attachLabToLane({ lane, challenge, materialId, moduleKey }) {
   const laneConfig = typeof lane.config === 'string' ? JSON.parse(lane.config || '{}') : (lane.config || {});
-  const laneSubnetScheme = laneConfig.subnet_scheme
-    || (laneConfig.lane_subnet_base?.startsWith('10.') ? 'v2' : 'v1');
+  // This used to sniff lane_subnet_base for a leading '10.'; the only thing it
+  // ever distinguished was a v2 lane from a v1 lane on the shared
+  // 192.18.0.0/24. v1 is retired (migration 038), so an unlabelled lane is v2.
+  // A live lane still addressed out of 192.18.x IS a leftover v1 lane and has
+  // to be redeployed before anything can be attached to it.
+  const laneSubnetScheme = laneConfig.subnet_scheme || 'v2';
   const laneModule = lane.module_key || laneConfig.module || moduleKey;
 
   const wanIp = lane.gateway_wan_ip || laneConfig.gateway_wan_ip;
-  if (!wanIp && laneSubnetScheme !== 'v1') {
+  // Unconditional since v1 was retired. v1 was the ONLY scheme that could run
+  // without a pooled WAN address — its gateway reached the internet over its
+  // module's own transit /16 — which is why every v1 lane row carries a NULL
+  // gateway_wan_ip and why this check used to exempt it. Every lane left needs
+  // the lease.
+  if (!wanIp) {
     throw new Error(
       `Lane ${lane.lane_id} has no recorded gateway WAN address. Run migration ` +
       `033_lane_wan_ip.sql to backfill it — re-deriving it here would name a different ` +

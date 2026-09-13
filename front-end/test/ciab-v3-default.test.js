@@ -123,11 +123,16 @@ test('R1-2: the three call-site files import the constant and declare none of th
 
 test("R1-3: no call site carries a bare 'v2' fallback any more", () => {
   // Three spellings stay legal, and each is a DIFFERENT fact from "the default":
-  //   ['v1', 'v2', 'v3']              the CHECK vocabulary — v2 stays selectable
+  //   ['v2', 'v3']                    the accepted vocabulary — v2 stays selectable
   //   deploy_path: 'v2'               the shared-deployer pipeline, not a subnet
   //   ADOPTED_SUBNET_SCHEME = 'v2'    what an already-carved legacy block IS
+  //
+  // The first spelling lost its 'v1' when migration 038 retired the shared
+  // 192.18.0.0/24 scheme. It is still the VOCABULARY fact, not the default fact:
+  // these are the two values a caller may pass, and v3 is still what a caller
+  // who passes nothing gets.
   const ALLOWED = [
-    /\['v1',\s*'v2',\s*'v3'\]/,
+    /\['v2',\s*'v3'\]/,
     /deploy_path:\s*'v2'/,
     /const ADOPTED_SUBNET_SCHEME = 'v2';/,
   ];
@@ -529,9 +534,17 @@ test('R1-17: 016 is idempotent, because it re-runs on every single boot', () => 
 });
 
 test('R1-18: 016 narrows no vocabulary and renumbers nothing', () => {
+  // 016's job was to flip a DEFAULT, and at the time 006/010's
+  // CHECK (subnet_scheme IN ('v1','v2','v3')) still had live v1 rows behind it,
+  // so narrowing here would have made existing rows illegal on the next boot.
+  // The vocabulary WAS narrowed later — by 018_retire_v1_subnet_scheme.sql,
+  // which upgrades the v1 rows to v2 FIRST and only then rewrites the CHECK to
+  // (v2,v3). That ordering is the whole reason it is a separate migration, and
+  // this assertion still guards it: 016 must stay a DEFAULT-only change, or the
+  // narrowing moves back ahead of the data fix.
   assert.ok(!/CHECK\s*\(/i.test(MIG_CODE),
-    "006 and 010 both declare CHECK (subnet_scheme IN ('v1','v2','v3')). v2 stays fully selectable, "
-    + `and narrowing that would make every existing v1/v2 row illegal. ${R1}`);
+    '016 must declare no CHECK. The vocabulary narrowing belongs to 018, which '
+    + `upgrades the v1 rows to v2 before it rewrites the constraint. ${R1}`);
 
   const dir = path.join(CIAB, 'migrations');
   const files = fs.readdirSync(dir).filter((f) => f.endsWith('.sql')).sort();
@@ -606,6 +619,8 @@ test('R1-21: every subnet-scheme <select> pre-selects v3, and v2 stays offered',
   const ui = read(ENG_UI_JS);
   assert.ok(/s === ENG_DEFAULT_SUBNET_SCHEME \? ' selected' : ''/.test(ui),
     `the engagement modal must mark the constant selected, not a literal. ${R1}`);
-  assert.ok(/const ENG_SUBNET_SCHEMES = \['v1', 'v2', 'v3'\];/.test(ui),
-    `all three stay offered. ${R1}`);
+  assert.ok(/const ENG_SUBNET_SCHEMES = \['v2', 'v3'\];/.test(ui),
+    `both surviving schemes stay offered. v1 left this list when migration 038 `
+    + `retired it — the modal must not go on offering a scheme the CHECK now rejects, `
+    + `and it must not quietly drop v2 either. ${R1}`);
 });

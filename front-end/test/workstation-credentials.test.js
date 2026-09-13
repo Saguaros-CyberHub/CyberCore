@@ -52,8 +52,6 @@ stubModule('site-config.js', {
     gateway: '100.100.60.1', host_range: { first: '100.100.60.10', last: '100.100.63.254' },
     reserved: [], probe: { enabled: false, node: null, interface: 'vmbr0.60', timeout_ms: 2000 },
   }),
-  getV1LanSubnet: () => ({ base3: '192.18.0', cidr: '192.18.0.0/24', gateway_ip: '192.18.0.1', netmask24: '255.255.255.0' }),
-  getModuleNetwork: () => ({}), getModuleNetworks: () => ({}),
 });
 
 const { resolveWorkstationCredentials } = require(path.join(UTILS, 'lane-deployer.js'));

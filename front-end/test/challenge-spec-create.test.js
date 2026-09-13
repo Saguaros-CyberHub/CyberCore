@@ -178,7 +178,7 @@ test('segments are regenerated from the scheme, never trusted from the client', 
 });
 
 test('segments follow the scheme for every scheme', () => {
-  for (const scheme of ['v1', 'v2', 'v3']) {
+  for (const scheme of ['v2', 'v3']) {
     const out = buildSpecNetwork({ segments: [{ id: 'x' }] }, scheme);
     assert.deepStrictEqual(out.segments, resolveSegments(scheme), scheme);
   }

@@ -212,9 +212,9 @@ test('a spec with no stored positions asks for an auto-layout', () => {
 
 // ── schemes ──────────────────────────────────────────────────────────────────
 
-test('v1 draws one lan segment with every machine on it', () => {
+test('v2 draws one lan segment with every machine on it', () => {
   const { t } = draw({
-    subnet_scheme: 'v1',
+    subnet_scheme: 'v2',
     spec: {
       vms: [
         { name: 'a', type: 'qemu' },
@@ -228,9 +228,9 @@ test('v1 draws one lan segment with every machine on it', () => {
   for (const n of ['a', 'b', 'c']) assert.deepStrictEqual(plain(segmentsOf(t, n)), ['lan']);
 });
 
-test('an absent subnet_scheme falls back to v1, not v3', () => {
+test('an absent subnet_scheme falls back to v2, not v3', () => {
   const { built } = draw({ spec: { vms: [{ name: 'a' }] } });
-  assert.strictEqual(built.scheme, 'v1');
+  assert.strictEqual(built.scheme, 'v2');
   assert.deepStrictEqual(plain(built.graph.segments.map(s => s.id)), ['lan']);
 });
 
@@ -254,7 +254,7 @@ test('a spec that arrives as a JSON string is parsed', () => {
 
 test('a legacy row falls back to vm_specs when spec.vms is empty', () => {
   const { built } = draw({
-    subnet_scheme: 'v1',
+    subnet_scheme: 'v2',
     spec: {},
     vm_specs: JSON.stringify([{ name: 'legacy01', template_vmid: 1600 }]),
   });
@@ -263,7 +263,7 @@ test('a legacy row falls back to vm_specs when spec.vms is empty', () => {
 });
 
 test('an unnamed machine still renders, labelled', () => {
-  const { built } = draw({ subnet_scheme: 'v1', spec: { vms: [{ template_vmid: 1601 }] } });
+  const { built } = draw({ subnet_scheme: 'v2', spec: { vms: [{ template_vmid: 1601 }] } });
   assert.strictEqual(built.graph.nodes[0].name, '(unnamed)');
 });
 
@@ -280,7 +280,7 @@ test('a reserved lab network reports itself instead of looking broken', () => {
 });
 
 test('a normal empty-VM challenge is not mistaken for a reservation', () => {
-  const { built } = draw({ subnet_scheme: 'v1', spec: { vms: [] } });
+  const { built } = draw({ subnet_scheme: 'v2', spec: { vms: [] } });
   assert.strictEqual(built.isReservation, false);
 });
 
@@ -288,7 +288,7 @@ test('node ids are unique even when two machines share a name', () => {
   // Duplicate names are a validateTopology error, but the viewer must still draw
   // the spec rather than collapsing the two into one node and hiding the problem.
   const { t } = draw({
-    subnet_scheme: 'v1',
+    subnet_scheme: 'v2',
     spec: { vms: [{ name: 'dup', type: 'qemu' }, { name: 'dup', type: 'qemu' }] },
   });
   assert.strictEqual(t.cy.nodes('[kind="vm"]').length, 2);

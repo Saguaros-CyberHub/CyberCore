@@ -313,7 +313,7 @@ test('a pre-baked lane with NO extensions draws no prebaked-extension finding', 
 
 test('missing-template stays generic for an ordinary machine', () => {
   const r = validateTopology({
-    spec: {}, subnetScheme: 'v1',
+    spec: {}, subnetScheme: 'v2',
     specVms: [vm('box01', { vm_offset: 600000, template_vmid: null })],
   });
   const f = r.errors.find(x => x.code === 'missing-template');
@@ -367,7 +367,7 @@ test('duplicate names and missing templates are per-machine errors', () => {
 test('spec.template_vmid satisfies the template check for a legacy single-VM spec', () => {
   const r = validateTopology({
     spec: { template_vmid: 1700 },
-    subnetScheme: 'v1',
+    subnetScheme: 'v2',
     specVms: [{ name: 'metasploitable', vm_offset: 600000 }],
   });
   assert.ok(!has(r, 'missing-template'), codes(r));
@@ -457,12 +457,10 @@ test('a dual-homed host clears the pivot warning', () => {
   assert.ok(!has(r, 'empty-internal-segment'), codes(r));
 });
 
-test('v1/v2 never emit the v3-only segment warnings', () => {
-  for (const scheme of ['v1', 'v2']) {
-    const r = validateTopology({ subnetScheme: scheme, specVms: [vm('solo')] });
-    assert.ok(!has(r, 'empty-internal-segment'), scheme);
-    assert.ok(!has(r, 'no-pivot-host'), scheme);
-  }
+test('v2 never emits the v3-only segment warnings', () => {
+  const r = validateTopology({ subnetScheme: 'v2', specVms: [vm('solo')] });
+  assert.ok(!has(r, 'empty-internal-segment'), 'v2');
+  assert.ok(!has(r, 'no-pivot-host'), 'v2');
 });
 
 test('catalog check is a warning, and is skipped entirely when no catalog is passed', () => {
@@ -608,17 +606,13 @@ test('siem-octet-collision: include_kali false frees the octet', () => {
 
 test('siem-octet-collision: v3 puts them on different segments, so no finding', () => {
   // This is why the program plan called it a non-collision. It is only real on
-  // v1/v2, where ext and int are the same flat lan0.
+  // v2, where ext and int are the same flat lan0.
   const r = validateTopology({
     spec: GOAD_V2, subnetScheme: 'v3', specVms: [ELK({ ipOctet: 50 })],
   });
   assert.ok(!has(r, 'siem-octet-collision'), codes(r));
 });
 
-test('siem-octet-collision: v1 collides exactly as v2 does', () => {
-  const r = validateTopology({ spec: GOAD_V2, subnetScheme: 'v1', specVms: [ELK({ ipOctet: 50 })] });
-  assert.ok(has(r, 'siem-octet-collision'), codes(r));
-});
 
 test('siem-octet-collision: no GOAD block, no Kali, no finding', () => {
   const r = validateTopology({ subnetScheme: 'v2', specVms: [ELK({ ipOctet: 50 })] });

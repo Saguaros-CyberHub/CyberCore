@@ -11,6 +11,7 @@ const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 const { authenticateToken, requireRole } = require('../../middleware/auth');
 const { proxmoxAPI } = require('../../utils/proxmox');
+const gatewayLifecycle = require('../../utils/gateway-lifecycle');
 const { cybercoreQuery } = require('../../utils/cybercore-db');
 const { query } = require('../../utils/db');
 const { guacAPI, getGuacToken, GUAC_URL, GUAC_DS } = require('../../utils/guacamole');
@@ -600,11 +601,30 @@ router.patch('/groups/:id/toggle-active', authenticateToken, adminOnly, async (r
             const others = vmsToToggle.filter(v => v !== gateway);
 
             if (gateway) {
+              // Confirm the gateway actually came up instead of sleeping 3s and
+              // hoping. Resume hits the same /dev/rbd-pve udev race a fresh deploy
+              // does -- a node that rebooted, or one still doing Ceph backfill,
+              // fails lxc.hook.pre-start with status 32 -- and the workstations
+              // started just below DHCP off this container. Reporting "started"
+              // for a gateway that is stopped is what sends the admin looking at
+              // the workstations. See utils/gateway-lifecycle.js.
               try {
-                await proxmoxAPI('POST', `/api2/json/nodes/${node}/${gateway.type}/${gateway.vmid}/status/start`);
+                await gatewayLifecycle.ensureGatewayRunning({
+                  node, gatewayVmid: gateway.vmid, logTag: '[Toggle]',
+                });
                 console.log(`[Toggle] Started gateway ${gateway.vmid} on ${node}`);
-              } catch (e) { vmErrors.push(`Start gateway ${gateway.vmid}: ${e.message}`); }
-              await new Promise(r => setTimeout(r, 3000));
+              } catch (e) {
+                // The workstations are still started below: a half-resumed lane is
+                // easier for an admin to finish than a silently skipped one. But
+                // say plainly what they will find, because guests behind a stopped
+                // gateway come up with no address at all.
+                vmErrors.push(
+                  `Start gateway ${gateway.vmid}: ${e.message}` +
+                  (e.gatewayNotRunning
+                    ? ' — the machines on this lane were started anyway and will have no DHCP until it does.'
+                    : '')
+                );
+              }
             }
 
             for (const vm of others) {

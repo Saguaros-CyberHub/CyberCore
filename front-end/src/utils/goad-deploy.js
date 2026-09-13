@@ -8,7 +8,7 @@
 
 // QEMU guest-agent helpers for the controller VM. All exec into the
 // controller goes through the Proxmox HTTPS API — no SSH from this app.
-// The controller VM in turn SSHes into the lane gateway (192.18.0.1) to
+// The controller VM in turn SSHes into the lane gateway (the lane subnet's .1) to
 // write DHCP reservations, using a keypair baked into both templates.
 const { agentExec, agentShellExec, pollExecStatus, waitForGuestAgent } = require('./script-executor');
 // pct exec/push into the lane gateway LXC (used by writeDhcpReservations to drop
@@ -95,8 +95,8 @@ const CONTROLLER_TEMPLATE_VMID = 1700;
 // pointing at one of them makes a pre-baked lane legitimate.
 const PLAIN_BASE_TEMPLATE_VMID = 1011;
 
-// Lane subnet — provided per-deploy by the caller (admin.js v1: '192.18.0'
-// shared, v2: '10.<vxh>.<vxl>' unique per lane, v3: the INTERNAL segment's
+// Lane subnet — provided per-deploy by the caller (v2: '10.<vxh>.<vxl>'
+// unique per lane, v3: the INTERNAL segment's
 // '10.<vxh|0x80>.<vxl>' — GOAD always lives on the internal subnet in v3).
 // Last octets per role stay anchored to upstream GOAD's Proxmox provider
 // inventories so upstream playbooks work unmodified.
@@ -105,7 +105,7 @@ const PLAIN_BASE_TEMPLATE_VMID = 1011;
 // callsite forces the caller to pass the lane's base — no hidden global.
 function buildIp(laneSubnetBase, octet) {
   if (!laneSubnetBase) {
-    throw new Error('goad-deploy.buildIp: laneSubnetBase is required (e.g., "192.18.0" for v1, "10.39.17" for v2)');
+    throw new Error('goad-deploy.buildIp: laneSubnetBase is required (e.g., "10.39.17" for a v2 lane)');
   }
   return `${laneSubnetBase}.${octet}`;
 }
@@ -1142,7 +1142,7 @@ function macFor(role, vxlanId) {
  *
  * @param {object} spec
  * @param {number} vxlanId
- * @param {string} laneSubnetBase  — e.g., "192.18.0" (v1) or "10.39.17" (v2)
+ * @param {string} laneSubnetBase  — e.g., "10.39.17" (v2, or a v3 internal segment)
  */
 function prepareGoadMacs(spec, vxlanId, laneSubnetBase) {
   if (!spec?.goad?.enabled) return {};

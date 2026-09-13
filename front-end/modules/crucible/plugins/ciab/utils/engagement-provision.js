@@ -337,7 +337,7 @@ async function updateEngagementModel(engagementId, patch, {
   // place those machines exist.
   // subnetScheme comes from the ROW, not from the caller. This function already
   // holds the engagement, and the scheme is the fact that decides whether a
-  // placement is real: on v1/v2 there is one flat lan0 (lane-networking.js
+  // placement is real: on v2 there is one flat lan0 (lane-networking.js
   // resolveVmSegments), so an 'internal' or 'pivot' placement is a fiction and
   // validateEngagementPlan raises EXPOSURE_REQUIRES_V3. Without this argument
   // that warning could never fire on the authoring path — the only path an
@@ -769,8 +769,15 @@ async function createEngagement({
   if (!Number.isFinite(max) || max < 1 || max > 200) {
     throw Object.assign(new Error('max_students must be between 1 and 200'), { status: 400 });
   }
-  if (!['v1', 'v2', 'v3'].includes(subnetScheme)) {
-    throw Object.assign(new Error('subnet_scheme must be v1|v2|v3'), { status: 400 });
+  // v1 is named in the refusal instead of being treated as a typo: it was the
+  // shared 192.18.0.0/24 lane scheme, retired by migration 038, and an
+  // engagement created with it would reserve VXLANs for a topology that has no
+  // gateway template left to deploy.
+  if (!['v2', 'v3'].includes(subnetScheme)) {
+    throw Object.assign(new Error(subnetScheme === 'v1'
+      ? 'subnet_scheme v1 was RETIRED (migration 038): the shared 192.18.0.0/24 lane scheme '
+        + 'no longer deploys. Use v2 (one flat lane subnet) or v3 (segmented ext/int).'
+      : 'subnet_scheme must be v2|v3'), { status: 400 });
   }
 
   const existing = await resolveEngagement(profileId, engagement);

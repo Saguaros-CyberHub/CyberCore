@@ -2421,9 +2421,19 @@ async function runProfileDeploy(opts) {
   if (!Number.isFinite(numLanes) || numLanes < 1 || numLanes > 100) {
     throw Object.assign(new Error('num_lanes must be 1..100'), { statusCode: 400 });
   }
-  if (!['v1', 'v2', 'v3'].includes(subnetScheme)) {
+  // v1 is not just missing from this list, it was RETIRED: one flat
+  // 192.18.0.0/24 shared by every lane on the cluster, behind a gateway
+  // template picked per module (1691/1692/1693). Migration 038 (and the ciab
+  // 018 companion) upgraded the surviving rows and narrowed the CHECK, so a
+  // caller still sending 'v1' is running an old script or replaying a stale
+  // payload — the message says the scheme is gone rather than that the value is
+  // malformed, because "invalid" sends people looking for a typo.
+  if (!['v2', 'v3'].includes(subnetScheme)) {
     throw Object.assign(
-      new Error(`subnet_scheme must be v1|v2|v3 (default ${DEFAULT_SUBNET_SCHEME})`),
+      new Error(subnetScheme === 'v1'
+        ? 'subnet_scheme v1 was RETIRED (migration 038): the shared 192.18.0.0/24 lane scheme '
+          + 'no longer deploys. Use v2 (one flat lane subnet) or v3 (segmented ext/int).'
+        : `subnet_scheme must be v2|v3 (default ${DEFAULT_SUBNET_SCHEME})`),
       { statusCode: 400 });
   }
   // max_students reserves a VXLAN slice for future additions. Defaults to numLanes

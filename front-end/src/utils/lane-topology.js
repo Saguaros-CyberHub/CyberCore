@@ -51,8 +51,12 @@ async function buildLaneTopology(laneId) {
   const config = typeof lane.config === 'string' ? JSON.parse(lane.config || '{}') : (lane.config || {});
 
   // subnet_scheme is recorded on the lane; older rows predate it, so fall back
-  // to the presence of an internal VNet rather than assuming v1.
-  const subnetScheme = config.subnet_scheme || (config.vnet_internal ? 'v3' : 'v1');
+  // to the presence of an internal VNet. The flat answer is 'v2' rather than the
+  // 'v1' it used to be: both drew the same single 'lan' segment out of
+  // resolveSegments, so the only thing the old value ever changed was the scheme
+  // string echoed back in the payload — and it named a scheme that no longer
+  // exists.
+  const subnetScheme = config.subnet_scheme || (config.vnet_internal ? 'v3' : 'v2');
 
   const cidr = (base) => (base ? `${base}.0/24` : null);
   const segments = resolveSegments(subnetScheme).map(seg => ({

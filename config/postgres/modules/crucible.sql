@@ -94,17 +94,17 @@ CREATE TABLE IF NOT EXISTS crucible_challenge (
   module_key    TEXT DEFAULT 'crucible',
 
   -- Lane gateway subnet scheme this challenge uses.
-  --   v1: VMID 1692/1691/1693 lane gateway, shared 192.18.0.0/24 lane subnet,
-  --       gateway WAN through per-module transit (100.102.0.0/16). Default for
-  --       all pre-existing challenges.
+  --   (v1 was retired by migration 038: VMID 1691/1692/1693 by module, one flat
+  --    192.18.0.0/24 shared by EVERY lane, wan0 off a per-module transit /16.
+  --    No code path deploys it any more and the CHECK below no longer allows it.)
   --   v2: VMID 1694 subnet-agnostic lane gateway, unique
   --       10.<vxlan_high>.<vxlan_low>.0/24 per lane, gateway WAN directly on
   --       lab bridge (100.100.60.<derived>/24). Required for Tailscale BYOAB.
   --   v3: VMID 1695 segmented gateway (wan0 + ext0 + int0). Two SDN VNets per
   --       lane — external (Kali/BYOD) and internal (GOAD AD) — with the gateway
   --       firewall-blocking traffic between them. Forces a DMZ-pivot attack path.
-  subnet_scheme VARCHAR(8) NOT NULL DEFAULT 'v1'
-                 CHECK (subnet_scheme IN ('v1', 'v2', 'v3')),
+  subnet_scheme VARCHAR(8) NOT NULL DEFAULT 'v2'
+                 CHECK (subnet_scheme IN ('v2', 'v3')),
 
   -- JSONB spec that defines the actual infra and scoring model.
   -- Suggested structure:

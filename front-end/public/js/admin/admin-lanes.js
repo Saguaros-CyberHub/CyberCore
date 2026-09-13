@@ -416,12 +416,22 @@ function renderReconcileResult(r, meta) {
     // ---- node drift -------------------------------------------------------
     const cn = r.cluster_nodes || {};
     let nodeRows = '';
+    // Two reasons an online, correctly-declared node still receives no lanes.
+    // Neither is a fault, and without saying so here an admin reads an idle node
+    // as a broken one. Excluded is the operator's own site.json decision;
+    // quarantined is node-health's 15-minute auto-response to a gateway clone or
+    // start failure, which expires on its own.
+    const excludedSet = new Set(cn.excluded_nodes || []);
+    const quarantinedBy = new Map((cn.quarantined || []).map(q => [q.node, q]));
     if (cn.live?.length) {
       nodeRows = cn.live.map(n => {
         let verdict = '<span style="color:#38a169;">OK</span>';
+        const q = quarantinedBy.get(n.node);
         if (!n.declared) verdict = '<span style="color:#e53e3e;">not in site.json — SSH will fail</span>';
         else if (n.status !== 'online') verdict = `<span style="color:#d69e2e;">${escHtml(n.status)}</span>`;
         else if (n.live_ip && n.declared_ip && n.live_ip !== n.declared_ip) verdict = '<span style="color:#e53e3e;">IP mismatch</span>';
+        else if (excludedSet.has(n.node)) verdict = '<span style="color:#d69e2e;">drained — in cluster.scheduling.excluded_nodes, takes no new lanes</span>';
+        else if (q) verdict = `<span style="color:#d69e2e;">quarantined ${Math.max(0, Math.round((q.remaining_s || 0) / 60))} min (fault ${q.count || 1}): ${escHtml(q.reason || 'recent deploy failure')}</span>`;
         return `
         <tr>
           <td><code>${escHtml(n.node)}</code></td>

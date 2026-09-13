@@ -64,7 +64,12 @@
       max_lanes: DEFAULT_MAX_LANES,
       difficulty: 2,
       module: 'crucible',
-      subnet_scheme: 'v1',
+      // v2, never v3. Migration 038 retired v1 and upgraded every v1 challenge row
+      // to v2, and the two schemes draw the IDENTICAL canvas: one flat segment with
+      // id 'lan'. v3 draws two ('ext' and 'int'), so defaulting to it would silently
+      // redraw every seed that recorded no scheme as a segmented lane it never was.
+      // Every other fallback in this file is that same choice.
+      subnet_scheme: 'v2',
       vms: [],
       network: null,
       phantoms: [],
@@ -82,7 +87,7 @@
    */
   function blank(subnetScheme) {
     var seed = emptySeed();
-    seed.subnet_scheme = subnetScheme || 'v1';
+    seed.subnet_scheme = subnetScheme || 'v2';
     return seed;
   }
 
@@ -93,7 +98,8 @@
    *
    * That endpoint is SELECT *, so the row carries `subnet_scheme` — which the list
    * endpoint does not return and which decides whether the canvas draws one
-   * segment or two. Cloning from the list alone would silently default to v1.
+   * segment or two. Cloning from the list alone would silently default to v2 and
+   * flatten a segmented v3 challenge into one network.
    */
   function fromChallenge(row) {
     var seed = emptySeed();
@@ -122,7 +128,7 @@
     seed.phantoms = deepCopy(spec.phantom_assets) || [];
     seed.goad = deepCopy(spec.goad) || null;
 
-    seed.subnet_scheme = row.subnet_scheme || 'v1';
+    seed.subnet_scheme = row.subnet_scheme || 'v2';
     seed.name = row.name ? row.name + ' (copy)' : '';
     seed.description = row.description || '';
     seed.difficulty = row.difficulty;
@@ -215,8 +221,8 @@
 
     seed.vms = vms;
     // Pre-baked AD images carry full per-segment IPs, so they only make sense on a
-    // segmented lane; the pivot likewise has nothing to pivot between on v1/v2.
-    seed.subnet_scheme = (opts.addPivot || opts.blankVmids) ? 'v3' : (opts.subnetScheme || 'v1');
+    // segmented lane; the pivot likewise has nothing to pivot between on a flat v2.
+    seed.subnet_scheme = (opts.addPivot || opts.blankVmids) ? 'v3' : (opts.subnetScheme || 'v2');
     seed.network = null;          // no stored positions → the canvas auto-arranges
     seed.goad = {
       enabled: true,
@@ -286,7 +292,7 @@
     // the challenge-editor import does. There the challenge's scheme is already
     // fixed; here the designer owns it, and adopting it is what keeps the file's
     // nics[].segment ids valid instead of dangling.
-    seed.subnet_scheme = payload.subnet_scheme || 'v1';
+    seed.subnet_scheme = payload.subnet_scheme || 'v2';
     return seed;
   }
 
@@ -315,7 +321,7 @@
     if (!Editor) throw new Error('topology-editor.js must load before the topology viewer runs');
 
     var spec = parseMaybeJson(row && row.spec) || {};
-    var scheme = (row && row.subnet_scheme) || 'v1';
+    var scheme = (row && row.subnet_scheme) || 'v2';
     var specVms = (spec.vms && spec.vms.length)
       ? spec.vms
       : (parseMaybeJson(row && row.vm_specs) || []);
@@ -464,7 +470,7 @@
       max_lanes: Number(state.max_lanes),
       difficulty: state.difficulty,
       module: state.module || 'crucible',
-      subnet_scheme: state.subnet_scheme || 'v1',
+      subnet_scheme: state.subnet_scheme || 'v2',
       challenge_type: vms.length > 1 ? 'multi_vm' : 'single_vm',
       vms: vms
     };

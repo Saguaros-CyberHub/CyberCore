@@ -96,10 +96,29 @@ function getDefaultTemplateNode() {
 /**
  * Cluster scheduling thresholds and concurrency limits.
  * Returns the cluster.scheduling block with safe defaults if any key is absent.
+ *
+ * excluded_nodes is the operator's drain switch, and it exists because of
+ * cyberhub-node-8: it joined the cluster, started a Ceph backfill, and every
+ * lane the scheduler placed on it died in `pct start` with "Failed to run
+ * lxc.hook.pre-start ... status 32" -- the hook losing the race for the
+ * udev-created /dev/rbd-pve/<fsid>/<pool>/<image> symlink. There was no way to
+ * keep new lanes off that node short of taking it offline in Proxmox, which
+ * would also have disturbed the lanes already running on it. Listing a node
+ * here stops NEW placements only; existing lanes are untouched.
+ *
+ * This matters more than a config toggle usually does: node-selector scores on
+ * FREE capacity, so a node doing nothing but backfill looks like the emptiest
+ * machine in the cluster and gets picked FIRST. Without exclusion the scheduler
+ * actively steers a whole batch into the one node that cannot start a container.
+ *
+ * Consumers must ALSO default it to [] themselves -- several tests stub
+ * getSchedulingConfig() with only the numeric keys, and an undefined here turns
+ * into a TypeError deep inside placement.
  */
 function getSchedulingConfig() {
   const s = getConfig().cluster?.scheduling || {};
   return {
+    excluded_nodes:       Array.isArray(s.excluded_nodes) ? s.excluded_nodes.map(String) : [],
     min_free_mem_gb:      s.min_free_mem_gb      ?? 8,
     min_free_disk_gb:     s.min_free_disk_gb     ?? 20,
     max_concurrent_lanes: s.max_concurrent_lanes ?? 5,
@@ -108,24 +127,16 @@ function getSchedulingConfig() {
   };
 }
 
-/**
- * All module network configs keyed by module name (e.g. 'crucible').
- * Each entry: { bridge, gateway, subnet_base, cidr }
- * Entries with null gateway are declared but not yet wired.
- */
-function getModuleNetworks() {
-  return getConfig().cluster?.networking?.module_networks || {};
-}
-
-/**
- * Network config for a single module's v1 transit gateway.
- * Returns null if the module has no entry or its gateway is not yet configured.
- */
-function getModuleNetwork(moduleName) {
-  const net = getModuleNetworks()[moduleName];
-  if (!net || !net.gateway) return null;
-  return net;
-}
+// cluster.networking.module_networks and cluster.networking.v1_lane_subnet have
+// no readers any more. They described v1 and only v1: a per-module transit /16
+// that a lane gateway's wan0 hung off (crucible 100.102.0.0/16, cyberlabs and
+// forge declared but never wired), and the single flat 192.18.0.0/24 that EVERY
+// v1 lane shared behind its own gateway LXC. getModuleNetworks/getModuleNetwork/
+// getV1LanSubnet went out with the scheme.
+//
+// A deployed config/site.json that still carries those two blocks is harmless:
+// getConfig() parses the whole file and simply never asks for them, so retiring
+// v1 does not force an edit to a live site.json.
 
 /**
  * v2 lab (transit) network — the shared VLAN every v2/v3 lane gateway's wan0
@@ -208,20 +219,6 @@ function getV2LabNetwork() {
   };
 }
 
-/**
- * v1 shared lane LAN subnet (the same /24 is used inside every v1 lane,
- * isolated by the lane gateway LXC).
- */
-function getV1LanSubnet() {
-  const s = getConfig().cluster?.networking?.v1_lane_subnet || {};
-  return {
-    base3:      s.base3      || '192.18.0',
-    cidr:       s.cidr       || '192.18.0.0/24',
-    gateway_ip: s.gateway_ip || '192.18.0.1',
-    netmask24:  s.netmask24  || '255.255.255.0'
-  };
-}
-
 module.exports = {
   getConfig,
   getClusterNodes,
@@ -230,8 +227,5 @@ module.exports = {
   getNodeAddress,
   getDefaultTemplateNode,
   getSchedulingConfig,
-  getModuleNetworks,
-  getModuleNetwork,
-  getV2LabNetwork,
-  getV1LanSubnet
+  getV2LabNetwork
 };

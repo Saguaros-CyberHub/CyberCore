@@ -92,6 +92,65 @@ const SSH_FLAGS = [
 ];
 
 /**
+ * ssh's exit code, decoded into something a caller can branch on.
+ *
+ * 255 is AMBIGUOUS, and assuming otherwise is how this hint used to mislead.
+ * ssh returns 255 for its OWN failures (unresolvable host, auth refused,
+ * connection closed) -- but it also returns whatever the remote command
+ * returned, and `pct exec` against a stopped container exits 255 too. A real
+ * case: a gateway that failed to boot produced
+ *
+ *     nodeExec exit 255 ... pct exec 110811 -- /bin/sh -c mkdir -p /etc/dnsmasq.d
+ *     ssh could not reach 'cyberhub-node-8' ... check authorized_keys
+ *     container '110811' not running!
+ *
+ * ssh had connected fine. The cause was printed two lines under a hint pointing
+ * at SSH keys, and that is where the reader goes first.
+ *
+ * So: only claim an ssh-layer fault when ssh's OWN stderr says so. Anything else
+ * reached the node, and the remote output is the answer.
+ *
+ * The classification used to live inline in nodeExec's close handler and exist
+ * only inside the human-readable message, which meant no caller could act on
+ * it. challenge-lane-deployer.js printed "Check PROXMOX_SSH_KEY /
+ * PROXMOX_SSH_USER" on a node-8 deploy where ssh was perfectly healthy and the
+ * gateway LXC simply had not started -- it had no way to tell the two apart
+ * short of regexing the message it was handed. Hence the pure function and the
+ * three boolean tags stamped onto the thrown Error.
+ *
+ * Returns { reachedRemote, sshLayer, remoteNotRunning, hint }; hint is '' for
+ * any exit code other than 255, and otherwise carries a leading newline so it
+ * can be concatenated straight into an error message.
+ */
+function classifyExit({ code, stdout, stderr, node }) {
+  const out = stdout == null ? '' : String(stdout);
+  const err = stderr == null ? '' : String(stderr);
+
+  const SSH_LAYER = /ssh: connect to host|Could not resolve hostname|Permission denied|Host key verification failed|Connection (refused|timed out|closed) by|No route to host|Operation timed out/i;
+  const reachedRemote = code === 255 && !SSH_LAYER.test(err);
+  const sshLayer = code === 255 && !reachedRemote;
+
+  // pct prints exactly `container '110881' not running!`, on stderr from
+  // `pct exec` but on stdout from some of its siblings, so look at both.
+  const remoteNotRunning = /container '?\d+'? not running/i.test(`${err}\n${out}`);
+
+  let hint = '';
+  if (sshLayer) {
+    hint = nodeIsDeclared(node)
+      ? `\nssh could not reach '${node}' (${nodeAddress(node)}). It IS declared in site.json, so check that the orchestrator's public key is in ${SSH_USER}@${node}:~/.ssh/authorized_keys and that the node is up.`
+      : `\n'${node}' is NOT declared in site.json cluster.physical_cluster_ips, so ssh was handed the bare name and could not resolve it. Node selection reads the LIVE Proxmox cluster, so a newly joined node becomes schedulable BEFORE this map knows about it. Add the node and restart the app.`;
+  } else if (reachedRemote) {
+    // Surface the remote's own words instead of a theory about ssh.
+    const remote = (err.trim() || out.trim()).split(`\n`).filter(Boolean).pop() || '';
+    hint = remote
+      ? `\nssh connected; the REMOTE command failed: ${remote}`
+      : `\nssh connected, but the remote command exited 255 with no output.`;
+  }
+
+  return { reachedRemote, sshLayer, remoteNotRunning, hint };
+}
+
+/**
  * Single-quote one argument for a POSIX shell.
  *
  * ssh does not exec its trailing arguments remotely — it joins them with plain
@@ -131,40 +190,15 @@ function nodeExec(node, args, opts = {}) {
       clearTimeout(t);
       if (killed) return reject(new Error(`nodeExec timed out after ${timeoutMs}ms on ${node}: ${args.join(' ')}`));
       if (code !== 0) {
-        // 255 is AMBIGUOUS, and assuming otherwise is how this hint used to
-        // mislead. ssh returns 255 for its OWN failures (unresolvable host, auth
-        // refused, connection closed) -- but it also returns whatever the remote
-        // command returned, and `pct exec` against a stopped container exits 255
-        // too. A real case: a gateway that failed to boot produced
-        //
-        //     nodeExec exit 255 ... pct exec 110811 -- /bin/sh -c mkdir -p /etc/dnsmasq.d
-        //     ssh could not reach 'cyberhub-node-8' ... check authorized_keys
-        //     container '110811' not running!
-        //
-        // ssh had connected fine. The cause was printed two lines under a hint
-        // pointing at SSH keys, and that is where the reader goes first.
-        //
-        // So: only claim an ssh-layer fault when ssh's OWN stderr says so.
-        // Anything else reached the node, and the remote output is the answer.
-        const SSH_LAYER = /ssh: connect to host|Could not resolve hostname|Permission denied|Host key verification failed|Connection (refused|timed out|closed) by|No route to host|Operation timed out/i;
-        const reachedRemote = code === 255 && !SSH_LAYER.test(stderr);
-
-        let hint = '';
-        if (code === 255 && !reachedRemote) {
-          hint = nodeIsDeclared(node)
-            ? `\nssh could not reach '${node}' (${nodeAddress(node)}). It IS declared in site.json, so check that the orchestrator's public key is in ${SSH_USER}@${node}:~/.ssh/authorized_keys and that the node is up.`
-            : `\n'${node}' is NOT declared in site.json cluster.physical_cluster_ips, so ssh was handed the bare name and could not resolve it. Node selection reads the LIVE Proxmox cluster, so a newly joined node becomes schedulable BEFORE this map knows about it. Add the node and restart the app.`;
-        } else if (reachedRemote) {
-          // Surface the remote's own words instead of a theory about ssh.
-          const remote = (stderr.trim() || stdout.trim()).split(`\n`).filter(Boolean).pop() || '';
-          hint = remote
-            ? `\nssh connected; the REMOTE command failed: ${remote}`
-            : `\nssh connected, but the remote command exited 255 with no output.`;
-        }
+        const { reachedRemote, sshLayer, remoteNotRunning, hint } =
+          classifyExit({ code, stdout, stderr, node });
         const e = new Error(
           `nodeExec exit ${code} on ${node}: ${args.join(' ')}${hint}\nstderr: ${stderr.trim()}\nstdout: ${stdout.trim()}`
         );
         e.code = code; e.stdout = stdout; e.stderr = stderr;
+        // Tags, not prose: challenge-lane-deployer.js branches on these to decide
+        // whether to re-check the container's state or blame the SSH channel.
+        e.reachedRemote = reachedRemote; e.sshLayer = sshLayer; e.remoteNotRunning = remoteNotRunning;
         return reject(e);
       }
       resolve({ stdout, stderr, code });
@@ -205,8 +239,17 @@ function pctExecWithStdin(node, vmid, args, stdinData, opts = {}) {
       clearTimeout(t);
       if (killed) return reject(new Error(`pctExecWithStdin timed out after ${timeoutMs}ms on ${node}/${vmid}`));
       if (code !== 0) {
-        const e = new Error(`pctExecWithStdin exit ${code} on ${node}/${vmid}: ${args.join(' ')}\nstderr: ${stderr.trim()}`);
+        // This path used to throw with no hint at all, which mattered more than it
+        // looks: pctPushFromString runs pctExec (mkdir -p) and then THIS (cat >
+        // file), so on a gateway that never started, whichever of the two got
+        // there first is the one that reports it. Half the time that was this
+        // function, and it reported a bare "exit 255" with the container's own
+        // "not running!" line buried in stderr and nothing pointing at it.
+        const { reachedRemote, sshLayer, remoteNotRunning, hint } =
+          classifyExit({ code, stdout, stderr, node });
+        const e = new Error(`pctExecWithStdin exit ${code} on ${node}/${vmid}: ${args.join(' ')}${hint}\nstderr: ${stderr.trim()}`);
         e.code = code; e.stdout = stdout; e.stderr = stderr;
+        e.reachedRemote = reachedRemote; e.sshLayer = sshLayer; e.remoteNotRunning = remoteNotRunning;
         return reject(e);
       }
       resolve({ stdout, stderr, code });
@@ -242,6 +285,7 @@ module.exports = {
   pctExec,
   pctExecWithStdin,
   pctPushFromString,
+  classifyExit,
   SSH_USER,
   SSH_KEY
 };

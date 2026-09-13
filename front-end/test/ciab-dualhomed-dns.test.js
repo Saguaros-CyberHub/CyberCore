@@ -34,7 +34,7 @@
  *   1. The record points at the EXTERNAL .240. The host answers on both, and
  *      ext is the segment Kali is on; an int-side answer would route the
  *      student THROUGH the machine they are attacking.
- *   2. v1/v2 is a clean no-op. A multi-NIC spec on those schemes gets both NICs
+ *   2. v2 is a clean no-op. A multi-NIC spec on that scheme gets both NICs
  *      and NO static pinning, so there is no .240 — a record there would name an
  *      address nothing holds, which is worse than no record.
  *   3. Nothing malformed reaches the file. These lines land in the SAME file as
@@ -222,15 +222,15 @@ test('the AD forwarder can name the dual-homed host too — one table, both reco
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// 2. v1/v2: a clean no-op, not a wrong record
+// 2. v2: a clean no-op, not a wrong record
 // ════════════════════════════════════════════════════════════════════════════
 
-test('the same spec on a v1/v2 lane emits nothing and does not throw', () => {
-  // A multi-NIC spec on v1/v2 still gets both NICs, but the .240 ipconfig pass
+test('the same spec on a v2 lane emits nothing and does not throw', () => {
+  // A multi-NIC spec on v2 still gets both NICs, but the .240 ipconfig pass
   // is v3-only — so there is no static address to publish. Naming one anyway
   // would point the company's website at an address nothing on the lane holds,
   // which is strictly worse than the honest NXDOMAIN.
-  for (const subnetScheme of ['v1', 'v2', undefined]) {
+  for (const subnetScheme of ['v2', undefined]) {
     const spec = {
       dns: { web_name: 'www.acme-clinic.com', web_vm: 'WEB-01' },
       // Explicit nics[], because role 'dmz' derives to a single 'lan' off v3.

@@ -697,7 +697,7 @@ test('a version change on the editor resets the domains AND rebuilds from the la
   const h = loadEditor();
   h.els.tplGoadEnabled.checked = true;
   h.els.tplGoadVersion.value = 'GOAD-Mini';
-  h.run('templateVMs.length = 0; tplSubnetScheme = "v1";');
+  h.run('templateVMs.length = 0; tplSubnetScheme = "v2";');
   h.run('onTplGoadVersionChange();');
   assert.strictEqual(h.els.tplGoadDomain.value, 'sevenkingdoms.local',
     'the fields describe the lab that is now selected — this is the stale-value bug the Designer '
@@ -733,10 +733,10 @@ test('a non-v3 environment is TOLD its scheme cannot be changed here, not silent
   const warnings = [];
   h.sandbox.Toast.warning = (title, msg) => warnings.push(title + ': ' + msg);
   h.els.tplGoadEnabled.checked = true;
-  h.run('templateVMs.length = 0; tplSubnetScheme = "v1";');
+  h.run('templateVMs.length = 0; tplSubnetScheme = "v2";');
   h.els.tplGoadPrebaked.checked = true;
   h.run('onTplGoadPrebakedToggle(); __scheme = tplSubnetScheme;');
-  assert.strictEqual(h.sandbox.__scheme, 'v1', 'the row still says v1, so the card must too');
+  assert.strictEqual(h.sandbox.__scheme, 'v2', 'the row still says v2, so the card must too');
   assert.strictEqual(warnings.length, 1, 'and the author is told exactly once');
   assert.match(warnings[0], /v3/);
 });
@@ -812,7 +812,7 @@ test('changing to a supported multi-domain lab resets the opt-in and keeps it av
   const h = loadEditor();
   h.els.tplGoadEnabled.checked = true;
   h.els.tplGoadRenameForest.checked = true;
-  h.run('templateVMs.length = 0; tplSubnetScheme = "v1";');
+  h.run('templateVMs.length = 0; tplSubnetScheme = "v2";');
   h.els.tplGoadVersion.value = 'GOAD';
   h.run('onTplGoadVersionChange();');
   assert.equal(h.els.tplGoadRenameForest.checked, false);

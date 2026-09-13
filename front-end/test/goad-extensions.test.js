@@ -6,7 +6,7 @@
  *
  *  1. `.50` IS KALI. GOAD's own extensions/elk/inventory pins elk at
  *     {{ip_range}}.50, and INFRA_IP_OCTETS.Kali is 50. On v3 those sat on
- *     different segments; on v1/v2 there is ONE flat subnet and they are the
+ *     different segments; on v2 there is ONE flat subnet and they are the
  *     same address. Two dhcp-host lines claiming one address make dnsmasq
  *     refuse to start, which takes DHCP down for the WHOLE lane. So the catalog
  *     moves elk to .24 and a load-time guard refuses any extension on an infra
@@ -99,7 +99,7 @@ test('THE COLLISION: no extension sits on an infra octet, and elk specifically i
   assert.strictEqual(INFRA_IP_OCTETS.Kali, 50,
     'if Kali ever moves, the reason elk is at .24 changes and this file needs rereading');
   assert.notStrictEqual(GOAD_EXTENSIONS.elk.ipOctet, INFRA_IP_OCTETS.Kali,
-    'upstream pins elk at .50, which is Kali. On a flat v1/v2 lane that is one address, and dnsmasq '
+    'upstream pins elk at .50, which is Kali. On a flat v2 lane that is one address, and dnsmasq '
     + 'refuses to start on a duplicate dhcp-host — DHCP down for every machine in the lane.');
   for (const [key, ext] of Object.entries(GOAD_EXTENSIONS)) {
     for (const [infra, octet] of Object.entries(INFRA_IP_OCTETS)) {

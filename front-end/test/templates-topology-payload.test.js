@@ -97,7 +97,7 @@ test('THE BUG: a plain non-GOAD environment produces a payload, not a throw', ()
   assert.strictEqual(goadHostNames(JUICE_SHOP), null,
     'precondition: goadHostNames returns null, not an empty Set, for a non-GOAD spec');
 
-  const out = helpers.buildTopologyPayload(JUICE_SHOP, 'v1');
+  const out = helpers.buildTopologyPayload(JUICE_SHOP, 'v2');
   assert.deepStrictEqual(out.goad_host_names, []);
   assert.strictEqual(out.vms.length, 1);
   assert.strictEqual(out.vms[0].name, 'juice-shop');
@@ -111,7 +111,7 @@ test('a GOAD environment still reports its lab hosts', () => {
 
 test('a legacy single-VM spec with no vms[] is still drawable', () => {
   // metasploitable2-basic shape: a bare template_vmid and nothing else.
-  const out = helpers.buildTopologyPayload({ template_vmid: 1600 }, 'v1');
+  const out = helpers.buildTopologyPayload({ template_vmid: 1600 }, 'v2');
   assert.strictEqual(out.vms.length, 1, 'resolveSpecVms synthesizes one entry');
 });
 
@@ -127,11 +127,11 @@ test('an unrenderable environment degrades to an empty preview, not a 500', () =
   const out = helpers.safeTopologyPayload(
     // A spec whose vms is a string rather than an array: resolveSpecVms returns
     // no entries and .map would be the throw site if anything downstream assumed.
-    { get vms() { throw new Error('unreadable spec'); } }, 'v1', 'broken-row'
+    { get vms() { throw new Error('unreadable spec'); } }, 'v2', 'broken-row'
   );
   assert.deepStrictEqual(out.vms, []);
   assert.deepStrictEqual(out.goad_host_names, []);
-  assert.strictEqual(out.subnet_scheme, 'v1');
+  assert.strictEqual(out.subnet_scheme, 'v2');
 });
 
 test('the route calls the guarded wrapper, not the raw builder', () => {
@@ -152,7 +152,7 @@ test('nothing sensitive rides along in the payload', () => {
 test('per-VM keys are enumerated, so a future spec key cannot leak by default', () => {
   const out = helpers.buildTopologyPayload({
     vms: [{ name: 'web01', template_vmid: 1601, secret_note: 'do not ship this' }],
-  }, 'v1');
+  }, 'v2');
   assert.ok(!JSON.stringify(out).includes('secret_note'));
   assert.deepStrictEqual(Object.keys(out.vms[0]).sort(), [
     'console_protocol', 'console_role', 'layout', 'name', 'nics',

@@ -27,16 +27,26 @@ const goadRebrand = require('../utils/goad-lab-rebrand');
 
 const adminOnly = requireRole('admin');
 
+// The /24 the GOAD catalog endpoints render their ILLUSTRATIVE addresses on.
+// No lane ever lands on this exact base: v2 mints 10.<vxh>.<vxl>.0/24 per lane
+// (lane-networking.v2LaneSubnet) and v3 splits that into an ext and an int /24,
+// so the last octet — which GOAD's own inventory fixes — is the only half that
+// is stable enough to show in a dropdown. This used to be 192.18.0, the single
+// flat subnet every v1 lane shared; v1 was retired (migration 038) and leaving
+// its address on screen taught operators an addressing scheme that no longer
+// deploys anywhere.
+const ILLUSTRATIVE_LANE_BASE = '10.39.16';
+
 // GET /api/admin/goad/labs — single source of truth for the admin UI's
 // GOAD version dropdown. Returns the lab catalog from goad-deploy.js.
 router.get('/goad/labs', authenticateToken, adminOnly, (req, res) => {
   res.json({
     default_lab: goadDeploy.DEFAULT_LAB,
     // IPs shown here are ILLUSTRATIVE — the actual lane subnet is decided
-    // per-deploy by the challenge's subnet_scheme (v1: 192.18.0.X shared,
-    // v2: 10.<vxh>.<vxl>.X unique per lane). UI shows v1-style addresses
-    // because the last-octet pattern is the relevant invariant; the /24
-    // base is a deploy-time detail.
+    // per-deploy by the challenge's subnet_scheme (v2: 10.<vxh>.<vxl>.X unique
+    // per lane; v3: a separate ext and int /24). They are rendered on
+    // ILLUSTRATIVE_LANE_BASE because the last-octet pattern is the relevant
+    // invariant; the /24 base is a deploy-time detail.
     labs: Object.entries(goadDeploy.GOAD_LABS).map(([key, lab]) => ({
       key,
       displayName: lab.displayName,
@@ -62,13 +72,13 @@ router.get('/goad/labs', authenticateToken, adminOnly, (req, res) => {
         role:          v.role,
         os:            v.os,
         template_vmid: v.template_vmid,
-        ip:            goadDeploy.buildIp('192.18.0', v.ipOctet),  // illustrative
-        ip_octet:      v.ipOctet,                                  // authoritative
+        ip:            goadDeploy.buildIp(ILLUSTRATIVE_LANE_BASE, v.ipOctet),  // illustrative
+        ip_octet:      v.ipOctet,                                              // authoritative
         nic_model:     v.nic_model
       }))
     })),
     infra_ips: Object.fromEntries(
-      Object.entries(goadDeploy.INFRA_IP_OCTETS).map(([k, octet]) => [k, goadDeploy.buildIp('192.18.0', octet)])
+      Object.entries(goadDeploy.INFRA_IP_OCTETS).map(([k, octet]) => [k, goadDeploy.buildIp(ILLUSTRATIVE_LANE_BASE, octet)])
     ),
     infra_ip_octets: goadDeploy.INFRA_IP_OCTETS  // authoritative (last-octet only)
   });
@@ -92,8 +102,8 @@ router.get('/goad/extensions', authenticateToken, adminOnly, (req, res) => {
       os:            ext.os,
       template_vmid: ext.template_vmid,
       nic_model:     ext.nic_model,
-      ip:            goadDeploy.buildIp('192.18.0', ext.ipOctet),  // illustrative
-      ip_octet:      ext.ipOctet,                                  // authoritative
+      ip:            goadDeploy.buildIp(ILLUSTRATIVE_LANE_BASE, ext.ipOctet),  // illustrative
+      ip_octet:      ext.ipOctet,                                              // authoritative
       instruments:   ext.instruments,
       dns_aliases:   ext.dns_aliases || [],
       compatibility: ext.compatibility,       // null = every lab
@@ -423,7 +433,12 @@ router.post('/lab-templates/validate', authenticateToken, adminOnly, async (req,
 
     res.json(validateTopology({
       spec: merged,
-      subnetScheme: ['v1', 'v2', 'v3'].includes(subnet_scheme) ? subnet_scheme : 'v1',
+      // v1 is out of the vocabulary (migration 038 retired the shared
+      // 192.18.0.0/24 scheme), and anything unrecognised validates as v2 — the
+      // one-flat-segment shape v1 used to mean. Falling back to v3 instead
+      // would measure a one-segment lab against a segmented ext/int topology
+      // and report placement errors the author never authored.
+      subnetScheme: ['v2', 'v3'].includes(subnet_scheme) ? subnet_scheme : 'v2',
       specVms,
       catalogVmids,
     }));
@@ -638,9 +653,15 @@ router.post('/create-lab', authenticateToken, adminOnly, async (req, res) => {
 
     const moduleKey = (module || 'crucible').toLowerCase();
 
-    // subnet_scheme: v1/v2 = single-subnet lanes; v3 = segmented "DMZ" lanes
-    // (two SDN VNets per lane). Defaults to v1 for back-compat.
-    const subnetScheme = ['v1', 'v2', 'v3'].includes(subnet_scheme) ? subnet_scheme : 'v1';
+    // subnet_scheme: v2 = one flat lane subnet (10.<vxh>.<vxl>.0/24, gateway
+    // template 1694); v3 = segmented "DMZ" lanes (two SDN VNets per lane,
+    // gateway 1695). THIS LINE IS WHY v1 ROWS KEPT BEING MINTED long after v1
+    // stopped being deployable: a create request that simply omitted the field
+    // wrote 'v1' into the challenge, and the five seeded challenges migration
+    // 038 had to upgrade all arrived exactly that way. The default is v2, not
+    // v3, because v2 keeps v1's SHAPE — one segment with id 'lan'; defaulting
+    // to v3 would silently redraw every one-segment lab as segmented.
+    const subnetScheme = ['v2', 'v3'].includes(subnet_scheme) ? subnet_scheme : 'v2';
 
     const numLanes = parseInt(max_lanes);
     if (numLanes < 1 || numLanes > 200) {

@@ -24,6 +24,7 @@ const { logActivity } = require('../../middleware/activity-logger');
 const { waitForGuestAgent, executeScriptsOnVM, getVMIPs } = require('../../utils/script-executor');
 const { plantFlagsForLane } = require('../../utils/flag-manager');
 const { selectBestNode } = require('../../utils/node-selector');
+const gatewayLifecycle = require('../../utils/gateway-lifecycle');
 const goadDeploy = require('../../utils/goad-deploy');
 const { withGoadAgentVulnScripts } = require('../../utils/goad-agent-attach');
 const laneDeployer = require('../../utils/lane-deployer');
@@ -94,7 +95,11 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
       return res.status(400).json({ error: 'Template has no VM specs defined' });
     }
 
-    const subnetScheme = template.subnet_scheme || 'v1';
+    // Blank reads as v2, not v3: v2 keeps the shape v1 had — one flat lane
+    // segment with id 'lan' — where v3 is two (ext + int). v1 itself was
+    // retired by migration 038, which upgraded the surviving challenge rows and
+    // narrowed the CHECK to (v2,v3).
+    const subnetScheme = template.subnet_scheme || 'v2';
     validateGoadLaneAddressing(spec, subnetScheme);
 
     // Pre-flight resource check
@@ -215,6 +220,14 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
     const user = userResult.rows[0];
 
     // WAN transit address, allocated and ARP-verified before the row exists.
+    //
+    // v2 and v3 are the whole vocabulary now (migration 038 retired v1, the one
+    // scheme that needed no pooled address because it reached the internet
+    // through its module's own transit /16), so this enumeration is exhaustive.
+    // Kept as an enumeration rather than collapsed: 038 is hand-run, and on an
+    // un-migrated deployment a stale v1 row reaching here should fail in
+    // resolveLaneNetworking instead of first burning a WAN lease nothing will
+    // release.
     let laneWanIp = null;
     if (subnetScheme === 'v2' || subnetScheme === 'v3') {
       try {
@@ -279,7 +292,7 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
       try {
         const deployedVMs = [];
 
-        // Per-lane networking. v1/v2: one subnet. v3: external + internal.
+        // Per-lane networking. v2: one subnet. v3: external + internal.
         const net = resolveLaneNetworking(subnetScheme, challengeModule, vxlanId, { wanIp: laneWanIp });
         const isV3 = subnetScheme === 'v3';
         applyPrebakedFixedSubnet(net, isV3, spec);
@@ -402,7 +415,6 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
         });
         if (gwResult) await waitForTask(gatewayTemplateNode, gwResult);
         // Networking is scheme-aware:
-        //   v1 → wan0 via module transit; lan0 = 192.18.0.1/24 (shared)
         //   v2 → wan0 on lab network (vmbr0); lan0 = 10.<vxh>.<vxl>.1/24 (unique)
         // `net` resolved above. v3 gateway is 3-NIC: wan0 + ext0 + int0.
         if (isV3) {
@@ -418,7 +430,8 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
           });
         }
 
-        // v2/v3 only: mint+stage Tailscale auth key (silent no-op for v1)
+        // Mint + stage the lane's one-shot Tailscale auth key. Still a silent
+        // no-op when the Tailscale env vars are unconfigured.
         await configureLaneTailscale({
           subnetScheme,
           vxlanId,
@@ -428,9 +441,20 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
           logTag: '[ChallengeNetwork]'
         });
 
-        // Start gateway first
-        await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/status/start`);
-        await new Promise(r => setTimeout(r, 5000));
+        // Start the gateway first -- and PROVE it started, rather than firing the
+        // POST and sleeping. The blind start this replaces is the one that made
+        // every cyberhub-node-8 lane fail behind an error naming nothing real: the
+        // LXC lost the /dev/rbd-pve udev race in lxc.hook.pre-start, nothing
+        // checked, and the deploy carried on to write DHCP reservations into a
+        // stopped container. Throwing here marks the lane 'suspended' with a
+        // message naming vzstart:<vmid>. See utils/gateway-lifecycle.js.
+        await gatewayLifecycle.ensureGatewayRunning({
+          node: bestNode, gatewayVmid: gatewayVmId, logTag: '[ChallengeNetwork]',
+        });
+        // Firstboot rewrites /etc/dnsmasq.conf and the nat table from scratch, so
+        // it has to land BEFORE writeReservations writes over the same files.
+        await gatewayLifecycle.waitForGatewayFirstboot(bestNode, gatewayVmId,
+          { logTag: '[ChallengeNetwork]', subnetScheme });
 
         const writeReservations = () => writeLaneReservations({
           gatewayVmId, node: bestNode, vxlanId, goadMacs, pinnedHosts, dnsRecords,

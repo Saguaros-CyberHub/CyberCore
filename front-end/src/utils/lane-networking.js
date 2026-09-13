@@ -1,7 +1,7 @@
 /**
  * ============================================================================
  * LANE NETWORKING HELPERS
- * Subnet scheme logic, VMID constants, and gateway config for v1/v2/v3 lanes.
+ * Subnet scheme logic, VMID constants, and gateway config for v2/v3 lanes.
  * ============================================================================
  */
 
@@ -11,7 +11,7 @@ const tailscale = require('./tailscale');
 // top-level require is cycle-free.
 const goadDeploy = require('./goad-deploy');
 const { cybercoreQuery } = require('./cybercore-db');
-const { getModuleNetwork, getModuleNetworks, getV2LabNetwork, getV1LanSubnet } = require('./site-config');
+const { getV2LabNetwork } = require('./site-config');
 
 // ── VMID constants ────────────────────────────────────────────────────────────
 const V2_LANE_GATEWAY_VMID = 1694;
@@ -28,26 +28,20 @@ const KALI_TEMPLATE_VMID = 1699;
 // pulling in a deploy path.
 const DEFAULT_VM_OFFSET = 600000;
 
-// ── v1 transit gateway map and v2 lab network ─────────────────────────────────
+// ── v2 lab network ────────────────────────────────────────────────────────────
 // Topology is declared in config/site.json under cluster.networking.
-// Use getModuleNetwork(name) / getV2LabNetwork() / getV1LanSubnet() from site-config.
+// Use getV2LabNetwork() from site-config.
+//
+// The per-module v1 transit map that used to live here (crucible 100.102.0.0/16
+// and friends, read from cluster.networking.module_networks) went out with the
+// v1 scheme itself. A v1 lane's wan0 hung off its MODULE's transit /16 and never
+// drew an address from the pooled lab VLAN — which is exactly why every v1 row
+// in cybercore_lane carries gateway_wan_ip NULL. With v1 undeployable there is
+// nothing left for that map to answer, and a repo-wide audit found nothing else
+// that ever asked it.
 
-// Backward-compat exports — resolved lazily from site.json at first access.
-let _TRANSIT_BY_MODULE = null;
-let _V2_LAB_NETWORK    = null;
-
-function _transitByModule() {
-  if (!_TRANSIT_BY_MODULE) {
-    const nets = getModuleNetworks();
-    _TRANSIT_BY_MODULE = {};
-    for (const [mod, n] of Object.entries(nets)) {
-      if (n.gateway) {
-        _TRANSIT_BY_MODULE[mod] = { bridge: n.bridge, gateway: n.gateway, subnetBase: n.subnet_base, cidr: n.cidr };
-      }
-    }
-  }
-  return _TRANSIT_BY_MODULE;
-}
+// Backward-compat export — resolved lazily from site.json at first access.
+let _V2_LAB_NETWORK = null;
 
 function _v2LabNetwork() {
   if (!_V2_LAB_NETWORK) {
@@ -55,29 +49,6 @@ function _v2LabNetwork() {
     _V2_LAB_NETWORK = { bridge: n.bridge, vlanTag: n.vlan_tag, subnetBase: n.subnet_base, gateway: n.gateway, cidr: n.cidr };
   }
   return _V2_LAB_NETWORK;
-}
-
-/**
- * Compute the lane gateway LXC's wan0 config from the module + vxlan_id (v1).
- * Maps vxlan_id (uint16) deterministically into the module's /16.
- */
-function laneUplinkConfig(module, vxlanId) {
-  const map = _transitByModule();
-  const t = map[module];
-  if (!t) {
-    throw new Error(
-      `No transit gateway configured for module '${module}'. ` +
-      `Configured modules: ${Object.keys(map).join(', ')}. ` +
-      `Add the module under cluster.networking.module_networks in config/site.json once the transit LXC is up.`
-    );
-  }
-  const high = (vxlanId >> 8) & 0xFF;
-  const low  = vxlanId & 0xFF;
-  return {
-    bridge: t.bridge,
-    ip:     `${t.subnetBase}.${high}.${low}${t.cidr}`,
-    gw:     t.gateway
-  };
 }
 
 /**
@@ -125,7 +96,13 @@ function formatLaneHostname({ vxlanId, laneName } = {}) {
 
 /**
  * Render a lane gateway's net0 string from the wan config object.
- * v2 includes a VLAN tag (lab network is tagged); v1 omits it.
+ *
+ * The tag is always rendered now. v2 and v3 both land wan0 on the shared lab
+ * VLAN and getV2LabNetwork() always resolves a vlan_tag (defaulting to 60), so
+ * the null arm below no longer has a real caller — it used to be the v1 case,
+ * whose per-module transit bridge was untagged. It stays as a formatting guard
+ * only: a caller assembling a wan object by hand should get a valid net0 string
+ * rather than a literal `tag=undefined` that Proxmox rejects at clone time.
  */
 function formatLaneGatewayNet0(wan) {
   const parts = [
@@ -181,28 +158,63 @@ function v3InternalSubnet(vxlanId) {
 }
 
 /**
- * Resolve the gateway VMID for a deploy based on subnet scheme.
- *   v1: 1691/1692/1693 by module.
- *   v2: always 1694 (subnet-agnostic).
- *   v3: always 1695 (3-NIC segmented gateway).
+ * Resolve the gateway LXC template VMID for a deploy.
+ *
+ *   v3 → 1695, the segmented ext0/int0 gateway.
+ *   v2 → 1694, the single-LAN gateway. There is nothing else left.
+ *
+ * WHY spec.gateway_vmid IS NOT HONOURED, EVEN THOUGH THE FIELD EXISTS.
+ * The old body consulted a per-module v1 map (cyberlabs 1691 / crucible 1692 /
+ * forge 1693) and only fell through to `spec.gateway_vmid || 1692` for a module
+ * outside that map. Every real module was in the map, so the override was
+ * unreachable in practice. Deleting the map with the rest of v1 would hand it
+ * reach for the first time — and that is a regression, not the fix it looks
+ * like.
+ *
+ * There is exactly ONE spec.gateway_vmid in the entire repository: the seeded
+ * metasploitable2-basic challenge (migrations/007_cybercore_tables.sql:65)
+ * carries 1699, which was the ORIGINAL shared gateway template. That VMID has
+ * since been recycled — 1699 is KALI_TEMPLATE_VMID above, a QEMU image. Honour
+ * the override and deploying that challenge issues a clone of 1699 as an LXC
+ * gateway, i.e. tries to build a lane gateway out of the Kali template. Every
+ * other gateway_vmid in the codebase is a LANE INSTANCE id
+ * (GATEWAY_VMID_OFFSET + vxlanId), not a template, so nothing else would benefit
+ * from switching it on either.
+ *
+ * So the field stays inert, exactly as it has always behaved at runtime. If a
+ * challenge ever genuinely needs a bespoke gateway image, give it a scheme of
+ * its own rather than resurrecting a stale spec key whose one stored value now
+ * points at the wrong kind of machine.
+ *
+ * `module` is RETAINED FOR SIGNATURE ONLY. It no longer affects the answer, but
+ * five call sites pass it positionally, so dropping the parameter here would
+ * slide subnetScheme into its place.
  */
-function resolveGatewayVmid(module, subnetScheme, spec) {
-  if (subnetScheme === 'v3') return V3_LANE_GATEWAY_VMID;
-  if (subnetScheme === 'v2') return V2_LANE_GATEWAY_VMID;
-  const v1Map = { cyberlabs: 1691, crucible: 1692, forge: 1693 };
-  return v1Map[module] || (spec && spec.gateway_vmid) || 1692;
+function resolveGatewayVmid(module, subnetScheme, spec) {   // eslint-disable-line no-unused-vars
+  return subnetScheme === 'v3' ? V3_LANE_GATEWAY_VMID : V2_LANE_GATEWAY_VMID;
 }
 
 /**
  * Resolve the per-lane networking config based on subnet scheme.
- *   v1/v2: { wan, lan }            — single LAN subnet
- *   v3:    { wan, lanExt, lanInt } — segmented; `lan` deliberately omitted
+ *   v2: { wan, lan }            — single LAN subnet
+ *   v3: { wan, lanExt, lanInt } — segmented; `lan` deliberately omitted
  *
- * v2/v3 REQUIRE the lane's allocated WAN transit address to be passed in. It is
+ * Both REQUIRE the lane's allocated WAN transit address to be passed in. It is
  * no longer derivable: the derivation had 240 buckets and handed two live lanes
  * the same address (see legacyV2WanIp). Re-deriving it for a lane that already
  * exists is the exact failure this signature change eliminates, so there is no
  * silent default — a caller that supplies nothing throws rather than guessing.
+ *
+ * AN UNRECOGNISED SCHEME IS REJECTED FIRST, ahead of the wanIp check, and that
+ * ordering is the whole point of the branch. Letting anything non-v3 fall into
+ * the v2 arm would be one less line and the wrong answer: a v1 lane never had a
+ * pooled WAN address to pass, so it would fail with "needs its allocated WAN
+ * address passed as opts.wanIp" — a true sentence and completely the wrong
+ * diagnosis. The lane is not missing an address; its scheme no longer exists,
+ * and the fix is a redeploy as v2, not a lookup.
+ *
+ * `module` is retained for signature compatibility only. It was read by the v1
+ * uplink derivation and by nothing else; callers pass it positionally.
  *
  * @param {object}  [opts]
  * @param {string}  [opts.wanIp] the lane's allocated wan0 address, with or
@@ -213,43 +225,40 @@ function resolveGatewayVmid(module, subnetScheme, spec) {
  *   migration 033's backfill and the conflict audit's drift check only.
  */
 function resolveLaneNetworking(subnetScheme, module, vxlanId, opts = {}) {
-  if (subnetScheme === 'v3' || subnetScheme === 'v2') {
-    let wan;
-    if (opts.wanIp) {
-      const net = _v2LabNetwork();
-      const address = String(opts.wanIp).split('/')[0];
-      wan = { bridge: net.bridge, vlanTag: net.vlanTag, ip: `${address}${net.cidr}`, gw: net.gateway, address };
-    } else if (opts.allowLegacyDerivation) {
-      wan = legacyV2WanConfig(vxlanId);
-    } else {
-      throw new Error(
-        `resolveLaneNetworking: lane ${vxlanId} (${subnetScheme}) needs its allocated WAN ` +
-        `address passed as opts.wanIp. Deploy paths get it from ` +
-        `laneWanAllocator.allocateLaneWanIps(); read-back paths read ` +
-        `cybercore_lane.gateway_wan_ip. Re-deriving it from the vxlan id hands two lanes ` +
-        `the same address and the same Guacamole console host.`
-      );
-    }
-    return subnetScheme === 'v3'
-      ? { wan, lanExt: v2LaneSubnet(vxlanId), lanInt: v3InternalSubnet(vxlanId) }
-      : { wan, lan: v2LaneSubnet(vxlanId) };
+  if (subnetScheme !== 'v2' && subnetScheme !== 'v3') {
+    throw new Error(
+      `resolveLaneNetworking: lane ${vxlanId} declares subnet scheme '${subnetScheme}', which ` +
+      `this orchestrator no longer builds. The v1 scheme — one flat shared 192.18.0.0/24 behind ` +
+      `a per-module transit gateway — was retired, so a lane on it has to be REDEPLOYED as v2 ` +
+      `(single LAN, the same topology shape v1 drew) or v3 (segmented ext/int). It cannot be ` +
+      `resolved in place.`
+    );
   }
-  const v1Lan = getV1LanSubnet();
-  return {
-    wan: laneUplinkConfig(module, vxlanId),
-    lan: {
-      base3:     v1Lan.base3,
-      cidr:      v1Lan.cidr,
-      gatewayIp: v1Lan.gateway_ip,
-      netmask24: v1Lan.netmask24
-    }
-  };
+  let wan;
+  if (opts.wanIp) {
+    const net = _v2LabNetwork();
+    const address = String(opts.wanIp).split('/')[0];
+    wan = { bridge: net.bridge, vlanTag: net.vlanTag, ip: `${address}${net.cidr}`, gw: net.gateway, address };
+  } else if (opts.allowLegacyDerivation) {
+    wan = legacyV2WanConfig(vxlanId);
+  } else {
+    throw new Error(
+      `resolveLaneNetworking: lane ${vxlanId} (${subnetScheme}) needs its allocated WAN ` +
+      `address passed as opts.wanIp. Deploy paths get it from ` +
+      `laneWanAllocator.allocateLaneWanIps(); read-back paths read ` +
+      `cybercore_lane.gateway_wan_ip. Re-deriving it from the vxlan id hands two lanes ` +
+      `the same address and the same Guacamole console host.`
+    );
+  }
+  return subnetScheme === 'v3'
+    ? { wan, lanExt: v2LaneSubnet(vxlanId), lanInt: v3InternalSubnet(vxlanId) }
+    : { wan, lan: v2LaneSubnet(vxlanId) };
 }
 
 /**
  * For v2/v3 lanes: mint a one-shot Tailscale auth key and stage it in
  * lane_bootstrap_tokens for the gateway to fetch on first boot.
- * No-op if subnet_scheme is v1 or Tailscale env vars are not configured.
+ * No-op if Tailscale env vars are not configured.
  * Failure does NOT fail the deploy — logged as a warning.
  */
 async function configureLaneTailscale({ subnetScheme, vxlanId, wanIp, laneName, claimSecret, logTag = '[Deploy]' }) {
@@ -325,8 +334,8 @@ function applyFixedSubnet(net, isV3, fixedInt, fixedExt) {
 // pre-existing challenge deploys byte-for-byte as before.
 
 /**
- * The network segments a lane has, given its subnet scheme. v1/v2 lane gateways
- * (1692/1694) carry one LAN NIC; the v3 gateway (1695) carries two — ext0/int0.
+ * The network segments a lane has, given its subnet scheme. The v2 lane gateway
+ * (1694) carries one LAN NIC; the v3 gateway (1695) carries two — ext0/int0.
  *
  * Returned as a LIST rather than fixed keys so an N-segment gateway later is an
  * extra array entry, not a schema change. Ids are the stable identifiers that
@@ -345,7 +354,7 @@ function resolveSegments(subnetScheme) {
 /**
  * Map segment id → Proxmox bridge (SDN VNet) name.
  *
- * v1/v2 lanes have exactly one VNet, so every id resolves to it — that keeps a
+ * A v2 lane has exactly one VNet, so every id resolves to it — that keeps a
  * spec authored as v3 from exploding if its challenge is later switched to v2,
  * and matches the existing callers, which already pass the same vnet as both
  * ext and int on non-v3 lanes.
@@ -364,7 +373,7 @@ function resolveSegmentBridges(subnetScheme, vnetExtName, vnetIntName) {
  * pre-canvas derivation exactly —
  *   v3 + role 'dmz' + qemu → ext then int  (the dual-homed pivot host)
  *   v3 + GOAD-matched name → int
- *   everything else         → ext (v3) / lan (v1,v2)
+ *   everything else         → ext (v3) / lan (v2)
  *
  * The qemu guard on the dmz rule is not cosmetic: the old code returned from the
  * LXC branch before ever reaching the dual-homing block, so an LXC marked 'dmz'
@@ -518,9 +527,7 @@ module.exports = {
   ATTACK_BOX_VMID_OFFSET,
   KALI_TEMPLATE_VMID,
   DEFAULT_VM_OFFSET,
-  get TRANSIT_BY_MODULE() { return _transitByModule(); },
   get V2_LAB_NETWORK()    { return _v2LabNetwork(); },
-  laneUplinkConfig,
   // v2WanConfig is gone: it derived a non-unique address. Assign through
   // utils/lane-wan-allocator.js; these two exist only for the 033 backfill and
   // the conflict audit's drift check.

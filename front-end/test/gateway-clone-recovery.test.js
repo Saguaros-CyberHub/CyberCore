@@ -63,9 +63,6 @@ stub('site-config.js', {
     host_range: { first: '100.100.60.10', last: '100.100.63.254' },
     reserved: [],
   }),
-  getV1LanSubnet: () => '192.18.0.0/24',
-  getModuleNetwork: () => null,
-  getModuleNetworks: () => ({}),
 });
 
 // ── the stubbed cluster ──────────────────────────────────────────────────────

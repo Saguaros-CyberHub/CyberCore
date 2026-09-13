@@ -116,7 +116,7 @@ test('layer 4: an omitted nics key derives, which is the documented contract', (
 
 // ── 2. the full round trip ───────────────────────────────────────────────────
 
-for (const scheme of ['v1', 'v2', 'v3']) {
+for (const scheme of ['v2', 'v3']) {
   test(`the round trip re-attaches on ${scheme} — and that is now a LOUD outcome`, () => {
     const authored = { name: 'DC01', role: '', type: 'qemu', template_vmid: 1004, vm_offset: 600000 };
 
@@ -153,7 +153,7 @@ test('the re-attach is never SILENT — a detached spec always carries an error'
   // The one invariant worth stating on its own: for every scheme, and for both
   // shapes of "zero segments", validateTopology refuses. If this ever passes
   // clean, the bug is back in exactly the form it had before.
-  for (const scheme of ['v1', 'v2', 'v3']) {
+  for (const scheme of ['v2', 'v3']) {
     for (const nics of [[], [{}], [null], [{ segment: '' }]]) {
       const r = validateTopology({
         subnetScheme: scheme,

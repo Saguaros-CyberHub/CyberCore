@@ -8,6 +8,11 @@
  */
 
 const { getSchedulingConfig } = require('./site-config');
+// Placement filter shared with node-selector.selectBestNode(). Batch and single
+// deploys used to disagree about which nodes were usable -- see the comment on
+// filterSchedulableNodes. node-selector pulls in proxmox + site-config +
+// node-health and nothing else, so this direction of the dependency is acyclic.
+const { filterSchedulableNodes } = require('./node-selector');
 
 const { max_concurrent_lanes: MAX_CONCURRENT_LANES, max_concurrent_clones: MAX_CONCURRENT_CLONES } = getSchedulingConfig();
 
@@ -126,9 +131,12 @@ async function distributeAcrossNodes(proxmoxAPI, numLanes) {
   const { min_free_mem_gb, node_score_weights: W } = getSchedulingConfig();
   const minFreeMem = min_free_mem_gb * 1024 ** 3;
 
-  // Score nodes (lower = more capacity)
-  const nodes = resources
-    .filter(n => n && n.type === 'node' && n.status === 'online')
+  // Score nodes (lower = more capacity). The online/excluded/quarantined
+  // decision is NOT made here: batch placement used to keep its own inline
+  // online-only filter, which is how a batch of six lanes could still be
+  // spread across cyberhub-node-8 after an operator had excluded it, while a
+  // single-lane deploy through selectBestNode correctly avoided it.
+  const nodes = filterSchedulableNodes(resources, { logTag: '[BatchDeployer]' })
     .map(n => {
       const maxmem = Number(n.maxmem || 0);
       const mem = Number(n.mem || 0);

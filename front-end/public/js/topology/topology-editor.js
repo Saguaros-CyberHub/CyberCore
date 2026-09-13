@@ -120,7 +120,7 @@
    * opts:
    *   canvasEl, paletteEl, panelEl, findingsEl   DOM nodes
    *   vms          array of templateVMs rows (mutated in place)
-   *   subnetScheme 'v1' | 'v2' | 'v3'
+   *   subnetScheme 'v2' | 'v3'
    *   network      existing spec.network, or null
    *   goadHosts    array of GOAD lab host names, or null
    *   onChange     fn() — called after any structural or property edit
@@ -132,7 +132,7 @@
     var findingsEl = opts.findingsEl;
 
     var vms = opts.vms || [];
-    var scheme = opts.subnetScheme || 'v1';
+    var scheme = opts.subnetScheme || 'v2';
     var network = opts.network || null;
     var goadHosts = normaliseGoad(opts.goadHosts);
     var selectedId = null;

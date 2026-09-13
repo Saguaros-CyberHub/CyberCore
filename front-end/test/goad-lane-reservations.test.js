@@ -444,3 +444,84 @@ test('the second write is byte-identical to the first', async () => {
   const second = await reservationFile(GOAD_LANE);
   assert.deepStrictEqual(second, first);
 });
+
+// ── the swallow that hid the node-8 incident ────────────────────────────────
+//
+// These three assertions exist because a mutation run proved the fix was
+// undefended: deleting the `err.remoteNotRunning` rethrow, restoring the
+// unconditional "Check PROXMOX_SSH_KEY / PROXMOX_SSH_USER." advice, AND deleting
+// installConsoleDnat's rethrow left the entire suite green. Nothing reached the
+// catch block at all -- every existing driver above swaps in a capture stub that
+// cannot fail.
+//
+// The batch deploy path is no longer the one at risk: deployLaneVms now proves
+// the gateway is running before it writes anything. Two paths still depend
+// entirely on this rethrow, and both are real:
+//   1. rebuildLaneMachines, which checks only that the gateway LXC EXISTS in
+//      cluster/resources and then writes into it;
+//   2. any deploy where GET /status/current was UNREADABLE -- startGatewayAndConfirm
+//      deliberately continues on "no information", so `pct exec` is the first
+//      thing that discovers the container is down.
+
+/** Drive writeLaneReservations with an installLaneReservations that rejects. */
+async function reservationFailure(err) {
+  const realInstall = laneDeployer.installLaneReservations;
+  const log = console.log;
+  const error = console.error;
+  const logged = [];
+  laneDeployer.installLaneReservations = async () => { throw err; };
+  console.log = () => {};
+  console.error = (m) => logged.push(String(m));
+  try {
+    let thrown = null;
+    try { await writeLaneReservations(GOAD_LANE); } catch (e) { thrown = e; }
+    return { thrown, logged };
+  } finally {
+    laneDeployer.installLaneReservations = realInstall;
+    console.log = log;
+    console.error = error;
+  }
+}
+
+test('THE SWALLOW: a gateway that is not running fails the lane instead of being logged past', async () => {
+  // What this catch used to do with it: print a line and carry on. The lane then
+  // started every VM, cloned a GOAD controller and died three to five minutes
+  // later inside prep.sh with "No route to host" -- an error about a machine that
+  // was never at fault. There is no fallback to fall back TO: the "degraded but
+  // usable" outcome is the gateway's own baked dhcp-host line, served by the
+  // dnsmasq inside the container that just refused to answer.
+  const { thrown, logged } = await reservationFailure(Object.assign(
+    new Error("nodeExec exit 255 on cyberhub-node-8: pct exec 110881 -- /bin/sh -c mkdir -p /etc/dnsmasq.d\n"
+      + "ssh connected; the REMOTE command failed: container '110881' not running!"),
+    { code: 255, remoteNotRunning: true, reachedRemote: true, sshLayer: false }
+  ));
+
+  assert.ok(thrown, 'a stopped gateway must abort the lane, not be logged past');
+  assert.strictEqual(thrown.gatewayNotRunning, true,
+    'and it must be tagged so the caller can tell this from any other reservation failure');
+  assert.match(thrown.message, /is not running/);
+  assert.match(thrown.message, /5016/, 'the message must name the gateway');
+  assert.strictEqual(logged.length, 0, 'it throws instead of logging — no swallow remains');
+});
+
+test('the SSH-key advice appears only when the SSH layer is really where it died', async () => {
+  // This sentence printed underneath "container '110881' not running!" is what
+  // sent the node-8 investigation into PROXMOX_SSH_KEY for a day, on a cluster
+  // whose key was fine and whose gateway was simply stopped.
+  const remote = await reservationFailure(Object.assign(
+    new Error('nodeExec exit 255: something the remote said'),
+    { code: 255, reachedRemote: true, sshLayer: false }
+  ));
+  assert.strictEqual(remote.thrown, null, 'a reachable gateway that failed some other way stays survivable');
+  assert.strictEqual(remote.logged.length, 1);
+  assert.ok(!/PROXMOX_SSH_KEY/.test(remote.logged[0]),
+    `the SSH-key hint must not appear when ssh connected fine:${LF}${remote.logged[0]}`);
+
+  const sshDead = await reservationFailure(Object.assign(
+    new Error('nodeExec exit 255 on cyberhub-node-8: ssh: connect to host 100.100.10.18 port 22: No route to host'),
+    { code: 255, reachedRemote: false, sshLayer: true }
+  ));
+  assert.strictEqual(sshDead.thrown, null);
+  assert.match(sshDead.logged[0], /Check PROXMOX_SSH_KEY \/ PROXMOX_SSH_USER\./,
+    'and it MUST appear when the SSH layer is genuinely where the call died');
+});

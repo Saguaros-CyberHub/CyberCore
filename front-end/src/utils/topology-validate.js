@@ -272,8 +272,14 @@ function findForestRenameRefusals(spec) {
  * `catalogVmids` (optional) is the set of template_vmids known to
  * cybercore_template_catalog. Absent → the catalog check is skipped rather
  * than reported as failing, because an incomplete catalog is not a spec bug.
+ *
+ * `subnetScheme` defaults to 'v2', the single-LAN shape. It defaulted to 'v1'
+ * until that scheme was retired; both resolve to the same one 'lan' segment, so
+ * nothing about the checks moved — but the string is interpolated VERBATIM into
+ * the messages an author reads (unknown-segment, siem-octet-collision), and
+ * those were naming a scheme nobody can deploy.
  */
-function validateTopology({ spec = {}, subnetScheme = 'v1', specVms = [], catalogVmids = null } = {}) {
+function validateTopology({ spec = {}, subnetScheme = 'v2', specVms = [], catalogVmids = null } = {}) {
   const findings = [];
   const add = (severity, code, message, vm = null) => findings.push({ vm, code, severity, message });
 
@@ -488,8 +494,8 @@ function validateTopology({ spec = {}, subnetScheme = 'v1', specVms = [], catalo
 
   // .50 is Kali (goad-deploy INFRA_IP_OCTETS.Kali), and the gateway bakes its
   // RDP DNAT against exactly that value. On v3 Kali sits on the external segment
-  // while a SIEM would sit internally, so the two never meet; on v1/v2 there is
-  // ONE flat lan0 and they are the same address on the same subnet. dnsmasq
+  // while a SIEM would sit internally, so the two never meet; on a v2 lane there
+  // is ONE flat lan0 and they are the same address on the same subnet. dnsmasq
   // refuses to start when two dhcp-host lines claim one address — which takes
   // DHCP down for the WHOLE lane, not just these two machines.
   //

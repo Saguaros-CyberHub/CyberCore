@@ -305,7 +305,7 @@ test('an out-of-range or non-integer ipOctet is rejected, not silently masked', 
 test('the lane gateway and the GOAD controller are never handed to a spec VM', () => {
   // .1 is the gateway itself. .5 is the GOAD controller, whose dhcp-host line is
   // written from liveGoadController and is therefore NOT in goadMacs — so the
-  // allocator cannot learn it from there. On a v1/v2 lane the internal and
+  // allocator cannot learn it from there. On a v2 lane the internal and
   // external bases are the same string, so a spec VM pinned to .5 emits a second
   // dhcp-host for one address and dnsmasq refuses to start, taking DHCP down for
   // the whole lane while it still reports 'active'.

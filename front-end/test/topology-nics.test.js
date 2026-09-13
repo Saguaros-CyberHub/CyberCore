@@ -71,8 +71,6 @@ const CASES = [
     { name: 'web01', type: 'qemu', role: 'dmz', vm_offset: 620000 }, 'v2', null],
   ['v2 GOAD-matched qemu → lane vnet (no internal segment exists)',
     { name: 'DC01', type: 'qemu', vm_offset: 630000 }, 'v2', GOAD_DC],
-  ['v1 plain qemu → lane vnet',
-    { name: 'metasploitable', type: 'qemu', vm_offset: 600000 }, 'v1', null],
 ];
 
 for (const [label, vmSpec, subnetScheme, goadVm] of CASES) {
@@ -90,8 +88,7 @@ for (const [label, vmSpec, subnetScheme, goadVm] of CASES) {
 }
 
 // ── segment model ────────────────────────────────────────────────────────────
-test('resolveSegments: v1/v2 have one segment, v3 has two', () => {
-  assert.deepStrictEqual(resolveSegments('v1').map(s => s.id), ['lan']);
+test('resolveSegments: v2 has one segment, v3 has two', () => {
   assert.deepStrictEqual(resolveSegments('v2').map(s => s.id), ['lan']);
   assert.deepStrictEqual(resolveSegments('v3').map(s => s.id), ['ext', 'int']);
 });

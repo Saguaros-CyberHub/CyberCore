@@ -64,17 +64,15 @@ const guacCreds = require('./guac-credentials');
 const { generatePassword } = require('./password-generator');
 const { macForOctet, INFRA_IP_OCTETS } = require('./goad-deploy');
 const nodeSsh = require('./node-ssh');
+const gatewayLifecycle = require('./gateway-lifecycle');
 const tailscale = require('./tailscale');
 const { claimsSql } = require('./lane-claims');
 const { isHiddenTemplateRow } = require('./workspace-visibility');
 
 const GATEWAY_VMID_OFFSET = 100000;     // gateway LXC = 100000 + vxlanId (matches groups.js)
 const WORKSTATION_VMID_OFFSET = 600000; // slot-0 workstation = 600000 + vxlanId
-// A gateway start can fail on a rootfs mount that succeeds moments later --
-// the same udev/RBD race GATEWAY_CLONE_RETRY_MS exists for. Only a FAILED
-// start ever waits, so a healthy deploy is unchanged.
-const GATEWAY_START_ATTEMPTS = 3;
-const GATEWAY_START_RETRY_MS = 6000;
+// GATEWAY_START_ATTEMPTS / GATEWAY_START_RETRY_MS moved to gateway-lifecycle.js
+// so the challenge-lane path retries the same ladder this one does.
 const TEMP_GW_TEMPLATE_BASE = 169300;   // per-node temp gateway template copies (clear of groups.js' 169200)
 // GOAD controller = 200000 + vxlanId. Mirrors goad-deploy.js deployController();
 // teardown needs it because the controller is never recorded on the lane.
@@ -939,93 +937,8 @@ async function findCloudInitDrive(node, vmid) {
 
 // ── gateway plumbing ─────────────────────────────────────────────────────────
 
-/**
- * Block until the gateway's own firstboot hook has finished rendering its
- * config, so applyGatewayWorkstationAccess writes on top of it instead of under
- * it.
- *
- * /etc/local.d/00-cybercore-firstboot.start (see
- * infrastructure/proxmox-templates/sdn-templates/v2_gateway/) REWRITES
- * /etc/dnsmasq.conf from scratch on every boot and re-adds its baked
- * `dhcp-host=kali,<base>.50` line, then rewrites the nat table. Both of those
- * undo what applyGatewayWorkstationAccess just did, and the second one is not
- * merely lost work: the baked kali line plus our own MAC reservation are two
- * dhcp-host entries claiming the SAME address, and dnsmasq then refuses to
- * start at all. No DHCP means no workstation lands on its reserved octet, and
- * every console on the lane — including slot 0 on the baked wan0:3389 DNAT —
- * points at an address nothing answers on.
- *
- * This used to be a flat 5-second sleep, which held only while the node was
- * idle enough to boot an Alpine LXC in under 5s. Deploying a class breaks that
- * assumption on every lane after the first: the node is busy cloning and
- * booting the previous student's workstation, firstboot lands after our writes
- * instead of before them, and the whole cohort comes up with dead consoles
- * while the lanes still report 'active'. Hence a marker, not a timer.
- *
- * The marker is the persisted rules-save, written at the END of firstboot's
- * config phase — after the dnsmasq render and after every iptables rule. What
- * follows it is the Tailscale bootstrap, which retries for up to 10 minutes and
- * touches none of this, so waiting for that too would stall every deploy.
- *
- * Never throws: a gateway we cannot reach over SSH is exactly what
- * applyGatewayWorkstationAccess reports (and deployLaneWorkstations decides on)
- * moments later, with a better message than this could give.
- *
- * @returns {Promise<boolean>} whether firstboot was observed to finish.
- */
-async function waitForGatewayFirstboot(node, gatewayVmid, { timeoutMs = 180000 } = {}) {
-  const deadline = Date.now() + timeoutMs;
-  const probe = [
-    '/bin/sh', '-c',
-    // `|| true` on the whole chain: pctExec rejects on a non-zero exit, and
-    // "not ready yet" is the expected answer for most of this loop.
-    `grep -q '^interface=lan0' /etc/dnsmasq.conf && ` +
-    `grep -q 'CYBERCORE-KALI-RDP' /etc/iptables/rules-save && echo firstboot-done || true`,
-  ];
-
-  let lastErr = null;
-  let attempt = 0;
-  let consecutiveErrors = 0;
-  while (Date.now() < deadline) {
-    if (attempt++ > 0) await new Promise(r => setTimeout(r, 3000));
-    try {
-      const res = await nodeSsh.pctExec(node, gatewayVmid, probe, { timeoutMs: 30000 });
-      consecutiveErrors = 0;
-      if (String(res?.stdout || '').includes('firstboot-done')) return true;
-    } catch (e) {
-      // The container may not be far enough into its boot to run `pct exec` yet,
-      // so an error is not automatically the end. But the whole budget must not
-      // be spent on a channel that is never going to work: a lane deploy that
-      // cannot SSH the node is a supported (degraded) outcome, and burning the
-      // full timeout per lane before reaching it would turn one misconfigured
-      // key into a class-wide stall. Anything that names a broken channel stops
-      // immediately; everything else gets a few retries.
-      lastErr = e;
-      // "container not running" is the DEFINITION of not-ready-yet, not a broken
-      // channel. Counting it toward the give-up budget is what made a slow boot
-      // look like an unreachable node: five of these inside 15s and the probe
-      // abandoned a gateway that was still starting.
-      if (/not running/i.test(e.message)) continue;
-      consecutiveErrors++;
-      const fatal = /missing or unreadable|permission denied|could not resolve|connection refused|no route to host/i
-        .test(e.message);
-      if (fatal || consecutiveErrors >= 5) {
-        console.warn(
-          `${LOG} Gateway ${gatewayVmid} on ${node}: cannot probe firstboot over SSH ` +
-          `(${e.message.split('\n')[0]}) — continuing without waiting for it`
-        );
-        return false;
-      }
-    }
-  }
-  console.warn(
-    `${LOG} Gateway ${gatewayVmid} on ${node}: firstboot did not finish within ` +
-    `${Math.round(timeoutMs / 1000)}s — continuing, but its boot-time config may overwrite ` +
-    `the lane's DHCP reservations and console DNATs` +
-    (lastErr ? ` (last probe error: ${lastErr.message.split('\n')[0]})` : '')
-  );
-  return false;
-}
+// waitForGatewayFirstboot moved to gateway-lifecycle.js — the challenge-lane
+// deployer needs the same probe, and a second copy of it would drift.
 
 /**
  * Pin every workstation in the lane to its slot's address and publish each one's
@@ -1126,7 +1039,8 @@ async function applyGatewayWorkstationAccess({ node, gatewayVmid, workstations }
  * @param {number} a.gatewayVmid
  * @param {Array}  a.targets  [{ ip, console: { guestPort, wanPort }, hostname? }] — must be non-empty
  * @param {string} [a.lanIface='lan0']  gateway-side interface for the FORWARD
- *   ACCEPT. v1/v2 gateways have lan0; a v3 gateway has ext0/int0 and NO lan0 at
+ *   ACCEPT. A flat-segment (v2) gateway has lan0; a v3 gateway has ext0/int0 and
+ *   NO lan0 at
  *   all (sdn-templates/bake-lane-gateway-v3.sh), so a hardcoded lan0 there
  *   matches nothing and the console is DNATed to a packet the filter drops.
  * @param {string} [a.tag='LANE-CONSOLE']
@@ -1622,11 +1536,15 @@ async function insertLane(job) {
   } = job;
   const primary = workstations[0];
   // Only addresses that came from the shared-pool allocator are recorded here,
-  // which is what `net.wan.address` marks. A v1 lane's wan0 sits in its module's
-  // own transit /16 (laneUplinkConfig), is unique by construction, and is not
-  // drawn from — or checked against — this pool; recording it would make the
-  // column mean two different things and would disagree with migration 033,
-  // which deliberately skips v1 rows in its backfill.
+  // which is what `net.wan.address` marks. Every scheme this file can still
+  // deploy draws from that pool, so on a lane created today the column is always
+  // populated — the `|| null` survives for LEGACY ROWS ONLY. Lanes built under
+  // the retired v1 scheme took wan0 from their module's own transit /16
+  // (laneUplinkConfig), unique by construction and never checked against this
+  // pool, so migration 033 deliberately skipped them in its backfill and
+  // migration 038 upgraded them to v2 without inventing an address for them.
+  // That is why gateway_wan_ip can still read NULL on an old lane, and why NULL
+  // there must never be read as "allocation still pending".
   const wanIp = net.wan.address || null;
   let ins;
   try {
@@ -1768,90 +1686,13 @@ async function cloneGateway(job) {
   // it is fatal by design -- the caller refuses to start workstations behind a
   // gateway whose isolation config was never verified -- so the whole lane died
   // for a container that started by hand minutes later.
-  let gwRunning = false;
-  let lastStatus = null;
-  let statusReadable = true;
-  let startErr = null;
-
-  for (let attempt = 1; attempt <= GATEWAY_START_ATTEMPTS && !gwRunning; attempt++) {
-    if (attempt > 1) {
-      console.warn(
-        `${LOG} Gateway ${gatewayVmid} on ${targetNode} did not start` +
-        (startErr ? ` (${startErr})` : ` (status '${lastStatus}')`) +
-        `; retrying ${attempt}/${GATEWAY_START_ATTEMPTS} in ${GATEWAY_START_RETRY_MS}ms`
-      );
-      await new Promise(r => setTimeout(r, GATEWAY_START_RETRY_MS));
-    }
-
-    startErr = null;
-    try {
-      const startUpid = await proxmoxAPI('POST', `${vmApiBase(targetNode, gatewayVmid, 'lxc')}/status/start`);
-      if (startUpid) await waitForTask(targetNode, startUpid, 120000);
-    } catch (e) {
-      // Not decisive on its own -- the status poll below is the authority on
-      // whether it came up, and a task that reports oddly is not proof that it
-      // did not. Kept only to name the cause if every attempt fails.
-      startErr = e.message;
-      console.warn(`${LOG} Gateway ${gatewayVmid} start task on ${targetNode}: ${e.message}`);
-    }
-
-    // Confirm it actually RUNS before waiting on anything inside it.
-    //
-    // Without this a gateway that fails to boot costs three minutes and then
-    // reports something else entirely: waitForGatewayFirstboot probes over
-    // `pct exec`, every probe fails because the container is stopped, it gives
-    // up at its 180s timeout WITHOUT throwing (deliberately -- a slow firstboot
-    // is survivable), and the failure finally surfaces from
-    // applyGatewayWorkstationAccess as
-    //
-    //     nodeExec exit 255 ... pct exec <id> -- /bin/sh -c mkdir -p /etc/dnsmasq.d
-    //     container '<id>' not running!
-    //
-    // which reads as an SSH or dnsmasq fault rather than a gateway that never
-    // started. Fail here instead, in seconds, naming the actual thing.
-    //
-    // Fail on EVIDENCE, never on its absence. Proxmox reports {status:'stopped'}
-    // for a container that did not start, so a definite non-running status is
-    // grounds to retry and then to stop; a response we cannot read is not, and
-    // blocking on one would make every caller that mocks this endpoint wait out
-    // the whole budget.
-    statusReadable = true;
-    for (let i = 0; i < 15; i++) {
-      let st = null;
-      try {
-        st = await proxmoxAPI('GET', `${vmApiBase(targetNode, gatewayVmid, 'lxc')}/status/current`);
-      } catch (_) { /* the node may still be settling the clone; keep polling */ }
-      const cur = st && typeof st.status === 'string' ? st.status : null;
-      if (cur === 'running') { gwRunning = true; break; }
-      if (cur === null) { statusReadable = false; break; }
-      lastStatus = cur;
-      await new Promise(r => setTimeout(r, 2000));
-    }
-    // Retrying on a status we cannot read would prove nothing and cost the delay.
-    if (!statusReadable) break;
-  }
-
-  if (!gwRunning && statusReadable) {
-    throw new Error(
-      `Lane gateway ${gatewayVmid} on ${targetNode} is '${lastStatus}', not running, after ` +
-      `${GATEWAY_START_ATTEMPTS} start attempts` + (startErr ? ` (${startErr})` : '') + `. ` +
-      `Nothing inside it can be configured, so the lane would come up with no DHCP and no ` +
-      `console. Its start task log names the reason — look for vzstart:${gatewayVmid} under ` +
-      `/var/log/pve/tasks on ${targetNode}; "Failed to run lxc.hook.pre-start" with status 32 ` +
-      `is a rootfs mount that did not come up in time, not a damaged container.`
-    );
-  }
-  if (!statusReadable) {
-    console.warn(
-      `${LOG} Could not read gateway ${gatewayVmid} status on ${targetNode} — continuing; ` +
-      `waitForGatewayFirstboot will report if it is not actually up.`
-    );
-  }
+  await gatewayLifecycle.startGatewayAndConfirm({ node: targetNode, gatewayVmid, logTag: LOG });
 
   // Wait for the gateway's OWN boot-time config to land before the caller writes
   // the lane's reservations and DNATs over the top of it — see
   // waitForGatewayFirstboot for what happens when these two interleave.
-  const bootReady = await waitForGatewayFirstboot(targetNode, gatewayVmid);
+  const bootReady = await gatewayLifecycle.waitForGatewayFirstboot(targetNode, gatewayVmid,
+    { logTag: LOG, subnetScheme });
   if (!bootReady && job.workstations.some(w => w.template.metadata?.analysis_profile === 'malware')) {
     throw new Error('Malware gateway first boot could not be verified; workstations were not started.');
   }
@@ -2350,10 +2191,22 @@ async function deployLanes({
   // "Cannot read properties of undefined (reading 'base3')" partway through the
   // deploy, after the lane rows already exist. Segmented lanes go through
   // challenge-lane-deployer.js instead.
-  if (subnetScheme !== 'v1' && subnetScheme !== 'v2') {
+  //
+  // 'v1' is refused here BY NAME rather than by omission. v1 was the original
+  // scheme — gateway template picked per module, one flat 192.18.0.0/24 shared by
+  // every lane on the cluster, no pooled WAN address at all — and it is retired:
+  // migration 038 upgraded the surviving rows to v2 and resolveLaneNetworking no
+  // longer carries a v1 branch. Left to fall through, a v1 caller would land in
+  // the v2 branch and be turned away further down for "needs its allocated WAN
+  // address", which is a false diagnosis: gateway_wan_ip is NULL on every v1 row
+  // by construction, because v1 wan0 came out of the per-module transit /16 and
+  // was never in the shared pool. Say the real reason instead.
+  if (subnetScheme !== 'v2') {
     throw new Error(
       `deployLanes: subnetScheme '${subnetScheme}' is not supported — this path builds ` +
-      `single-LAN (v1/v2) lanes. Use challenge-lane-deployer for segmented v3 lanes.`
+      `single-LAN (v2) lanes. The v1 scheme was retired, so a v1 lane must be redeployed ` +
+      `as v2 rather than deployed as it stands. Use challenge-lane-deployer for segmented ` +
+      `v3 lanes.`
     );
   }
 
@@ -2437,25 +2290,25 @@ async function deployLanes({
   // the database, not reserved in site.json, and silent to ARP on the lab VLAN.
   // Allocated here rather than per-lane so the batch cannot race itself, and
   // BEFORE any Proxmox work so an exhausted pool fails the request instead of
-  // half a classroom. v1 lanes are not in this pool — they use the per-module
-  // transit /16, which laneUplinkConfig still derives.
+  // half a classroom. Unconditional since v1 was retired: v1 was the one scheme
+  // that sat outside this pool — its wan0 came from the per-module transit /16
+  // that the deleted laneUplinkConfig used to derive — and the guard at the top now
+  // rejects it outright, so every lane reaching here draws a pooled address.
   let wanIps = null;
-  if (subnetScheme === 'v2' || subnetScheme === 'v3') {
-    try {
-      wanIps = await laneWan.allocateLaneWanIps(users.length, { logTag: LOG });
-    } catch (e) {
-      // The caller is fire-and-forget (CLE responds "provisioning started" and
-      // polls), so an unfinished progress entry would leave the UI spinning on a
-      // deploy that never begins. Close it before rethrowing, and put the reason
-      // where the poller will actually see it.
-      if (progress) {
-        progress.error = e.message;
-        progress.failed = users.length;
-        progress.completed = users.length;
-      }
-      finishProgress(progressId);
-      throw e;
+  try {
+    wanIps = await laneWan.allocateLaneWanIps(users.length, { logTag: LOG });
+  } catch (e) {
+    // The caller is fire-and-forget (CLE responds "provisioning started" and
+    // polls), so an unfinished progress entry would leave the UI spinning on a
+    // deploy that never begins. Close it before rethrowing, and put the reason
+    // where the poller will actually see it.
+    if (progress) {
+      progress.error = e.message;
+      progress.failed = users.length;
+      progress.completed = users.length;
     }
+    finishProgress(progressId);
+    throw e;
   }
 
   console.log(
@@ -3764,9 +3617,23 @@ async function rebuildLaneWorkstations({
   }
   // Same guard deployLanes applies: this file builds single-LAN lanes and reads
   // net.lan throughout, while resolveLaneNetworking's v3 branch returns no `lan`.
-  if (subnetScheme !== 'v1' && subnetScheme !== 'v2') {
+  //
+  // The v1 arm is the one that earns this comment. v1 is retired — migration 038
+  // upgraded the last rows to v2 and resolveLaneNetworking's v1 branch is gone —
+  // and a v1 lane falling through to the v2 branch would be turned away further
+  // down for "needs its allocated WAN address". That is a false diagnosis:
+  // gateway_wan_ip is NULL on every v1 row by construction, because v1 wan0 came
+  // from the per-module transit /16 rather than the shared pool. Refuse by name.
+  // preflightError, not a bare Error: it stamps destroyed === false and phase
+  // 'preflight', which is what lets the caller tell the student truthfully that
+  // not one machine was touched. Teardown of a v1 lane runs none of this and is
+  // still safe; rebuild is the only thing v1 loses, and it loses it here, before
+  // anything is destroyed.
+  if (subnetScheme !== 'v2') {
     throw preflightError(
-      `subnetScheme '${subnetScheme}' is not rebuildable here — segmented lanes go through challenge-lane-deployer.`);
+      `subnetScheme '${subnetScheme}' is not rebuildable here — the v1 scheme was retired, so a ` +
+      `v1 lane has to be redeployed rather than rebuilt in place, and segmented v3 lanes go ` +
+      `through challenge-lane-deployer.`);
   }
   if (lane.vxlan_id == null) throw preflightError('Lane has no VXLAN id');
 
@@ -4010,7 +3877,8 @@ async function rebuildLaneWorkstations({
   // the alternative is "leave the student's working machines alone", which is
   // strictly better than a degraded rebuild.
   if (!resetGateway) {
-    await waitForGatewayFirstboot(gatewayNode, gatewayVmid, { timeoutMs: 30000 });
+    await gatewayLifecycle.waitForGatewayFirstboot(gatewayNode, gatewayVmid,
+      { timeoutMs: 30000, logTag: LOG, subnetScheme });
     try {
       await applyGatewayWorkstationAccess({ node: gatewayNode, gatewayVmid, workstations });
       job._gatewayAccessOk = true;

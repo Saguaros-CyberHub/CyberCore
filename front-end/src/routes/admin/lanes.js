@@ -19,6 +19,7 @@ const { logActivity } = require('../../middleware/activity-logger');
 const { waitForGuestAgent, executeScriptsOnVM, getVMIPs } = require('../../utils/script-executor');
 const { plantFlagsForLane } = require('../../utils/flag-manager');
 const { selectBestNode } = require('../../utils/node-selector');
+const gatewayLifecycle = require('../../utils/gateway-lifecycle');
 const goadDeploy = require('../../utils/goad-deploy');
 const { withGoadAgentVulnScripts } = require('../../utils/goad-agent-attach');
 const { resolveGoadExternalPins, resolveSpecAddressing, writeLaneReservations,
@@ -127,7 +128,13 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
     const spec = goadDeploy.prepareGoadDeploymentSpec(
       typeof challenge.spec === 'string' ? JSON.parse(challenge.spec) : challenge.spec);
     const laneScripts = withGoadAgentVulnScripts(selectedVulnScripts, spec);
-    const subnetScheme = challenge.subnet_scheme || 'v1';
+    // A challenge row with no scheme is read as v2, never v3: v2 is v1's
+    // successor in SHAPE — one flat lane segment with id 'lan' — while v3 is
+    // two segments (ext + int). Reading a blank as v3 would silently redeploy a
+    // one-segment lab as a segmented one. v1 itself is gone: migration 038
+    // upgraded the surviving rows and narrowed crucible_challenge's CHECK to
+    // (v2,v3).
+    const subnetScheme = challenge.subnet_scheme || 'v2';
     validateGoadLaneAddressing(spec, subnetScheme);
 
     const specVmCount = (spec.vms || []).length || 1;
@@ -203,6 +210,16 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
     // WAN transit address, allocated and ARP-verified before the row exists.
     // Failing here is better than a lane that deploys onto an address another
     // lane is already answering for.
+    //
+    // The enumeration below is exhaustive now — v2 and v3 are the whole
+    // vocabulary since migration 038 retired v1, which was the one scheme that
+    // needed no pooled address because it reached the internet through its
+    // module's own transit /16. It is deliberately still written as an
+    // enumeration rather than collapsed to an unconditional allocate: 038 is
+    // hand-run, so a stale v1 row can still arrive here on an un-migrated
+    // deployment, and this way it fails in resolveLaneNetworking with a scheme
+    // error instead of first burning a lease out of the WAN pool that nothing
+    // will ever release.
     let laneWanIp = null;
     if (subnetScheme === 'v2' || subnetScheme === 'v3') {
       try {
@@ -375,8 +392,21 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
           logTag: '[Deploy]'
         });
 
-        await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/status/start`);
-        await new Promise(r => setTimeout(r, 5000));
+        // Start the gateway and PROVE it started, rather than firing the POST and
+        // sleeping. The blind start this replaces is the same one that made every
+        // cyberhub-node-8 lane fail behind an error naming nothing real: the LXC
+        // lost the /dev/rbd-pve udev race in lxc.hook.pre-start, nothing checked,
+        // and the deploy carried on to write DHCP reservations into a stopped
+        // container. Throwing here marks the lane 'suspended' with a message that
+        // names vzstart:<vmid>, minutes before GOAD would have failed on
+        // "No route to host". See utils/gateway-lifecycle.js.
+        await gatewayLifecycle.ensureGatewayRunning({
+          node: bestNode, gatewayVmid: gatewayVmId, logTag: '[Deploy]',
+        });
+        // Firstboot rewrites /etc/dnsmasq.conf and the nat table from scratch, so
+        // it has to land BEFORE writeReservations writes over the same files.
+        await gatewayLifecycle.waitForGatewayFirstboot(bestNode, gatewayVmId,
+          { logTag: '[Deploy]', subnetScheme });
         const writeReservations = () => writeLaneReservations({
           gatewayVmId, node: bestNode, vxlanId, goadMacs, pinnedHosts, dnsRecords,
           spec, subnetScheme, extSubnetBase: laneSubnetBase, intSubnetBase: goadSubnetBase,
@@ -803,8 +833,13 @@ router.post('/lanes/:laneId/modules', authenticateToken, adminOnly, async (req, 
       return res.status(400).json({ error: `Challenge '${challenge_key}' is not attachable (spec.attachable must be true)` });
     }
 
-    const laneSubnetScheme = laneConfig.subnet_scheme
-      || (laneConfig.lane_subnet_base?.startsWith('10.') ? 'v2' : 'v1');
+    // This used to sniff lane_subnet_base for a leading '10.' — the only thing
+    // that heuristic ever decided was "v2 lane" vs "v1 lane on the shared
+    // 192.18.0.0/24", and v1 is retired (migration 038). An unlabelled lane is
+    // therefore v2. A live lane still addressed out of 192.18.x IS a leftover
+    // v1 lane: it cannot take an attached module and has to be torn down and
+    // redeployed.
+    const laneSubnetScheme = laneConfig.subnet_scheme || 'v2';
     const laneModule = lane.module_key || laneConfig.module || module;
     const net = resolveLaneNetworking(laneSubnetScheme, laneModule, lane.vxlan_id, {
       wanIp: lane.gateway_wan_ip || laneConfig.gateway_wan_ip,

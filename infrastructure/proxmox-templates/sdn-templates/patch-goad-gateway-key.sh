@@ -1,8 +1,32 @@
 #!/bin/bash
 # ============================================================================
-# patch-goad-gateway-key.sh
+# patch-goad-gateway-key.sh   ***HISTORICAL — DO NOT RUN***
 # ----------------------------------------------------------------------------
-# Adds the GOAD controller's public key to gateway template 1692's
+# RETIRED WITH THE v1 LANE SCHEME. Kept as the record of how template 1692
+# acquired the GOAD controller's key, because 1692 is still the clone ancestor
+# of 1694 (v2) and therefore of 1695 (v3) — see v2_gateway/bake.sh. Nothing
+# deploys a v1 lane any more.
+#
+# THE KEY IS ALREADY WHERE IT NEEDS TO BE. 1694 inherited authorized_keys from
+# 1692 through the bake clone, and 1695 inherited it from 1694, so both live
+# templates ship with it. The v2/v3 equivalent of the firewall rule this script
+# adds is generated at boot instead, by firstboot's GOAD-CONTROLLER-SSH rule
+# (bake-lane-gateway-v3.sh).
+#
+# DO NOT "FIX" THIS BY POINTING GW_VMID AT 1694 OR 1695. It would undo the v2
+# bake or wreck v3 outright, in three separate ways:
+#   1. it destroys and restores its target (pct destroy --purge, then restore);
+#   2. it re-asserts a v1 NIC layout — net1 lan0 ip=192.18.0.1/24 — which is the
+#      exact static address v2_gateway/scripts/10-rewrite-lan0-iface.sh exists to
+#      remove, and which on 1695 would delete the ext0/int0 NICs entirely;
+#   3. it appends an INPUT rule keyed to the shared 192.18.0.5 controller
+#      address into /etc/local.d/50-gateway.start — the very hook
+#      20-neutralize-v1-hooks.sh stubs out.
+#
+# If a future template ever needs a controller key baked in, write a new script
+# against that template's actual NIC layout. Do not resurrect this one.
+# ----------------------------------------------------------------------------
+# WHAT IT DID: added the GOAD controller's public key to gateway template 1692's
 # /root/.ssh/authorized_keys, so the controller VM can SSH-in and write
 # DHCP reservations during a GOAD deploy without the orchestrator needing
 # SSH access to Proxmox nodes.
@@ -19,6 +43,27 @@
 # Idempotent: if the key is already in authorized_keys, it's a no-op.
 # ============================================================================
 set -euo pipefail
+
+# A comment is not a safety interlock. This script destroys and restores its
+# target and re-writes its NICs to a v1 layout, so refuse by default rather than
+# trusting whoever ran it to have read the header first.
+if [ "${I_UNDERSTAND_THIS_IS_RETIRED:-}" != "yes" ]; then
+  cat >&2 <<'RETIRED'
+patch-goad-gateway-key.sh is RETIRED along with the v1 lane scheme, and will not run.
+
+The key it installs is already present on both live gateway templates: 1694
+inherited it from 1692 through v2_gateway/bake.sh, and 1695 inherited it from
+1694. There is nothing left for this script to do.
+
+It targets template 1692, DESTROYS AND RESTORES it, and re-asserts a v1 NIC
+layout (net1 lan0 ip=192.18.0.1/24). Running it against 1694 would undo the v2
+bake; against 1695 it would delete the ext0/int0 NICs. Do not re-point GW_VMID.
+
+If you are deliberately rebuilding the 1692 ancestor and know why you need this,
+re-run with:  I_UNDERSTAND_THIS_IS_RETIRED=yes GW_VMID=1692 ./patch-goad-gateway-key.sh
+RETIRED
+  exit 1
+fi
 
 GW_VMID=${GW_VMID:-1692}
 TMP_VMID=${TMP_VMID:-9991}

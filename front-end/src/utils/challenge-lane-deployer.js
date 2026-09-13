@@ -67,6 +67,19 @@ const audit = require('./audit');
 const laneDeployer = require('./lane-deployer');
 const laneWan = require('./lane-wan-allocator');
 const nodeSsh = require('./node-ssh');
+// The gateway start gate, shared with lane-deployer.js. It lives in its own
+// module precisely so the two deployers cannot hold two different opinions
+// about whether a gateway came up: this path did not have the gate at all, and
+// that is what let a lane on cyberhub-node-8 fire a start, sleep 5s, and then
+// spend three minutes configuring a container that had died in
+// lxc.hook.pre-start.
+const gatewayLifecycle = require('./gateway-lifecycle');
+// Short-lived, in-process memory of "that node just failed a gateway". Without
+// it the very next lane in the batch is scheduled straight back onto the node
+// that cannot start a container — node-selector scores on idle CPU and free
+// RAM, and a node doing nothing but Ceph backfill looks like the emptiest one
+// in the cluster.
+const nodeHealth = require('./node-health');
 // The AGENT half of a ticked elk/wazuh extension. Derived here rather than
 // stored on the spec, and this file is where it is derived because this is the
 // ONE deploy every caller shares — see goad-agent-attach.js for the full
@@ -941,6 +954,290 @@ async function cloneGatewayWithRecovery({
   throw e;
 }
 
+/**
+ * How many times a lane whose gateway would not start may be moved to another
+ * node. ONE, deliberately.
+ *
+ * A second hop is not "a bit more resilience" — it is a cluster-wide crawl. A
+ * batch of twenty lanes on a node that cannot start containers produces twenty
+ * re-placements; if each of those may hop again, one bad node becomes a queue of
+ * forty gateway clones marching through the cluster, each paying a clone, a
+ * three-attempt start ladder, a destroy and a waitForVmidsGone. The one hop
+ * covers the case this exists for — a single node lost the udev/RBD race while
+ * ten others are healthy — and anything worse than that is a cluster problem a
+ * retry loop should surface, not hide.
+ */
+const MAX_GATEWAY_REPLACEMENTS = 1;
+
+/**
+ * Move ONE lane's gateway off the node that would not start it.
+ *
+ * WHY THIS IS CHEAP, AND WHY job.targetNode IS THE ONLY THING IT TOUCHES
+ * Nothing else in a job is bound to a node before deployLaneVms runs. Checked
+ * one by one, because getting this wrong produces a lane that deploys, reports
+ * active, and is silently mis-addressed:
+ *   - the WAN transit address came from lane-wan-allocator's cluster-wide pool
+ *     on one shared VLAN, so it is valid from any node;
+ *   - the SDN VNets are zone-wide objects, not node-local bridges;
+ *   - every VM template is resolved through ctx.templateNodeByVmid and
+ *     cross-node cloning is already the normal case here, not an exception;
+ *   - progress.lanes[laneId].node is written INSIDE deployLaneVms, so it picks
+ *     up the new value on its own;
+ *   - configureLaneTailscale is an upsert keyed on the vxlan id, so the fresh
+ *     `-b<16hex>` claim secret the second clone mints simply replaces the first.
+ * job.targetNode is the only thing to update.
+ *
+ * @returns {Promise<{success: boolean, movedFrom?: string, error?: string}>}
+ *   the gatewayResults entry for this lane — RETURNED rather than written, so
+ *   the phase that owns that map stays its only writer.
+ */
+async function replaceGatewayNode({
+  job, failedNode, gwTemplateByNode, gwSourceNode, gatewayVmid, ctx, logTag,
+  // The start failure that sent us here. Optional only so a caller can drive
+  // this function without one; the phase below always passes it, because the
+  // reason belongs in the lane's placement_note and in the log line.
+  error = null,
+  // Injectable seams, exactly like cloneGatewayWithRecovery's retryMs.
+  // Production passes neither, so gateway-lifecycle keeps its own defaults.
+  startRetryMs, startPollMs,
+}) {
+  const gwId = GATEWAY_VMID_OFFSET + job.vxlanId;
+  const why = String((error && error.message) || 'the gateway did not reach running')
+    .split('\n')[0];
+
+  // The VMID is CLUSTER-unique, and forceDestroyVM returns once Proxmox accepts
+  // the task, not once the RBD image is actually gone. Cloning the same id onto
+  // a second node while the first still holds it fails with "CT <id> already
+  // exists", which reads as an entirely different fault than the one being
+  // recovered from. Best-effort: a destroy we cannot confirm is not a reason to
+  // abandon a lane that has not been tried anywhere else yet, and the clone
+  // below will say so plainly enough if the id really is still taken.
+  await waitForVmidsGone([gwId], { timeoutMs: 120000 }).catch(() => {});
+
+  // exclude, not just "whatever scores best". Without it the scheduler hands
+  // back the same node every time: it ranks on FREE cpu/ram, and a node whose
+  // only workload is Ceph backfill is the emptiest-looking machine in the
+  // cluster. Quarantined nodes are already dropped inside selectBestNode — and
+  // softly, so a fully quarantined cluster still places something — which is
+  // why the identity check below is a backstop rather than the mechanism.
+  let best = null;
+  try {
+    best = await selectBestNode({ exclude: [failedNode] });
+  } catch (e) {
+    return {
+      success: false,
+      error: `gateway would not start on ${failedNode} and no alternative node is available: ${e.message}`,
+    };
+  }
+  const newNode = best && best.node;
+  if (!newNode || newNode === failedNode) {
+    return {
+      success: false,
+      error: `gateway would not start on ${failedNode} and no alternative node is available: ` +
+             `the scheduler returned ${newNode || 'nothing'}`,
+    };
+  }
+
+  console.warn(
+    `${logTag} Lane ${job.laneId} (${job.user?.email || '?'}): gateway ${gwId} would not start on ` +
+    `${failedNode} — re-placing on ${newNode} (${why})`
+  );
+
+  job.targetNode = newNode;
+
+  // Persisted HERE, not left to deployLaneVms' first UPDATE. The lane row was
+  // INSERTed with the old node in config.node, and this lane can still die
+  // between this line and that UPDATE — a failed re-clone, a batch-level throw.
+  // If it does, the only durable record of where its gateway lives would point
+  // at the node it is not on, and teardown would go looking for VMID <gwId>
+  // there and find nothing to destroy.
+  await cybercoreQuery(
+    `UPDATE cybercore_lane SET config = COALESCE(config, '{}'::jsonb) || $2::jsonb,
+       updated_at = NOW() WHERE lane_id = $1`,
+    [job.laneId, JSON.stringify({
+      node: newNode,
+      placement_note: `moved from ${failedNode}: ${why}`,
+    })]
+  ).catch((e) => console.warn(
+    `${logTag} Lane ${job.laneId}: could not record the move to ${newNode}: ${e.message}`
+  ));
+
+  try {
+    await cloneGatewayWithRecovery({
+      job, node: newNode,
+      // A node that had no lanes in THIS batch never got a temp replica, so this
+      // resolves to the origin template and cloneGatewayWithRecovery's ladder
+      // shortens from three attempts to two. Correct and intended: the third
+      // rung exists only to escape a bad node-local replica, and there is no
+      // replica here to escape.
+      localTemplateId: gwTemplateByNode[newNode] ?? gatewayVmid,
+      gwSourceNode, gatewayVmid, ctx, logTag,
+    });
+    await gatewayLifecycle.startGatewayAndConfirm({
+      node: newNode, gatewayVmid: gwId, logTag, retryMs: startRetryMs, pollMs: startPollMs,
+    });
+  } catch (err) {
+    // Marked whichever way it failed. A node that has just cost a gateway a
+    // clone OR a start is a node the rest of this batch should stop being
+    // scheduled onto, and the difference between the two is not worth a second
+    // policy here.
+    nodeHealth.markNodeFault(newNode, err.message);
+    await forceDestroyVM(gwId, 'lxc', newNode).catch(() => {});
+    // And that is the end of it — see MAX_GATEWAY_REPLACEMENTS. Two nodes in a
+    // row failing to start the same gateway is no longer a story about one bad
+    // node, and hopping again would spend a third clone proving it.
+    return {
+      success: false,
+      error:
+        `gateway would not start on ${failedNode}, and re-placing it on ${newNode} also failed ` +
+        `(${MAX_GATEWAY_REPLACEMENTS} re-placement allowed): ${err.message}`,
+    };
+  }
+
+  console.log(`${logTag} Gateway ${gwId} re-placed on ${newNode} (start failed on ${failedNode}: ${why})`);
+  return { success: true, movedFrom: failedNode };
+}
+
+/**
+ * PHASE 1 OF A CHALLENGE DEPLOY: clone every lane's gateway, prove each one
+ * actually started, and move the ones that did not.
+ *
+ * Lifted out of deployChallengeLanesInner rather than left inline, for the
+ * reason the export comment gives: the deploy path around it needs Proxmox,
+ * SSH, Guacamole and a database, so calling this directly is the only way a
+ * test can reach "the gateway cloned and then refused to start".
+ *
+ * STARTING THE GATEWAY BELONGS HERE, not deep inside deployLaneVms. On
+ * cyberhub-node-8 the start was the first thing that failed and the LAST thing
+ * anyone found out about: the clone succeeded, deployLaneVms fired a start it
+ * never awaited, and the lane died three to five minutes later inside a GOAD
+ * controller's prep.sh with "No route to host". Confirming the start in the
+ * gateway phase means the failure is named while the only thing that exists is
+ * a gateway — nothing has been cloned behind it — so recovering costs one
+ * destroy and one re-clone instead of a whole lane's worth of machines.
+ *
+ * Jobs are grouped by node and run SERIALLY within a node: Proxmox holds a disk
+ * lock on an LXC template, so two concurrent clones of the same container
+ * template fail with "CT is locked".
+ *
+ * @returns {Promise<{gatewayResults: Object, replacements: Array}>}
+ *   gatewayResults is keyed by laneId; a lane that was successfully re-placed
+ *   carries { success: true, movedFrom: <old node> } and therefore passes the
+ *   runBatch guard exactly like a lane that never moved.
+ */
+async function deployGatewayPhase({
+  jobs, gwTemplateByNode, gwSourceNode, gatewayVmid, ctx, logTag,
+  // Injectable seams. Production calls this WITHOUT them, so gateway-lifecycle
+  // uses its own GATEWAY_START_RETRY_MS and 2s status poll; the behavioural test
+  // passes 0 for both and runs the whole three-attempt start ladder -- three
+  // starts, forty-five status reads -- in milliseconds.
+  startRetryMs, startPollMs,
+}) {
+  const gatewayResults = {};
+  const replacements = [];
+  const jobsByNode = {};
+  for (const job of jobs) (jobsByNode[job.targetNode] ||= []).push(job);
+
+  await Promise.all(Object.entries(jobsByNode).map(async ([node, nodeJobs]) => {
+    const localTemplateId = gwTemplateByNode[node];
+    // A node that has just failed a gateway clone for a reason that is not
+    // lane-specific -- a lost udev race, a wedged storage path -- will fail the
+    // next one the same way. Once one lane here has had to fall back to the
+    // origin template, send the rest of this node's lanes straight there rather
+    // than paying the full retry ladder per student.
+    let preferOrigin = false;
+
+    for (const job of nodeJobs) {
+      const gwId = GATEWAY_VMID_OFFSET + job.vxlanId;
+      try {
+        const r = await cloneGatewayWithRecovery({
+          job, node, gwSourceNode, gatewayVmid, ctx, logTag,
+          localTemplateId: preferOrigin ? gatewayVmid : localTemplateId,
+        });
+        if (r.usedOrigin) preferOrigin = true;
+        console.log(
+          `${logTag} Gateway ${gwId} cloned on ${node}` +
+          (r.attempts > 1 ? ` (attempt ${r.attempts}${r.usedOrigin ? ', via the origin template' : ''})` : '')
+        );
+      } catch (err) {
+        // The node itself is suspect now, so the lanes behind this one skip
+        // straight to the origin rather than repeating a ladder that just failed.
+        preferOrigin = true;
+        // And the SCHEDULER is told, so the next batch — and the
+        // selectBestNode call inside replaceGatewayNode below — stop steering
+        // lanes into a node that has already exhausted a three-rung ladder.
+        nodeHealth.markNodeFault(node, err.message);
+        console.error(`${logTag} Gateway clone failed for ${job.user.email}: ${err.message}`);
+        gatewayResults[job.laneId] = { success: false, error: err.message };
+        continue;
+      }
+
+      // The clone is only half of it. `pct clone` and `pct start` fail for the
+      // SAME underlying reason on a backfilling node — both reach for
+      // /dev/rbd-pve/<fsid>/<pool>/<image>, a symlink udev creates and neither
+      // waits for — so a clone that succeeded is no evidence at all that the
+      // start will. On node-8 every gateway cloned cleanly and not one started.
+      try {
+        await gatewayLifecycle.startGatewayAndConfirm({
+          node, gatewayVmid: gwId, logTag, retryMs: startRetryMs, pollMs: startPollMs,
+        });
+        gatewayResults[job.laneId] = { success: true };
+      } catch (err) {
+        if (!err.gatewayNotRunning) {
+          // A transport fault, an unreadable cluster: we do not KNOW the gateway
+          // is down, so this is recorded the way a clone failure is and the lane
+          // is not moved. Moving one on no evidence would destroy a gateway that
+          // may well be running perfectly.
+          console.error(`${logTag} Gateway ${gwId} start check failed for ${job.user.email}: ${err.message}`);
+          gatewayResults[job.laneId] = { success: false, error: err.message };
+          continue;
+        }
+        console.error(
+          `${logTag} Lane ${job.laneId} (${job.user.email}): gateway ${gwId} cloned on ${node} but ` +
+          `never reached running — ${err.message}`
+        );
+        nodeHealth.markNodeFault(node, err.message);
+        // Destroyed first. The VMID is cluster-unique, so the re-clone onto
+        // another node cannot even be attempted while this carcass exists.
+        await forceDestroyVM(gwId, 'lxc', node).catch(() => {});
+        replacements.push({ job, failedNode: node, error: err });
+        // The rest of this node's lanes go straight to the origin template: the
+        // node is suspect for the whole batch now, not just for this lane.
+        preferOrigin = true;
+        // NO gatewayResults entry yet, deliberately. The re-placement pass below
+        // decides whether this lane lives, and a failure written here would have
+        // to be un-written.
+      }
+    }
+  }));
+
+  // THE RE-PLACEMENT PASS RUNS HERE, AND IT RUNS WITH A PLAIN for..of.
+  //
+  // Here, because at this moment no per-node clone loop is still live: every
+  // node's serial loop above has finished, so a recovery clone cannot contend
+  // with one for an LXC template's disk lock. A re-clone that lands on top of a
+  // live loop gets "CT <id> is locked (disk)" back from Proxmox — a failure
+  // caused entirely by the recovery attempt itself, wearing none of the clothes
+  // of the node fault it was recovering from.
+  //
+  // Sequentially, because two lanes whose gateways both died on the same node
+  // will both be handed the same replacement node by selectBestNode — so
+  // running them concurrently would recreate, on the rescue node, exactly the
+  // same-template concurrent-clone collision the per-node loops exist to avoid.
+  //
+  // And before cleanupTempGatewayTemplates, so a lane moving onto a node that
+  // DOES hold a temp replica can still use it instead of paying a cross-node
+  // copy from the origin.
+  for (const r of replacements) {
+    gatewayResults[r.job.laneId] = await replaceGatewayNode({
+      job: r.job, failedNode: r.failedNode, error: r.error,
+      gwTemplateByNode, gwSourceNode, gatewayVmid, ctx, logTag, startRetryMs, startPollMs,
+    });
+  }
+
+  return { gatewayResults, replacements };
+}
+
 // ── phase 2: per-lane VMs ────────────────────────────────────────────────────
 
 /**
@@ -1035,7 +1332,7 @@ async function cloneChallengeVm({ vmSpec, vxlanId, targetNode, laneId, user, ctx
       // no lease can claim it and no gateway re-bake is needed.
       //
       // Only v3 carries the two subnets this pins into. A multi-NIC spec on a
-      // v1/v2 lane still gets both NICs above, just no static pinning.
+      // flat-segment (v2) lane still gets both NICs above, just no static pinning.
       if (isV3) {
         await proxmoxAPI('POST', `/api2/json/nodes/${targetNode}/qemu/${vmId}/config`, {
           ipconfig0:  `ip=${net.lanExt.base3}.${DUAL_HOMED_OCTET}/24,gw=${net.lanExt.gatewayIp}`,
@@ -1330,7 +1627,7 @@ function resolveLaneDnsExtras({
   // the machine they are attacking. It is also the address ipconfig0 carries, so
   // the record and the guest's primary interface cannot disagree.
   //
-  // v3 ONLY. A multi-NIC spec on a v1/v2 lane still gets both NICs, but no
+  // v3 ONLY. A multi-NIC spec on a flat-segment (v2) lane still gets both NICs, but no
   // static pinning — there is no .240 there, and publishing one anyway would
   // point the company's name at an address nothing holds. No scheme, no entry.
   if (subnetScheme === 'v3' && extSubnetBase) {
@@ -1579,6 +1876,33 @@ async function writeLaneReservations({
       (dnsExtras.length ? ` + ${dnsExtras.length} company DNS line(s): ${dnsExtras.join(' ')}` : '')
     );
   } catch (err) {
+    // A GATEWAY THAT IS NOT RUNNING IS NOT A DEGRADED LANE, IT IS A DEAD ONE.
+    // Checked before every other branch because it is the one failure whose
+    // "fallback" does not exist. The degraded-but-usable outcome this catch was
+    // built around is the gateway's own BAKED `dhcp-host=kali,<ext>.50` line —
+    // and that line is served by the dnsmasq INSIDE the container that just
+    // refused to answer. There is nothing to fall back TO: the lane has no DHCP
+    // at all, no guest gets an address, and it still reports active.
+    //
+    // This is the exact swallow that hid the cyberhub-node-8 incident. The
+    // gateway LXC had died in lxc.hook.pre-start (status 32, the udev/RBD
+    // symlink race on a backfilling node), `pct exec` answered
+    // "container '110881' not running!", this catch logged an SSH-key hint, and
+    // the deploy carried on for another three to five minutes before finally
+    // surfacing as "ssh: connect to host 10.42.129.1 port 22: No route to host"
+    // from inside a GOAD controller. node-ssh.classifyExit tags the two apart
+    // now, so the deploy can stop here and name the real thing.
+    if (err.remoteNotRunning) {
+      const wrapped = new Error(
+        `Lane gateway ${gatewayVmId} on ${node} is not running — DHCP reservations cannot be ` +
+        `written into it (${String(err.message).split('\n')[0]})`
+      );
+      wrapped.remoteNotRunning = true;
+      wrapped.gatewayNotRunning = true;
+      wrapped.node = node;
+      wrapped.cause = err;
+      throw wrapped;
+    }
     // A dead DHCP server is not survivable — every guest on this lane would sit
     // without an address. Anything else (no SSH channel, for instance) leaves the
     // gateway's baked reservation in place, so the lane is degraded but usable.
@@ -1589,7 +1913,13 @@ async function writeLaneReservations({
         ? `Kali falls back to the gateway's baked hostname reservation for ${extSubnetBase}.${attackBoxOctet}, ` +
           `which only matches a guest announcing itself as exactly "kali". `
         : '') +
-      'Check PROXMOX_SSH_KEY / PROXMOX_SSH_USER.'
+      // Conditional, and that matters more than it looks. This sentence printed
+      // underneath a "container not running" error is what sent the node-8
+      // investigation into PROXMOX_SSH_KEY / PROXMOX_SSH_USER for a day, on a
+      // cluster whose SSH key was fine and whose gateway was simply stopped.
+      // Print the advice only when node-ssh says the SSH layer is actually
+      // where the call died.
+      (err.sshLayer === true ? 'Check PROXMOX_SSH_KEY / PROXMOX_SSH_USER.' : '')
     );
   }
 }
@@ -1957,7 +2287,7 @@ async function deployLaneVms(job, ctx) {
     // can actually emit or the gateway already owns:
     //   .1  the lane gateway itself — never leasable to a guest
     //   .5  the GOAD controller, whose dhcp-host line is written from
-    //       liveGoadController and so is NOT in goadMacs. On a v1/v2 lane
+    //       liveGoadController and so is NOT in goadMacs. On a flat-segment lane
     //       intSubnetBase === extSubnetBase, so a spec VM pinned to .5 would
     //       emit a second dhcp-host for the same address and dnsmasq would
     //       refuse to start — taking DHCP down for the whole lane.
@@ -2028,8 +2358,39 @@ async function deployLaneVms(job, ctx) {
 
   // 2. Boot the gateway first so dnsmasq is answering before anything DHCPs.
   setStatus('starting');
-  await proxmoxAPI('POST', `/api2/json/nodes/${targetNode}/lxc/${gatewayVmId}/status/start`);
-  await new Promise(r => setTimeout(r, 5000));
+  // ensureGatewayRunning, NOT the bare POST + 5s sleep this replaces. That line
+  // pair is the whole cyberhub-node-8 incident in miniature: the start was
+  // fired, the UPID was never awaited, the result was never confirmed, and the
+  // deploy then spent three to five minutes writing DHCP reservations, starting
+  // lane VMs and cloning a GOAD controller into a lane whose gateway had died in
+  // lxc.hook.pre-start with status 32.
+  //
+  // Idempotent by design: after deployGatewayPhase the gateway is normally
+  // already running, so on the batch path this costs one GET
+  // /status/current and issues no start POST at all. It still performs a real,
+  // awaited, confirmed start on every path that reaches deployLaneVms without
+  // one — the in-place rebuild, and any future caller that skips the phase.
+  await gatewayLifecycle.ensureGatewayRunning({ node: targetNode, gatewayVmid: gatewayVmId, logTag });
+  // The firstboot wait belongs HERE, and not up in the gateway phase, for two
+  // reasons.
+  //
+  // Cost: the clone block above takes minutes on a real lane, and the gateway
+  // has been booting through all of it. Waiting here collects that time for
+  // free; waiting in the gateway phase would add the firstboot latency to every
+  // lane in the batch instead of overlapping it with work that has to happen
+  // anyway.
+  //
+  // Correctness: the marker has to land BEFORE writeReservations writes over the
+  // same dnsmasq config. /etc/local.d/00-cybercore-firstboot.start REWRITES
+  // /etc/dnsmasq.conf from scratch on every boot and re-adds its baked
+  // `dhcp-host=kali,<ext>.50`. A firstboot that finishes after our write does
+  // not merely discard the lane's reservations — it leaves two dhcp-host lines
+  // claiming <ext>.50, and dnsmasq then refuses to start at all.
+  //
+  // The ordering contract the old code had is preserved exactly: the gateway is
+  // up and answering before anything on the lane DHCPs, because the lane VMs are
+  // only started after writeReservations below.
+  await gatewayLifecycle.waitForGatewayFirstboot(targetNode, gatewayVmId, { logTag, subnetScheme });
 
   // 2b. Write the lane's DHCP reservations BEFORE any guest boots, so the very
   //     first DHCPREQUEST already has a reservation waiting.
@@ -2228,6 +2589,10 @@ async function deployLaneVms(job, ctx) {
       });
       consoleDnatOk = true;
     } catch (dnatErr) {
+      // A DNAT cannot be installed into a container that is not running, and the
+      // gateway's baked wan0:3389 rule covers Kali and nothing else — so this is
+      // a dead lane, not a degraded console, and it must not be logged past.
+      if (dnatErr.remoteNotRunning) throw dnatErr;
       // Recorded, not just logged. The gateway's baked wan0:3389 -> <ext>.50 rule
       // still covers ONE case — Kali, on the base RDP port — and covers nothing
       // else: a spec machine at .60 on 3389 would have the student land on Kali
@@ -2601,7 +2966,14 @@ async function deployChallengeLanesInner({
   // Prepare the identity plan before allocating a lane or cloning its gateway.
   // The authored challenge keeps its catalog version and explicit opt-in.
   const spec = goadDeploy.prepareGoadDeploymentSpec(attachGoadAgentScripts(parseSpec(challenge.spec)));
-  const subnetScheme = challenge.subnet_scheme || 'v1';
+  // A challenge row whose seed INSERT predates the subnet_scheme column reads as
+  // v2, not v1. v1 is retired: migration 038 — with the plugin copies, ciab 018
+  // and cle 009 — upgraded every surviving v1 challenge row and narrowed the
+  // CHECK to (v2, v3), so v1 is no longer a value this code can be handed. v2 and
+  // not v3, because v1 and v2 draw the SAME topology, one flat segment with id
+  // 'lan'; defaulting an unlabelled row to v3 would silently split a one-segment
+  // environment into ext/int and rewire every address in it.
+  const subnetScheme = challenge.subnet_scheme || 'v2';
   const resolvedModule = moduleKey || challenge.module_key || 'crucible';
   const challengeKey = challenge.challenge_key;
   const logTag = `${LOG}[${challengeKey}]`;
@@ -2671,10 +3043,10 @@ async function deployChallengeLanesInner({
     // WAN transit addresses for the batch, before any Proxmox work. Same pool the
     // workstation lanes draw from — one shared VLAN, one allocator — so an
     // exhausted pool fails here rather than producing lanes that silently share a
-    // gateway address and a Guacamole console host.
-    wanIps = (subnetScheme === 'v2' || subnetScheme === 'v3')
-      ? await laneWan.allocateLaneWanIps(users.length, { logTag })
-      : null;
+    // gateway address and a Guacamole console host. Unconditional since v1 was
+    // retired: v1 was the only scheme that sat outside the pool, taking wan0 from
+    // its module's own transit /16 instead, and it is no longer deployable.
+    wanIps = await laneWan.allocateLaneWanIps(users.length, { logTag });
   } catch (err) {
     laneDeployer.releaseVxlanReservations(vxlans);
     laneDeployer.finishProgress(progressId);
@@ -2842,45 +3214,24 @@ async function deployChallengeLanesInner({
   const gwTemplateByNode = await replicateGatewayTemplate(uniqueNodes, gwSourceNode, gatewayVmid, logTag);
 
   laneDeployer.setPhase(progress, 'gateway_cloning', `Cloning ${jobs.length} gateway(s)`);
-  const gatewayResults = {};
-  const jobsByNode = {};
-  for (const job of jobs) (jobsByNode[job.targetNode] ||= []).push(job);
-
-  await Promise.all(Object.entries(jobsByNode).map(async ([node, nodeJobs]) => {
-    const localTemplateId = gwTemplateByNode[node];
-    // A node that has just failed a gateway clone for a reason that is not
-    // lane-specific -- a lost udev race, a wedged storage path -- will fail the
-    // next one the same way. Once one lane here has had to fall back to the
-    // origin template, send the rest of this node's lanes straight there rather
-    // than paying the full retry ladder per student.
-    let preferOrigin = false;
-
-    for (const job of nodeJobs) {
-      try {
-        const r = await cloneGatewayWithRecovery({
-          job, node, gwSourceNode, gatewayVmid, ctx, logTag,
-          localTemplateId: preferOrigin ? gatewayVmid : localTemplateId,
-        });
-        if (r.usedOrigin) preferOrigin = true;
-        gatewayResults[job.laneId] = { success: true };
-        console.log(
-          `${logTag} Gateway ${GATEWAY_VMID_OFFSET + job.vxlanId} cloned on ${node}` +
-          (r.attempts > 1 ? ` (attempt ${r.attempts}${r.usedOrigin ? ', via the origin template' : ''})` : '')
-        );
-      } catch (err) {
-        // The node itself is suspect now, so the lanes behind this one skip
-        // straight to the origin rather than repeating a ladder that just failed.
-        preferOrigin = true;
-        console.error(`${logTag} Gateway clone failed for ${job.user.email}: ${err.message}`);
-        gatewayResults[job.laneId] = { success: false, error: err.message };
-      }
-    }
-  }));
+  // Clone AND start AND re-place, all inside the phase. startRetryMs is
+  // deliberately not passed: production wants gateway-lifecycle's own
+  // GATEWAY_START_RETRY_MS, and only the behavioural test overrides it.
+  const { gatewayResults, replacements } = await deployGatewayPhase({
+    jobs, gwTemplateByNode, gwSourceNode, gatewayVmid, ctx, logTag,
+  });
 
   await cleanupTempGatewayTemplates(gwTemplateByNode, gatewayVmid, logTag);
 
   const gwOk = Object.values(gatewayResults).filter(r => r.success).length;
-  console.log(`${logTag} Gateways: ${gwOk}/${jobs.length} cloned`);
+  const gwMoved = Object.values(gatewayResults).filter(r => r.success && r.movedFrom).length;
+  console.log(
+    `${logTag} Gateways: ${gwOk}/${jobs.length} up` +
+    (replacements.length
+      ? ` (${gwMoved}/${replacements.length} re-placed after a failed start on ` +
+        `${[...new Set(replacements.map(r => r.failedNode))].join(', ')})`
+      : '')
+  );
 
   // 5. Phase 2: everything else, N lanes at a time.
   laneDeployer.setPhase(progress, 'deploying',
@@ -2888,8 +3239,15 @@ async function deployChallengeLanesInner({
 
   const provisioned = [];
   const { errors } = await runBatch(jobs, async (job) => {
+    // "no usable gateway", not "gateway clone failed": since deployGatewayPhase
+    // also confirms the start and may have re-placed the lane, the entry can now
+    // record a clone that never ran, a start that never came up, or a
+    // re-placement that failed on a second node. The entry's own error names
+    // which. A lane that WAS successfully re-placed carries
+    // { success: true, movedFrom: … } and passes here exactly like one that
+    // never moved.
     if (!gatewayResults[job.laneId]?.success) {
-      throw new Error(`Skipped: gateway clone failed — ${gatewayResults[job.laneId]?.error}`);
+      throw new Error(`Skipped: no usable gateway — ${gatewayResults[job.laneId]?.error}`);
     }
     const result = await deployLaneVms(job, ctx);
     provisioned.push(result);
@@ -3067,6 +3425,25 @@ async function rebuildLaneChallengeVms({
 
   // ── networking + ctx, rebuilt the way deployLaneVms builds them ──────────
   const subnetScheme = cfg.subnet_scheme || 'v2';
+  // Mirrors the guard in lane-deployer.rebuildLaneWorkstations, and until v1 was
+  // retired this function had none at all: a v1 challenge lane rebuilt straight
+  // down resolveLaneNetworking's v1 branch and nobody noticed. That branch is
+  // gone (migration 038 upgraded the last v1 rows to v2), and without a refusal
+  // here a v1 lane would drop into the v2 branch and be told it "needs its
+  // allocated WAN address" — wrong, because gateway_wan_ip is NULL on every v1
+  // row by construction: v1 wan0 came from the per-module transit /16, not the
+  // shared pool.
+  //
+  // challengePreflightError, never a raw Error: it stamps destroyed = false, and
+  // a caller keying on destroyed === false would otherwise read undefined and
+  // hedge about a lane nothing has touched. This sits ABOVE resolveLaneNetworking
+  // and above every destructive step, so a refused rebuild costs the student not
+  // one machine.
+  if (subnetScheme !== 'v2' && subnetScheme !== 'v3') {
+    throw challengePreflightError(
+      `subnetScheme '${subnetScheme}' cannot be rebuilt — the v1 scheme was retired, so a v1 ` +
+      `lane has to be redeployed rather than rebuilt in place.`);
+  }
   const isV3 = subnetScheme === 'v3';
   const net = resolveLaneNetworking(subnetScheme, moduleKey, lane.vxlan_id,
     lane.gateway_wan_ip ? { wanIp: lane.gateway_wan_ip } : {});
@@ -3370,6 +3747,16 @@ module.exports = {
   // difference between a transient node fault costing a lane and costing seconds.
   cloneGatewayWithRecovery,
   GATEWAY_CLONE_RETRY_MS,
+  // Exported for test/gateway-node-replacement.test.js. These two ARE the
+  // start/recovery seam: everything between "the gateway cloned" and "the lane
+  // has a gateway that is actually running" happens inside them, including the
+  // one hop onto another node. The deploy path around them needs Proxmox, SSH,
+  // Guacamole and a database, so calling them directly is the only way a test
+  // can reach the node-8 failure — a gateway that clones cleanly and then dies
+  // in lxc.hook.pre-start.
+  deployGatewayPhase,
+  replaceGatewayNode,
+  MAX_GATEWAY_REPLACEMENTS,
   resolveConsolePlan,
   resolveSpecAddressing,
   resolveGoadExternalPins,

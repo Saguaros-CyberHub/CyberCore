@@ -324,11 +324,14 @@ function onChalSubnetSchemeChange() {
   const desc = document.getElementById('chalSubnetSchemeDesc');
   if (!sel || !desc) return;
   const text = {
-    v1: 'All lane VMs share one flat subnet. Legacy scheme — kept for in-flight classes.',
     v2: 'Each lane gets its own /24 (10.x.x.0/24). Required for Tailscale BYOD access.',
     v3: 'Two subnets per lane — external (Kali/BYOD) and internal (GOAD AD) — with the gateway firewall-blocking traffic between them. Give one VM the role "dmz": it becomes the dual-homed pivot the attacker must exploit to reach the internal network.'
   };
-  desc.textContent = text[sel.value] || text.v1;
+  // v2 is the fallback, not v3. Migration 038 retired v1 and upgraded every v1
+  // row to v2 because the two draw the SAME single flat segment — v3 draws two,
+  // so falling back to it would describe a segmented lane to an author who
+  // picked nothing.
+  desc.textContent = text[sel.value] || text.v2;
 }
 
 async function createChallenge() {
@@ -635,7 +638,7 @@ function showCreateTemplateModal() {
   templateEditSpec = {};
   templateIsReservation = false;
   templateNetwork = null;
-  tplSubnetScheme = 'v1';
+  tplSubnetScheme = 'v2';
   applyTemplateEditorMode({});
   resetTplGoadFields();
   renderTemplateVMs(true);
@@ -667,7 +670,7 @@ async function editTemplate(id) {
       : (typeof t.phantom_assets === 'string' ? JSON.parse(t.phantom_assets) : (t.phantom_assets || []));
     // GET /lab-templates/:id is SELECT *, so the row carries subnet_scheme —
     // which decides whether the canvas draws one segment or two.
-    tplSubnetScheme = t.subnet_scheme || 'v1';
+    tplSubnetScheme = t.subnet_scheme || 'v2';
     templateNetwork = spec.network || null;
     applyTemplateEditorMode(spec);
     await loadTplGoadFields(spec.goad);
@@ -780,7 +783,7 @@ function renderTemplatePhantoms() {
 let templateNetwork = null;   // spec.network — segments + canvas positions
 let tplTopo = null;           // live editor controller
 let tplVmView = 'canvas';
-let tplSubnetScheme = 'v1';   // from the challenge row; v1/v2 = 1 segment, v3 = 2
+let tplSubnetScheme = 'v2';   // from the challenge row; v2 = 1 segment, v3 = 2
 
 /**
  * The machines whose placement is fixed by the environment: the lab's own hosts

@@ -25,6 +25,7 @@ const { query } = require('./db');
 const { guacAPI } = require('./guacamole');
 const attachedModules = require('./attached-modules');
 const siteConfig = require('./site-config');
+const nodeHealth = require('./node-health');
 const { scanClusterVolumes } = require('./storage-scan');
 const A = require('./reconcile-audit');
 const { CLAIMING_STATUS_SET } = require('./lane-claims');
@@ -278,12 +279,26 @@ async function runReconcileScan({ onPhase = () => {}, budgetMs = RECONCILE_BUDGE
       defaultTemplateNode = siteConfig.getDefaultTemplateNode();
     } catch (_) { /* already reported via configError */ }
 
+    // Why a healthy-looking node is receiving no lanes. Two separate mechanisms
+    // keep a node out of placement and neither was visible anywhere before: the
+    // operator's own cluster.scheduling.excluded_nodes, and node-health's
+    // 15-minute auto-quarantine after a gateway clone or start failure. Without
+    // this an admin watching cyberhub-node-8 sit idle and online has no way to
+    // tell "drained on purpose" from "the scheduler is ignoring it" from
+    // "nothing needed deploying".
+    let excludedNodes = [];
+    try { excludedNodes = siteConfig.getSchedulingConfig().excluded_nodes || []; } catch (_) { /* reported via configError */ }
+    let quarantined = [];
+    try { quarantined = nodeHealth.quarantinedNodes(); } catch (_) { quarantined = []; }
+
     const clusterNodes = {
       ...nodeDrift,
       ...freshness,
       default_template_node: defaultTemplateNode,
       config_readable: !configError,
       config_writable: false,   // bind-mounted :ro; the app can never repair this
+      excluded_nodes: excludedNodes,
+      quarantined,
     };
     // Without site.json every node looks undeclared, which is a config-read
     // failure wearing the costume of a drift finding. Say which it is.

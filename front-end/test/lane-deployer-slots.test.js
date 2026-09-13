@@ -236,9 +236,6 @@ stubModule('site-config.js', {
     reserved: ['100.100.60.1', '100.100.60.0', '100.100.60.255'],
     probe: { enabled: false, node: null, interface: 'vmbr0.60', timeout_ms: 2000 },
   }),
-  getV1LanSubnet: () => ({ base3: '192.18.0', cidr: '192.18.0.0/24', gateway_ip: '192.18.0.1', netmask24: '255.255.255.0' }),
-  getModuleNetwork: () => ({}),
-  getModuleNetworks: () => ({}),
 });
 stubModule('guacamole.js', { guacAPI: async () => ({ identifier: `guac-${Math.random().toString(16).slice(2, 8)}` }) });
 stubModule('guac-credentials.js', { ensureGuacUser: async () => true, getGuacCredentials: async () => null });

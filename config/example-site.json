@@ -18,6 +18,15 @@
       "ram_gb": 256,
       "cpu_cores": 64
     },
+    "scheduling": {
+      "_comment": "Placement thresholds. excluded_nodes are cluster members that must receive NO new lanes -- the case this was built for is a node still doing Ceph backfill, where `pct clone` and `pct start` lose the race for the udev-created /dev/rbd-pve/<fsid>/<pool>/<image> symlink and every lane scheduled there dies with 'Failed to run lxc.hook.pre-start ... status 32' three to five minutes into the deploy. Exclusion stops NEW placements only; lanes already on the node keep running, which is why this exists instead of just taking the node offline in Proxmox. It is the ONLY thing that helps: node-selector scores on FREE capacity, so a node doing nothing but backfill looks like the emptiest machine in the cluster and gets picked FIRST, then the next lane, and the next. site.json is bind-mounted :ro as a single file, so edit it in place on the host and restart the app -- the config is read at require time and nothing re-reads it.",
+      "excluded_nodes": [],
+      "min_free_mem_gb": 8,
+      "min_free_disk_gb": 20,
+      "max_concurrent_lanes": 5,
+      "max_concurrent_clones": 4,
+      "node_score_weights": { "cpu": 0.35, "mem": 0.55, "disk": 0.10 }
+    },
     "networking": {
       "_comment": "Lane network topology. Absent here until now, which meant the hardcoded defaults in front-end/src/utils/site-config.js were the only record of the live contract.",
       "v2_lab_network": {
@@ -38,34 +47,6 @@
           "node": null,
           "interface": "vmbr0.60",
           "timeout_ms": 2000
-        }
-      },
-      "v1_lane_subnet": {
-        "_comment": "Legacy v1 lanes share one LAN subnet, isolated by the per-lane gateway LXC.",
-        "base3": "192.18.0",
-        "cidr": "192.18.0.0/24",
-        "gateway_ip": "192.18.0.1",
-        "netmask24": "255.255.255.0"
-      },
-      "module_networks": {
-        "_comment": "v1 per-module transit gateways. A module with a null gateway is declared but not wired.",
-        "crucible": {
-          "bridge": "crucible",
-          "gateway": "100.102.0.1",
-          "subnet_base": "100.102",
-          "cidr": "/16"
-        },
-        "cyberlabs": {
-          "bridge": "cyberlabs",
-          "gateway": null,
-          "subnet_base": "100.101",
-          "cidr": "/16"
-        },
-        "forge": {
-          "bridge": "forge",
-          "gateway": null,
-          "subnet_base": "100.103",
-          "cidr": "/16"
         }
       }
     }

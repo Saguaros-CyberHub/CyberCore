@@ -88,8 +88,8 @@ test('blank() seeds no placeholder VM row', () => {
   assert.strictEqual(s.challenge_key, '');
 });
 
-test('blank() defaults to v1 when no scheme is given', () => {
-  assert.strictEqual(Seed.blank().subnet_scheme, 'v1');
+test('blank() defaults to v2 when no scheme is given', () => {
+  assert.strictEqual(Seed.blank().subnet_scheme, 'v2');
 });
 
 // ── fromChallenge ────────────────────────────────────────────────────────────
@@ -133,9 +133,9 @@ test('a clone keeps network, phantoms and goad', () => {
 
 test('a clone reads subnet_scheme from the ROW, not the spec', () => {
   // GET /lab-templates is SELECT * for this reason: the list endpoint omits the
-  // column, and defaulting to v1 would draw one segment for a two-segment lab.
+  // column, and defaulting to v2 would draw one segment for a two-segment lab.
   assert.strictEqual(Seed.fromChallenge(challengeRow()).subnet_scheme, 'v3');
-  assert.strictEqual(Seed.fromChallenge(challengeRow({ subnet_scheme: null })).subnet_scheme, 'v1');
+  assert.strictEqual(Seed.fromChallenge(challengeRow({ subnet_scheme: null })).subnet_scheme, 'v2');
 });
 
 test('a clone is a deep copy — mutating it cannot touch the source row', () => {
@@ -252,7 +252,7 @@ test('the pivot is appended only when asked, as a qemu dmz host with no nics', (
 test('asking for the pivot forces v3 — there is nothing to pivot between otherwise', () => {
   assert.strictEqual(Seed.fromGoadLab(LAB, { addPivot: true }).subnet_scheme, 'v3');
   assert.strictEqual(Seed.fromGoadLab(LAB, { blankVmids: true }).subnet_scheme, 'v3');
-  assert.strictEqual(Seed.fromGoadLab(LAB, {}).subnet_scheme, 'v1');
+  assert.strictEqual(Seed.fromGoadLab(LAB, {}).subnet_scheme, 'v2');
 });
 
 test('pre-baked mode blanks every non-Kali template_vmid and flags the subnets', () => {
@@ -303,7 +303,7 @@ test('an import ADOPTS the file scheme — the designer owns it, unlike the moda
   // instead only because there the challenge's scheme is already fixed.
   assert.strictEqual(Seed.fromTopologyFile(FILE).subnet_scheme, 'v3');
   const noScheme = Object.assign({}, FILE); delete noScheme.subnet_scheme;
-  assert.strictEqual(Seed.fromTopologyFile(noScheme).subnet_scheme, 'v1');
+  assert.strictEqual(Seed.fromTopologyFile(noScheme).subnet_scheme, 'v2');
 });
 
 test('an import prefills the key but never the zone', () => {

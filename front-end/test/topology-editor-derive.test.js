@@ -40,7 +40,7 @@ const Editor = loadEditor();
 
 // Every shape the placement rule distinguishes, across every scheme.
 const CASES = [];
-for (const scheme of ['v1', 'v2', 'v3']) {
+for (const scheme of ['v2', 'v3']) {
   for (const isGoadVm of [false, true]) {
     for (const type of ['qemu', 'lxc']) {
       for (const role of ['', 'dmz', 'attacker', 'dc']) {
@@ -72,7 +72,7 @@ for (const c of CASES) {
 }
 
 test('segment lists agree with the server', () => {
-  for (const scheme of ['v1', 'v2', 'v3']) {
+  for (const scheme of ['v2', 'v3']) {
     const server = resolveSegments(scheme).map(s => s.id);
     const client = JSON.parse(JSON.stringify(Editor.segmentsForScheme(scheme))).map(s => s.id);
     assert.deepStrictEqual(client, server, scheme);
@@ -80,7 +80,7 @@ test('segment lists agree with the server', () => {
 });
 
 test('segment roles agree with the server too', () => {
-  for (const scheme of ['v1', 'v2', 'v3']) {
+  for (const scheme of ['v2', 'v3']) {
     const server = resolveSegments(scheme).map(s => s.id + ':' + s.role);
     const client = JSON.parse(JSON.stringify(Editor.segmentsForScheme(scheme))).map(s => s.id + ':' + s.role);
     assert.deepStrictEqual(client, server, scheme);

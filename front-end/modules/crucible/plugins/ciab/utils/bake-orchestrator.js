@@ -780,8 +780,18 @@ function validateBakeIdentity({ profileId, labHash, goadRef, manifestSha, spec }
       'BAKE_SPEC_NO_LAB'
     );
   }
-  if (spec.subnet_scheme != null && !['v1', 'v2', 'v3'].includes(spec.subnet_scheme)) {
-    throw bad('spec.subnet_scheme must be v1|v2|v3', 'BAKE_SPEC_SCHEME_INVALID');
+  // v1 is rejected by name, not lumped in with garbage: it was the shared
+  // 192.18.0.0/24 scheme on the per-module gateway templates, retired by
+  // migration 038. A spec still carrying it came out of a profile compiled
+  // before the retirement, and re-compiling is the fix — telling its author
+  // only that the value is "invalid" sends them hunting for a typo.
+  if (spec.subnet_scheme != null && !['v2', 'v3'].includes(spec.subnet_scheme)) {
+    throw bad(
+      spec.subnet_scheme === 'v1'
+        ? 'spec.subnet_scheme v1 was RETIRED (migration 038): the shared 192.18.0.0/24 lane '
+          + 'scheme no longer deploys. Re-compile this profile as v2 or v3.'
+        : 'spec.subnet_scheme must be v2|v3',
+      'BAKE_SPEC_SCHEME_INVALID');
   }
   if (spec.fixed_subnet != null && typeof spec.fixed_subnet !== 'string') {
     throw bad('spec.fixed_subnet must be a string', 'BAKE_SPEC_SUBNET_INVALID');

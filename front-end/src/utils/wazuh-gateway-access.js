@@ -46,7 +46,14 @@ function validateLane(lane, vmId, manager) {
     throw failure('The lane gateway identity could not be verified. Review its saved gateway configuration.');
   }
   const scheme = cfg.subnet_scheme;
-  if (!['v1', 'v2', 'v3'].includes(scheme) || typeof cfg.vnet !== 'string' || !NAME.test(cfg.vnet)
+  // 'v1' is deliberately NOT in this allow-list any more, and unlike the
+  // deploy-side refusals this one reads an EXISTING lane's recorded config: a v1
+  // lane that is still running can no longer be granted Wazuh agent transport at
+  // all. That is a clean refusal, not corruption — validateLane runs before
+  // anything is written, and again inside applyVerified as the TOCTOU re-check,
+  // so both call sites reject the request whole. Such a lane has to be
+  // redeployed as v2 before Wazuh can reach it.
+  if (!['v2', 'v3'].includes(scheme) || typeof cfg.vnet !== 'string' || !NAME.test(cfg.vnet)
       || (scheme === 'v3' && (typeof cfg.vnet_internal !== 'string'
         || !NAME.test(cfg.vnet_internal) || cfg.vnet_internal === cfg.vnet))) {
     throw failure('The lane gateway network layout could not be verified.');

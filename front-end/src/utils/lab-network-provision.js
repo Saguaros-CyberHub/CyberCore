@@ -19,7 +19,7 @@
 const { cybercoreQuery } = require('./cybercore-db');
 const { proxmoxAPI } = require('./proxmox');
 const { computeExpectedPeers, normalizePeers } = require('./reconcile-audit');
-const { getPhysicalClusterIps } = require('./site-config');
+const { getPhysicalClusterIps, getSchedulingConfig } = require('./site-config');
 const { claimsSql } = require('./lane-claims');
 
 // A v3 lane's internal VNet uses tag = (vxlanId + this offset). MUST match
@@ -418,14 +418,37 @@ async function verifyBridgesOnAllNodes({
 
   // The SAME source distributeAcrossNodes uses, filtered the same way, so the
   // set we verify is the set a deploy can actually choose from.
+  //
+  // "The same way" now includes cluster.scheduling.excluded_nodes. A drained
+  // node receives no lanes, so its bridges do not matter — and waiting for them
+  // is worse than not mattering: a node is usually excluded BECAUSE it is
+  // unwell (the cyberhub-node-8 case: a Ceph backfill losing the /dev/rbd-pve
+  // udev race), which is exactly the state in which its SDN bridges may never
+  // come up. Leaving it in the set would hold the whole block at ready:false
+  // for the full timeout and refuse deploys onto the healthy nodes.
+  //
+  // Node-health quarantine is deliberately NOT applied here, and the difference
+  // matters. Quarantine is SOFT — node-selector ignores it rather than leave
+  // the cluster with nowhere to deploy — so a quarantined node CAN still
+  // receive a lane and therefore still needs its bridges verified. Only the
+  // hard, operator-set exclusion is safe to skip.
   let nodeNames = nodes;
   if (!nodeNames) {
+    let excluded = [];
+    try { excluded = getSchedulingConfig().excluded_nodes || []; } catch (_) { excluded = []; }
+    const isExcluded = new Set(excluded.map(String));
     try {
       const rows = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=node', null, { timeoutMs: perCallMs });
-      nodeNames = (rows || []).filter(n => n.type === 'node' && n.status === 'online').map(n => n.node);
+      nodeNames = (rows || [])
+        .filter(n => n.type === 'node' && n.status === 'online' && !isExcluded.has(n.node))
+        .map(n => n.node);
     } catch (e) {
       log(`Bridge readiness: could not list nodes (${e.message})`);
       return result;
+    }
+    const skipped = [...isExcluded].filter(n => !nodeNames.includes(n));
+    if (skipped.length) {
+      log(`Bridge readiness: skipping ${skipped.join(', ')} (cluster.scheduling.excluded_nodes — no lane can be placed there)`);
     }
   }
   if (nodeNames.length === 0) {
@@ -558,7 +581,12 @@ async function reserveLabNetwork({
   challengeType = null, moduleKey = null, maxVxlanId = null, log = () => {},
 }) {
   if (!challengeKey || !name) throw new Error('reserveLabNetwork: challengeKey and name are required');
-  const scheme = ['v1', 'v2', 'v3'].includes(subnetScheme) ? subnetScheme : 'v2';
+  // Anything outside v2/v3 — the retired 'v1' included — is coerced to v2 rather
+  // than rejected. This is the RESERVE path: it writes a crucible_challenge row
+  // and its VXLAN block, with no lane deployed behind it yet, and v2 is the exact
+  // topology shape v1 always drew. Rejecting here would break callers that pass a
+  // stale scheme string for a challenge that has never been built.
+  const scheme = ['v2', 'v3'].includes(subnetScheme) ? subnetScheme : 'v2';
   const numLanes = parseInt(maxLanes, 10);
   if (!Number.isFinite(numLanes) || numLanes < 1 || numLanes > 200) {
     throw new Error('maxLanes must be between 1 and 200');

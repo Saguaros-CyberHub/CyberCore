@@ -113,7 +113,7 @@ const ENG_SCOPE_KINDS = ['all', 'vm', 'role', 'cidr', 'url', 'hostname_pattern',
 const ENG_ACCOUNT_KINDS = ['local', 'domain', 'app', 'service'];
 const ENG_CREDENTIAL_SOURCES = ['cloudinit', 'template', 'baked', 'app_seed', 'manual'];
 const ENG_PLACEMENTS = ['pivot', 'public', 'internal'];
-const ENG_SUBNET_SCHEMES = ['v1', 'v2', 'v3'];
+const ENG_SUBNET_SCHEMES = ['v2', 'v3'];
 // Mirrors utils/profile-to-spec.js's DEFAULT_SUBNET_SCHEME. A browser file
 // cannot require() it, so it is named once here rather than spelled inline.
 const ENG_DEFAULT_SUBNET_SCHEME = 'v3';
