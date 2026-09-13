@@ -95,6 +95,20 @@ const CONTROLLER_TEMPLATE_VMID = 1700;
 // pointing at one of them makes a pre-baked lane legitimate.
 const PLAIN_BASE_TEMPLATE_VMID = 1011;
 
+// How long to let a Windows lane VM finish booting before the DHCP-renew
+// restart touches its power. Generous on purpose: the cost of waiting is
+// wall-clock on a deploy that already takes tens of minutes, and the cost of
+// NOT waiting is a clone that boots into "The computer restarted unexpectedly"
+// forever. A sysprep-generalized image runs specialize + OOBE on first boot,
+// which is minutes rather than seconds, so this has to cover that and not just
+// a warm boot.
+const WINDOWS_BOOT_READY_TIMEOUT_MS = 600000;
+
+// Seconds Proxmox gives a guest to honour the ACPI shutdown before forceStop
+// escalates to a power cut. Windows writes its shutdown state well inside this;
+// anything still running at the end of it was not going to stop cleanly.
+const WINDOWS_GRACEFUL_SHUTDOWN_TIMEOUT_S = 180;
+
 // Lane subnet — provided per-deploy by the caller (v2: '10.<vxh>.<vxl>'
 // unique per lane, v3: the INTERNAL segment's
 // '10.<vxh|0x80>.<vxl>' — GOAD always lives on the internal subnet in v3).
@@ -2638,14 +2652,66 @@ async function deployGoadLane({
     // UTC across later cold boots, regardless of the Proxmox node timezone.
     await configureGoadWindowsRtc({ vms: winVMs, proxmoxAPI, report: clockVerification });
     if (winVMs.length > 0) {
+      // WAIT FOR THE GUESTS TO FINISH BOOTING BEFORE TOUCHING THEIR POWER.
+      //
+      // admin.js starts these VMs long before this point, and everything
+      // between — the controller clone, the lab push, prep.sh — is variable
+      // work. So without a gate here, the only thing keeping the stop below out
+      // of a guest's first boot is however long that work happened to take on
+      // this node, on this day. That margin shrinks with node load; a Ceph
+      // backfill is enough to close it.
+      //
+      // Land inside the window and Windows reboots into "The computer restarted
+      // unexpectedly or encountered an unexpected error. Windows installation
+      // cannot proceed." That dialog is terminal for the clone, not transient:
+      // the interrupted boot leaves HKLM\SYSTEM\Setup marked in-progress, so
+      // windeploy.exe re-runs and re-fails on every subsequent boot, and the
+      // lane reports the VM as running the whole time.
+      //
+      // ws01 is the worst case and the one this was found on: it is an
+      // extension machine, so it clones LAST and carries the smallest head
+      // start, and its Windows 11 image is the largest in the lab.
+      //
+      // waitForGuestAgent is the same gate this file already applies to the
+      // controller, the DCs and the members. The agent answers only once
+      // Windows is up far enough to run it, which is exactly the condition
+      // "safe to power this off now".
+      console.log(`[GOAD] Waiting for ${winVMs.length} Windows VM(s) to finish booting before the DHCP restart...`);
+      for (const vm of winVMs) {
+        const ready = await runtime.waitForGuestAgent(vm.node, vm.vm_id, WINDOWS_BOOT_READY_TIMEOUT_MS);
+        if (!ready) {
+          // NOT fatal, deliberately. From out here a guest with no agent
+          // installed is indistinguishable from one that is merely slow, and
+          // failing a lane that may be perfectly healthy is worse than the
+          // graceful shutdown we are about to do anyway — which is safe even
+          // mid-boot, because Windows gets to finish what it is doing.
+          console.warn(
+            `[GOAD] ${vm.name} did not answer the guest agent within ` +
+            `${Math.round(WINDOWS_BOOT_READY_TIMEOUT_MS / 1000)}s — shutting it down gracefully regardless`);
+        }
+      }
       console.log(`[GOAD] Restarting ${winVMs.length} Windows VM(s) to renew DHCP onto reserved IPs...`);
       for (const vm of winVMs) {
         try {
-          const stopTask = await proxmoxAPI('POST', `/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/status/stop`);
-          if (stopTask && waitForTask) await waitForTask(vm.node, stopTask);
+          // ACPI shutdown, NOT status/stop. status/stop is a power cut: it is
+          // what produced the setup-interrupted state described above, and it
+          // can do so however long we waited, because "the agent answered" is
+          // not the same as "Windows has nothing left in flight".
+          //
+          // forceStop lets Proxmox escalate to a hard stop on its own once the
+          // guest has had `timeout` seconds to go down cleanly, so a guest that
+          // ignores ACPI still cannot wedge the deploy — we get the safe path
+          // when it is available and the old behaviour only as a last resort.
+          const stopTask = await proxmoxAPI(
+            'POST', `/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/status/shutdown`,
+            { timeout: WINDOWS_GRACEFUL_SHUTDOWN_TIMEOUT_S, forceStop: 1 });
+          if (stopTask && waitForTask) {
+            await waitForTask(vm.node, stopTask, (WINDOWS_GRACEFUL_SHUTDOWN_TIMEOUT_S + 60) * 1000);
+          }
         } catch (err) {
-          // An already stopped guest can reject the stop request. Confirm its
-          // state below; never continue with a running VM and only pending RTC.
+          // An already stopped guest can reject the shutdown request. Confirm
+          // its state below; never continue with a running VM and only pending
+          // RTC.
         }
         let current;
         try { current = await proxmoxAPI('GET', `/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/status/current`); }

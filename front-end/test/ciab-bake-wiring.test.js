@@ -871,3 +871,69 @@ test('server.js calls recoverStrandedBakes at boot', () => {
 test('recoverStrandedBakes is exported under exactly the name server.js calls', () => {
   assert.strictEqual(typeof orch.recoverStrandedBakes, 'function');
 });
+
+// ---------------------------------------------------------------------------
+// The DHCP-renew restart must never power-cut a guest that is still booting
+// ---------------------------------------------------------------------------
+// Lives here because this is the only harness that drives the real
+// deployGoadLane end to end, and the guest fake already records every
+// proxmoxAPI call in order — which is what makes the ORDERING assertion below
+// possible, and ordering is the whole point.
+//
+// THE BUG: the restart issued status/stop — a power cut — with nothing waiting
+// for the guests to finish booting first. admin.js starts them long before this
+// point, so the only protection was how long the intervening work happened to
+// take. Land inside a first boot and Windows comes back to "The computer
+// restarted unexpectedly or encountered an unexpected error", which is terminal
+// for that clone: HKLM\SYSTEM\Setup stays marked in-progress, so windeploy.exe
+// re-runs and re-fails on every later boot while the lane reports it running.
+// Observed on ws01, the worst case — an extension machine, so it clones last
+// with the smallest head start, and the largest image in the lab.
+
+test('Windows lane VMs are confirmed booted before the DHCP restart touches their power', async () => {
+  guest = makeGuest();
+  await goad.deployGoadLane(laneArgs(builtInSpec(), {
+    // Record the readiness gate INTO the same ordered log as the power calls.
+    waitForGuestAgent: async (node, vmId) => {
+      guest.calls.push({ method: 'WAIT', path: `agent-ready/${vmId}` });
+      return true;
+    },
+    runPlaybook: async () => ({ exited: true, exitcode: 0 }),
+  }));
+
+  const shutdowns = guest.calls.filter((c) => /\/status\/shutdown$/.test(c.path));
+  assert.ok(shutdowns.length > 0, 'expected the restart to shut every Windows VM down');
+
+  for (const call of shutdowns) {
+    const vmId = call.path.match(/qemu\/(\d+)\//)[1];
+    const waitedAt = guest.calls.findIndex(
+      (c) => c.method === 'WAIT' && c.path === `agent-ready/${vmId}`);
+    assert.ok(waitedAt >= 0, `VM ${vmId} was powered down with no readiness gate at all`);
+    assert.ok(waitedAt < guest.calls.indexOf(call),
+      `VM ${vmId} was powered down BEFORE it was confirmed booted — this is the bug`);
+  }
+});
+
+test('the restart uses an ACPI shutdown that Proxmox escalates, never a bare power cut', async () => {
+  guest = makeGuest();
+  await goad.deployGoadLane(laneArgs(builtInSpec(), {
+    waitForGuestAgent: async () => true,
+    runPlaybook: async () => ({ exited: true, exitcode: 0 }),
+  }));
+
+  const laneVmStops = guest.calls.filter(
+    (c) => /\/qemu\/6\d{5}\/status\/stop$/.test(c.path));
+  assert.deepStrictEqual(laneVmStops, [],
+    'status/stop is a power cut and cannot be made safe by waiting first — a guest can always '
+    + 'have work in flight. Use status/shutdown with forceStop.');
+
+  const shutdowns = guest.calls.filter((c) => /\/status\/shutdown$/.test(c.path));
+  assert.ok(shutdowns.length > 0);
+  for (const call of shutdowns) {
+    assert.strictEqual(call.body?.forceStop, 1,
+      'without forceStop a guest that ignores ACPI wedges the deploy instead of being cut, '
+      + 'which trades one failure for a worse one');
+    assert.ok(Number(call.body?.timeout) > 0,
+      'forceStop needs a timeout to escalate from, or Proxmox waits forever');
+  }
+});
