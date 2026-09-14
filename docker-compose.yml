@@ -13,10 +13,6 @@ volumes:
   # image and everything in it, and an instructor's afternoon of adversary
   # authoring must not be part of what gets replaced.
   cybercore-caldera-data:
-  # The atomic plugin's ingested abilities. Separate from the volume above
-  # because the plugin writes them under plugins/, not under data/ — see the
-  # mount in the caldera service for why that distinction costs an import.
-  cybercore-caldera-atomic:
 
 services:
   # ============================================================================
@@ -583,12 +579,18 @@ services:
       # Authored adversaries, sources, objectives and the object store. Survives
       # `docker compose build caldera`, which is the whole reason it is named.
       - cybercore-caldera-data:/usr/src/app/data
-      # The atomic plugin's INGESTED abilities, which do NOT live under data/.
-      # It writes them to plugins/atomic/data/abilities/<tactic>/<id>.yml — an
-      # image layer — so without this volume the one-time "add abilities" import
-      # is silently undone by the next `--force-recreate`, and the ability count
-      # drops back to stockpile's alone with nothing explaining why.
-      - cybercore-caldera-atomic:/usr/src/app/plugins/atomic/data/abilities
+      #
+      # DO NOT ADD A VOLUME FOR plugins/atomic/data/abilities. It looks like an
+      # obvious fix — the atomic plugin writes its ingested abilities into an
+      # image layer, so they are lost on --force-recreate — and it silently
+      # breaks the plugin instead. Its hook guards the ingest with
+      #
+      #     if "abilities" not in os.listdir(data_dir):
+      #
+      # so a mount there CREATES the directory, the ingest is skipped forever,
+      # and atomic reports zero abilities with nothing in any log to say why.
+      # Nothing needs persisting: the ingest is automatic on a fresh container,
+      # so a recreate simply re-runs it. Tried in 4facbd6, reverted immediately.
     healthcheck:
       # Defined in the Dockerfile (this image is ours, so it has one). Repeated
       # here only to give the app-side `depends_on` something to wait on if one
