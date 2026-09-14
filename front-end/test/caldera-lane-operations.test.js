@@ -603,8 +603,12 @@ test('a resolvable lab seeds its own estate into that lane\'s fact source', asyn
  * for every lane — one instructor typo costing the whole class its exercise.
  */
 test('an unusable obfuscator or jitter is refused before anything is created', async () => {
-  for (const bad of [{ obfuscator: 'rot13' }, { obfuscator: '' }, { jitter: '9/2' },
-    { jitter: 'fast' }, { jitter: '0/0' }, { jitter: '1/0' }]) {
+  for (const bad of [{ obfuscator: 'rot13' }, { obfuscator: '' }, { jitter: '9/2' },
+    { jitter: 'fast' }, { jitter: '0/0' }, { jitter: '1/0' },
+    // Above the trust window: agents would go untrusted mid-exercise.
+    { jitter: '10/9999' }, { jitter: '200/400' },
+    // A metronome, which is what the beacon change removed one layer down.
+    { jitter: '30/30' }]) {
     const h = harness();
     await assert.rejects(() => h.launch({ ...h.input, ...bad }),
       err => err.status === 400, `${JSON.stringify(bad)} was accepted`);

@@ -62,7 +62,13 @@ require.cache[require.resolve(path.join(UTILS, 'proxmox.js'))] = {
       if (m) {
         const node = m[1];
         if (PVE.failNodes.has(node)) throw new Error(`node ${node} unreachable`);
-        return (PVE.ifacesByNode[node] || []).map(iface => ({ iface }));
+        // active: 1 is REQUIRED, not decoration. Proxmox lists a VNet from the
+        // node's generated interfaces.d/sdn -- written at the START of the
+        // srvreload task -- and only marks it active/exists once ifreload has
+        // actually created it. utils/node-bridges.bridgeIsUp keys on that, so a
+        // fixture row without it means "configured, not up", which is exactly
+        // the state a still-reloading node is in.
+        return (PVE.ifacesByNode[node] || []).map(iface => ({ iface, active: 1 }));
       }
       return [];
     },

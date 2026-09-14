@@ -25,7 +25,9 @@
       "min_free_disk_gb": 20,
       "max_concurrent_lanes": 5,
       "max_concurrent_clones": 4,
-      "node_score_weights": { "cpu": 0.35, "mem": 0.55, "disk": 0.10 }
+      "node_score_weights": { "cpu": 0.35, "mem": 0.55, "disk": 0.10 },
+      "_comment_bridge_wait_s": "How long a BACKGROUND lane deploy waits for at least one schedulable node to have the lane's SDN VNet bridge(s) up, before failing with BRIDGES_NOT_ON_ANY_NODE. `PUT /cluster/sdn` does not create bridges -- it makes every node queue its own 'SRV Networking' reload (ifreload -a), and on this cluster (hundreds of VNets in the shared ciabprof zone) those land minutes to HOURS apart. A node that has not finished is SKIPPED for this placement, not quarantined and not recorded: readiness only ever improves, so the next deploy asks again. This is what makes a new environment deployable as soon as ONE node has finished instead of after the slowest. The two synchronous admin routes (POST /api/admin/deploy-lane, POST /deploy-lab-network) use a fixed 15s instead, because an HTTP request cannot sit open for minutes.",
+      "bridge_wait_s": 300
     },
     "networking": {
       "_comment": "Lane network topology. Absent here until now, which meant the hardcoded defaults in front-end/src/utils/site-config.js were the only record of the live contract.",

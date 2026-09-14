@@ -53,6 +53,7 @@ const {
 } = require('./proxmox');
 const { vmApiBase } = require('./vm-paths');
 const { selectBestNode } = require('./node-selector');
+const { bridgeNames } = require('./node-bridges');
 const { runBatch, distributeAcrossNodes, createCloneSemaphore } = require('./batch-deployer');
 const {
   resolveGatewayVmid, resolveLaneNetworking, formatLaneGatewayNet0, configureLaneTailscale,
@@ -2388,17 +2389,34 @@ async function deployLanes({
 async function sequentialDeploy(jobs, failed, { gwOriginNode, gwOriginVmid, progress }) {
   const provisioned = [];
   setPhase(progress, 'deploying', `Deploying ${jobs.length} lane(s)`);
+
+  // Once one lane has proved that NO node has this block's bridges up yet, the
+  // rest of the batch will find exactly the same thing — same zone, same apply,
+  // same per-node reload — so they fail on the recorded reason instead of each
+  // waiting out the full budget again. Three lanes used to mean three waits.
+  let bridgeOutage = null;
+
   for (const job of jobs) {
-    job.targetNode = (await selectBestNode()).node;
+    if (bridgeOutage) {
+      failed.push({ user_id: job.user.id, reason: bridgeOutage.message });
+      if (progress) { progress.failed++; progress.completed++; }
+      continue;
+    }
     job.gwSourceNode = gwOriginNode;
     job.gwSourceVmid = gwOriginVmid;
     try {
+      // Placement moved INSIDE the try: a lane whose VNet is not up anywhere yet
+      // is a failed lane with a reason, not an exception out of the whole batch.
+      job.targetNode = (await selectBestNode({
+        requireBridges: bridgeNames([job.vnet]),
+      })).node;
       await insertLane(job);
       await cloneGateway(job);
       await deployLaneWorkstations(job);
       provisioned.push({ user_id: job.user.id, lane_id: job.laneId, vxlan_id: job.vxlanId });
       if (progress) { progress.succeeded++; progress.completed++; recordLaneDone(progress, 1); }
     } catch (err) {
+      if (err.code === 'BRIDGES_NOT_ON_ANY_NODE') bridgeOutage = err;
       if (job.laneId) await markLaneError(job.laneId, err.message);
       failed.push({ user_id: job.user.id, reason: err.message });
       if (progress) { progress.failed++; progress.completed++; }
@@ -2412,13 +2430,31 @@ async function sequentialDeploy(jobs, failed, { gwOriginNode, gwOriginVmid, prog
  * per-node (serial within a node), then clone workstations in parallel.
  */
 async function batchDeploy(jobs, failed, { gwOriginNode, gwOriginVmid, cloneSem, progress }) {
-  // Node assignment.
+  // Node assignment — over nodes whose SDN reload has actually landed these
+  // lanes' VNets. A node that is still reloading clones the gateway fine and then
+  // fails to start it with `bridge '<vnet>' does not exist`.
+  const requireBridges = bridgeNames(jobs.map(j => j.vnet));
   let nodes;
   try {
-    nodes = await distributeAcrossNodes(proxmoxAPI, jobs.length);
+    nodes = await distributeAcrossNodes(proxmoxAPI, jobs.length, { requireBridges, logTag: LOG });
   } catch (e) {
+    if (e.code === 'BRIDGES_NOT_ON_ANY_NODE') {
+      // No lane row exists yet (insertLane runs below), so there is nothing to
+      // mark — fail every job with the reason and hand the addresses back. The
+      // caller's finally releases the VXLAN ids.
+      for (const job of jobs) failed.push({ user_id: job.user.id, reason: e.message });
+      const held = jobs.map(j => j.net?.wan?.ip).filter(Boolean).map(ip => String(ip).split('/')[0]);
+      if (held.length) await laneWan.releaseLaneWanIps(held).catch(() => {});
+      if (progress) {
+        progress.error = e.message;
+        progress.failed += jobs.length;
+        progress.completed += jobs.length;
+      }
+      console.error(`${LOG} ${e.message}`);
+      return { provisioned: [], failed };
+    }
     console.warn(`${LOG} distributeAcrossNodes failed (${e.message}); using best node for all`);
-    const best = await selectBestNode();
+    const best = await selectBestNode({ requireBridges });
     nodes = new Array(jobs.length).fill(best.node);
   }
   jobs.forEach((job, i) => { job.targetNode = nodes[i]; });

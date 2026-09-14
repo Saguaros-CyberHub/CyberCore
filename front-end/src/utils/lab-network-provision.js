@@ -10,9 +10,13 @@
  *   SDN zones / VNets   → Proxmox (proxmoxAPI)
  *
  * The SDN apply (PUT /cluster/sdn) is asynchronous: VNet bridges materialize on
- * the nodes over the following seconds. reserveLabNetwork polls until the
- * last-created VNet bridge shows up, so a lane deploy that starts right after
- * doesn't hit `bridge '<vnet>' does not exist`.
+ * the nodes over the following seconds -- or, on a big zone, hours, and at wildly
+ * different times per node. reserveLabNetwork polls until the bridges show up, so
+ * a lane deploy that starts right after doesn't hit `bridge '<vnet>' does not
+ * exist`; and since that wait can no longer be allowed to gate a whole class,
+ * PLACEMENT itself now skips the nodes whose reload has not landed
+ * (node-selector.keepBridgeReadyNodes), using the same probe as the poll below
+ * so the readiness badge and the scheduler can never disagree.
  * ============================================================================
  */
 
@@ -20,6 +24,7 @@ const { cybercoreQuery } = require('./cybercore-db');
 const { proxmoxAPI } = require('./proxmox');
 const { computeExpectedPeers, normalizePeers } = require('./reconcile-audit');
 const { getPhysicalClusterIps, getSchedulingConfig } = require('./site-config');
+const { probeNodesForBridges } = require('./node-bridges');
 const { claimsSql } = require('./lane-claims');
 
 // A v3 lane's internal VNet uses tag = (vxlanId + this offset). MUST match
@@ -460,27 +465,26 @@ async function verifyBridgesOnAllNodes({
   let pending = [...nodeNames];
 
   while (pending.length > 0 && Date.now() < deadline) {
-    const checks = await Promise.all(pending.map(async (node) => {
-      try {
-        const ifaces = await proxmoxAPI('GET', `/api2/json/nodes/${node}/network`, null, { timeoutMs: perCallMs });
-        const present = new Set((ifaces || []).map(i => i.iface));
-        const missing = expectedNames.filter(n => !present.has(n));
-        return { node, missing, reachable: true };
-      } catch (e) {
-        return { node, missing: expectedNames, reachable: false, error: e.message };
-      }
-    }));
+    // The per-node probe moved to utils/node-bridges.js so PLACEMENT can share it.
+    // Same question, one predicate: an interface is present only when Proxmox
+    // reports it active/exists, not merely when it appears in the node's config --
+    // the generated interfaces.d/sdn is written at the START of the reload task,
+    // so the looser check called a node ready while ifreload had not run yet.
+    const probe = await probeNodesForBridges(pending, expectedNames, { perCallMs });
+    const readySet = new Set(probe.ready);
 
     const stillPending = [];
-    for (const c of checks) {
-      if (c.reachable && c.missing.length === 0) {
-        if (!result.nodesReady.includes(c.node)) result.nodesReady.push(c.node);
-        delete result.missingByNode[c.node];
+    for (const node of pending) {
+      if (readySet.has(node)) {
+        if (!result.nodesReady.includes(node)) result.nodesReady.push(node);
+        delete result.missingByNode[node];
       } else {
-        result.missingByNode[c.node] = c.reachable
-          ? c.missing
-          : [`unreachable: ${c.error}`];
-        stillPending.push(c.node);
+        // The `unreachable: ` prefix is load-bearing: the classifier below splits
+        // "answered and was short" from "never answered" by reading it back.
+        result.missingByNode[node] = (node in probe.unreachable)
+          ? [`unreachable: ${probe.unreachable[node]}`]
+          : (probe.missingByNode[node] || expectedNames);
+        stillPending.push(node);
       }
     }
     pending = stillPending;

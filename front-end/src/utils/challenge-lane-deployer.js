@@ -58,6 +58,7 @@ const { guacAPI } = require('./guacamole');
 const guacCreds = require('./guac-credentials');
 const { getDefaultTemplateNode, getSchedulingConfig } = require('./site-config');
 const { selectBestNode } = require('./node-selector');
+const { bridgeNames } = require('./node-bridges');
 const { runBatch, distributeAcrossNodes, createCloneSemaphore } = require('./batch-deployer');
 const { generatePassword } = require('./password-generator');
 const { waitForGuestAgent, executeScriptsOnVM } = require('./script-executor');
@@ -1020,9 +1021,19 @@ async function replaceGatewayNode({
   // cluster. Quarantined nodes are already dropped inside selectBestNode — and
   // softly, so a fully quarantined cluster still places something — which is
   // why the identity check below is a backstop rather than the mechanism.
+  //
+  // requireBridges, for the OTHER reason a gateway will not start on a node:
+  // `bridge '<vnet>' does not exist`, because that node has not finished the
+  // "SRV Networking" reload the environment's SDN apply queued. Both faults
+  // arrive here identically (a clone that came up and a container that did not
+  // start), and re-placing onto a second node that is also mid-reload spends the
+  // one allowed hop proving it. See keepBridgeReadyNodes in node-selector.js.
   let best = null;
   try {
-    best = await selectBestNode({ exclude: [failedNode] });
+    best = await selectBestNode({
+      exclude: [failedNode],
+      requireBridges: bridgeNames([job.vnet, job.vnetInt]),
+    });
   } catch (e) {
     return {
       success: false,
@@ -3054,13 +3065,39 @@ async function deployChallengeLanesInner({
   }
   const unusedWan = [];
 
-  // 2. Spread the lanes across the cluster.
+  // 2. Spread the lanes across the cluster — over the nodes that can actually
+  //    carry these lanes. A node still running the "SRV Networking" reload that
+  //    this environment's SDN apply queued has the VNets in its config and not in
+  //    its kernel, and every lane placed there clones cleanly and then dies at
+  //    `pct start` with `bridge '<vnet>' does not exist`. Requiring the UNION of
+  //    the batch's VNet names means "nodes whose reload has landed", which is what
+  //    makes a fresh environment deployable in minutes instead of after the
+  //    slowest node in the cluster.
+  const requireBridges = bridgeNames(
+    Object.values(vnetsByVxlan).flatMap(n => [n.vnet, n.vnetInt])
+  );
+  // Surfaced in the progress panel: a silent five-minute wait reads as a hang.
+  const onBridgeWait = (m) => { if (progress) progress.phase_detail = m; };
+
   let nodeAssignments;
   try {
-    nodeAssignments = await distributeAcrossNodes(proxmoxAPI, users.length);
+    nodeAssignments = await distributeAcrossNodes(proxmoxAPI, users.length, {
+      requireBridges, logTag, log: onBridgeWait,
+    });
   } catch (e) {
+    // NOT a case for the single-node fallback. The fallback exists for "the
+    // spread maths failed"; retrying the identical bridge requirement through
+    // selectBestNode would wait the whole budget a second time and throw the
+    // same error. Give the ids and the addresses back and fail loudly instead —
+    // nothing has been created yet, and the message names the remedy.
+    if (e.code === 'BRIDGES_NOT_ON_ANY_NODE') {
+      laneDeployer.releaseVxlanReservations(vxlans);
+      if (wanIps) await laneWan.releaseLaneWanIps(wanIps.map(w => w.address)).catch(() => {});
+      laneDeployer.finishProgress(progressId);
+      throw e;
+    }
     console.warn(`${logTag} Batch node distribution failed, falling back to a single node: ${e.message}`);
-    const best = await selectBestNode();
+    const best = await selectBestNode({ requireBridges, log: onBridgeWait });
     nodeAssignments = new Array(users.length).fill(best.node);
   }
 

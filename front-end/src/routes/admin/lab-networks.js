@@ -24,6 +24,16 @@ const { logActivity } = require('../../middleware/activity-logger');
 const { waitForGuestAgent, executeScriptsOnVM, getVMIPs } = require('../../utils/script-executor');
 const { plantFlagsForLane } = require('../../utils/flag-manager');
 const { selectBestNode } = require('../../utils/node-selector');
+const { bridgeNames } = require('../../utils/node-bridges');
+
+// A lane deployed through an HTTP route cannot wait out cluster.scheduling.
+// bridge_wait_s: the request is open and someone is watching a spinner. 15s
+// catches a node that is seconds from finishing its SDN reload; anything longer
+// belongs to the background batch deployers, which have a progress panel to say
+// so. A 503 naming the state is a better answer than a request that times out in
+// a proxy.
+const HTTP_BRIDGE_WAIT_MS = 15000;
+
 const gatewayLifecycle = require('../../utils/gateway-lifecycle');
 const goadDeploy = require('../../utils/goad-deploy');
 const { withGoadAgentVulnScripts } = require('../../utils/goad-agent-attach');
@@ -128,9 +138,8 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
       vmSpecs[0]?.template_node || getDefaultTemplateNode()
     );
     console.log(`[ChallengeNetwork] subnet_scheme=${subnetScheme} → gateway template=${gatewayVmid}`);
-    const bestNodeInfo = await selectBestNode();
-    const bestNode = bestNodeInfo.node;
-    console.log(`[ChallengeNetwork] Selected node ${bestNode} for deployment (score: ${bestNodeInfo.score})`);
+    // Node selection happens BELOW, once the VNets are known: which nodes may
+    // receive this lane depends on which of them have its bridges up.
 
     // Allocate VXLAN from the challenge's VXLAN block (set at challenge creation)
     const vxlanBlock = (spec.vxlan_block?.start && spec.vxlan_block?.end)
@@ -211,6 +220,37 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
         });
       }
     }
+
+    // Placement, now that the lane's VNets are resolved. The node must already
+    // have their bridges up: a node still running the "SRV Networking" reload
+    // that a `PUT /cluster/sdn` queued holds the VNet in its config and not in
+    // its kernel, and the gateway would clone cleanly and then refuse to start
+    // with `bridge '<vnet>' does not exist`.
+    //
+    // Worst case in this request is additive: the ensureSdnZoneAndVnets fallback
+    // above can already spend up to 240s waiting for bridges on every node, and
+    // this adds up to HTTP_BRIDGE_WAIT_MS on top. Both are bounded and both
+    // report what they were waiting for.
+    let bestNodeInfo;
+    try {
+      bestNodeInfo = await selectBestNode({
+        requireBridges: bridgeNames([vnet, vnetInt]),
+        waitMs: HTTP_BRIDGE_WAIT_MS,
+      });
+    } catch (e) {
+      if (e.code === 'BRIDGES_NOT_ON_ANY_NODE') {
+        return res.status(503).json({
+          error: e.message,
+          code: e.code,
+          required_bridges: e.requiredBridges,
+          missing_by_node: e.missingByNode,
+          unreachable: e.unreachable,
+        });
+      }
+      throw e;
+    }
+    const bestNode = bestNodeInfo.node;
+    console.log(`[ChallengeNetwork] Selected node ${bestNode} for deployment (score: ${bestNodeInfo.score})`);
 
     // Verify user exists in cybercore_user
     const userResult = await cybercoreQuery(

@@ -339,7 +339,8 @@ nothing powered on.
 ### Launching
 
 Select the profile and student lanes, then launch. Each selected lane needs a
-running VM with a trusted managed agent seen within the last two minutes.
+running VM with a trusted managed agent that has checked in recently. See
+"How often an agent checks in" below for what recently means.
 CyberCore snapshots the profile's ability ordering, creates a separate paused
 operation for each lane, then sends the start requests together. If preparation
 fails for a lane, the prepared batch is stopped before release. After release,

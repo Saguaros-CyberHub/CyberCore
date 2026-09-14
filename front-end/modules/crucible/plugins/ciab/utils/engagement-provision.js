@@ -733,8 +733,14 @@ async function provisionEngagementNetwork(engagement, { companyName = null } = {
       // the nodes that DID come up. Blocking here would strand a whole class
       // over one node that is down for unrelated reasons. The warning is
       // surfaced in the UI so it is a decision, not a surprise.
+      // "will fail to cable" is no longer true, and the difference matters to
+      // whoever reads this at 2am: placement itself now skips a node whose SDN
+      // reload has not landed (node-selector.keepBridgeReadyNodes), so an
+      // unconfirmed node costs CAPACITY for this deploy, not lanes.
       console.warn(`${LOG} ${engagement.engagement_type} reserved but bridges unconfirmed on ` +
-        `${readiness.nodesPending.concat(readiness.nodesUnreachable).join(', ')} — lanes placed there will fail to cable`);
+        `${readiness.nodesPending.concat(readiness.nodesUnreachable).join(', ')} — lanes will be placed ` +
+        `only on the nodes whose bridges ARE up (${readiness.nodesReady.join(', ') || 'none yet'}); ` +
+        `the others join the pool as each finishes its SDN reload`);
     }
   } catch (err) {
     console.error(`${LOG} provision failed for ${id}: ${err.message}`);

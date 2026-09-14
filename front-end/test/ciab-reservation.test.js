@@ -156,7 +156,9 @@ async function fakeProxmoxAPI(method, url, body) {
   }
   if (method === 'GET' && url.endsWith('/nodes')) return [{ node: 'node1' }];
   if (method === 'GET' && /\/nodes\/[^/]+\/network$/.test(url)) {
-    return sdnVnets.map(v => ({ iface: v.vnet }));
+    // active: 1 -- see utils/node-bridges.bridgeIsUp: a row without it means the
+    // VNet is in the node's config but ifreload has not brought it up yet.
+    return sdnVnets.map(v => ({ iface: v.vnet, active: 1 }));
   }
   if (method === 'POST' && url.endsWith('/cluster/sdn/zones')) {
     if (sdnZones.some(z => z.zone === body.zone)) throw new Error(`zone '${body.zone}' already exists`);

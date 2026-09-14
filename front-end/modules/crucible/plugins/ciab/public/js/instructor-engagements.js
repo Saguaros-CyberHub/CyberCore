@@ -755,7 +755,10 @@ const Engagements = {
     let bridges = '';
     if (status === 'ready') {
       if (bridgesReady === true) bridges = engBadge('Bridges verified', 'success');
-      else if (bridgesReady === false) bridges = engBadge('Bridges not verified', 'warning');
+      // Deliberately not "not verified", which reads as broken. Deploys now place
+      // lanes only on nodes whose bridges are up, so this state is "fewer nodes
+      // available", not "this environment does not work".
+      else if (bridgesReady === false) bridges = engBadge('Bridges up on some nodes', 'warning');
       else bridges = engBadge('Bridges unverified', 'gray');
     }
 

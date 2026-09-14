@@ -12,7 +12,7 @@ const { getSchedulingConfig } = require('./site-config');
 // deploys used to disagree about which nodes were usable -- see the comment on
 // filterSchedulableNodes. node-selector pulls in proxmox + site-config +
 // node-health and nothing else, so this direction of the dependency is acyclic.
-const { filterSchedulableNodes } = require('./node-selector');
+const { filterSchedulableNodes, keepBridgeReadyNodes } = require('./node-selector');
 
 const { max_concurrent_lanes: MAX_CONCURRENT_LANES, max_concurrent_clones: MAX_CONCURRENT_CLONES } = getSchedulingConfig();
 
@@ -116,12 +116,20 @@ async function runBatch(jobs, worker, opts = {}) {
  * Distribute lane jobs across cluster nodes using round-robin weighted assignment.
  * Queries node resources ONCE, then assigns each lane to a node based on capacity.
  *
- * @param {Function} selectBestNode - the existing selectBestNode function
  * @param {Function} proxmoxAPI     - Proxmox API helper
  * @param {number}   numLanes       - how many lanes to distribute
+ * @param {Object}   [opts]
+ * @param {Array}    [opts.requireBridges] - the UNION of every lane's SDN VNet names.
+ *   A node is eligible for the batch only if it has ALL of them up, because a node
+ *   partway through its post-apply `ifreload -a` has the first N of a block and not
+ *   the rest -- and its networking is being rewritten underneath any lane placed
+ *   there. Nodes that have not finished are skipped for THIS batch and nothing more:
+ *   see keepBridgeReadyNodes in node-selector.js for why that is not a quarantine.
+ * @param {number}   [opts.waitMs]  - how long to wait for at least one ready node
+ * @param {Function} [opts.log]     - extra sink for the waiting notice
  * @returns {Promise<string[]>}     - array of node names, one per lane
  */
-async function distributeAcrossNodes(proxmoxAPI, numLanes) {
+async function distributeAcrossNodes(proxmoxAPI, numLanes, opts = {}) {
   const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=node');
 
   if (!Array.isArray(resources) || resources.length === 0) {
@@ -136,7 +144,23 @@ async function distributeAcrossNodes(proxmoxAPI, numLanes) {
   // online-only filter, which is how a batch of six lanes could still be
   // spread across cyberhub-node-8 after an operator had excluded it, while a
   // single-lane deploy through selectBestNode correctly avoided it.
-  const nodes = filterSchedulableNodes(resources, { logTag: '[BatchDeployer]' })
+  const logTag = opts.logTag || '[BatchDeployer]';
+  const schedulable = filterSchedulableNodes(resources, { logTag });
+
+  // Filter 5: drop the nodes whose SDN reload has not landed the lane VNets yet.
+  // Without it a batch deployed minutes after an environment was created sprays
+  // lanes across every online node, and every lane on a still-reloading node dies
+  // at `pct start` with "bridge '<vnet>' does not exist".
+  const bridgeReady = await keepBridgeReadyNodes(schedulable, {
+    requireBridges: opts.requireBridges,
+    waitMs: opts.waitMs,
+    intervalMs: opts.intervalMs,
+    perCallMs: opts.perCallMs,
+    log: opts.log,
+    logTag,
+  });
+
+  const nodes = bridgeReady
     .map(n => {
       const maxmem = Number(n.maxmem || 0);
       const mem = Number(n.mem || 0);
@@ -185,7 +209,7 @@ async function distributeAcrossNodes(proxmoxAPI, numLanes) {
     assignments.push(nodes[bestIdx].node);
   }
 
-  console.log(`[BatchDeployer] Distributed ${numLanes} lanes across ${nodes.length} nodes:`,
+  console.log(`${logTag} Distributed ${numLanes} lanes across ${nodes.length} nodes:`,
     nodes.map((n, i) => `${n.node}=${nodeCounts[i]}`).join(', '));
 
   return assignments;

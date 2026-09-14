@@ -282,6 +282,74 @@ quarantine `count` keeps climbing across separate quarantines is an operator ala
 problem the orchestrator has solved. (`NODE_QUARANTINE_MS` is env-overridable if you need
 a shorter window while testing this runbook — leave it alone in production.)
 
+### 5.5 SDN bridge readiness is a third thing again
+
+There is a **fifth placement filter**, and it is neither a drain nor a quarantine. Before
+placing a lane, the scheduler asks every candidate node whether the lane's SDN VNet bridge
+is actually up there, and skips the ones where it is not.
+
+**Why it exists.** Creating an environment carves a VXLAN block and commits it with a single
+cluster-wide `PUT /cluster/sdn`. That commit creates **no bridges**. It makes every node
+queue its own *SRV Networking* reload (`ifreload -a`), and those run independently — with
+hundreds of VNets in the shared `ciabprof` zone, one node finishes in a minute and another is
+still working an hour later. A lane placed on the second one clones perfectly and then dies:
+
+```
+bridge 'aaaabgdc' does not exist
+```
+
+Before the filter, the only safe move was to wait for the **slowest** node before deploying
+anything. Now one finished node is enough.
+
+**How it differs from the other two.** It is per-placement, derived from the live cluster,
+and never written down:
+
+| | `excluded_nodes` | quarantine | bridge readiness |
+|---|---|---|---|
+| set by | an operator, in `site.json` | a failed clone/start | the live node |
+| lives | until edited | 15 min, per process | the length of one placement |
+| means | never send lanes here | probably avoid this node | this node cannot cable *this* lane yet |
+
+A node without the bridge is **not** marked faulty. It has done nothing wrong — it is
+mid-reload — and quarantining it would keep it out of the *next* deploy too, by which time it
+is very likely the healthiest node in the cluster.
+
+**What you see.** In the app log, per deploy:
+
+```
+[NodeSelector] Bridge(s) aaaabgdc up on cyberhub-node-5, cyberhub-node-6; skipping
+  cyberhub-node-8 (missing aaaabgdc) — their SDN reload has not landed yet
+```
+
+If **no** node has them yet, the deploy waits `cluster.scheduling.bridge_wait_s` (default
+300s; the two synchronous admin routes use a fixed 15s) and then fails with
+`BRIDGES_NOT_ON_ANY_NODE`, naming the bridges and each node's state. That error means "come
+back in a few minutes", not "something is broken".
+
+**Checking it by hand.** Which nodes have a given VNet:
+
+```bash
+V=$(pvesh get /cluster/sdn/vnets --output-format json | jq -r '.[]|select(.zone=="<zone>")|.vnet' | head -1)
+for n in $(pvesh get /nodes --output-format json | jq -r '.[].node'); do
+  printf '%s: ' "$n"
+  pvesh get /nodes/$n/network --output-format json | jq -r --arg v "$V" '[.[]|select(.iface==$v and (.active==1 or .exists==1))]|length'
+done
+```
+
+`0` means that node is still reloading. Note the `active`/`exists` test: Proxmox lists a VNet
+from the node's generated `interfaces.d/sdn`, which is written at the **start** of the reload
+task, so merely appearing in that output does not mean the bridge exists.
+
+Which nodes are still reloading:
+
+```bash
+pvesh get /cluster/tasks --output-format json | jq '.[]|select(.type=="srvreload")|{node,starttime,endtime,status}'
+```
+
+**Known gap.** The quarantine is applied before this filter, so if the *only* bridge-ready
+node is also quarantined while another node is not, the placement fails rather than using it.
+The quarantine lapses in 15 minutes, so a retry clears it.
+
 ---
 
 ## Phase 6 — clean up the failed lanes

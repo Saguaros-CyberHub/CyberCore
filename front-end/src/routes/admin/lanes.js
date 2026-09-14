@@ -19,6 +19,16 @@ const { logActivity } = require('../../middleware/activity-logger');
 const { waitForGuestAgent, executeScriptsOnVM, getVMIPs } = require('../../utils/script-executor');
 const { plantFlagsForLane } = require('../../utils/flag-manager');
 const { selectBestNode } = require('../../utils/node-selector');
+const { bridgeNames } = require('../../utils/node-bridges');
+
+// A lane deployed through an HTTP route cannot wait out cluster.scheduling.
+// bridge_wait_s: the request is open and someone is watching a spinner. 15s
+// catches a node that is seconds from finishing its SDN reload; anything longer
+// belongs to the background batch deployers, which have a progress panel to say
+// so. A 503 naming the state is a better answer than a request that times out in
+// a proxy.
+const HTTP_BRIDGE_WAIT_MS = 15000;
+
 const gatewayLifecycle = require('../../utils/gateway-lifecycle');
 const goadDeploy = require('../../utils/goad-deploy');
 const { withGoadAgentVulnScripts } = require('../../utils/goad-agent-attach');
@@ -196,7 +206,31 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
     const gatewayTemplateNode = await findTemplateNode(gatewayVmid, getDefaultTemplateNode());
     const templateNode = await findTemplateNode(templateVmid, spec.template_node || getDefaultTemplateNode());
     console.log(`[Deploy] subnet_scheme=${subnetScheme} → gateway template=${gatewayVmid}`);
-    const bestNodeInfo = await selectBestNode();
+
+    // The node must already have this lane's VNet bridge(s) up. A node still
+    // running the "SRV Networking" reload queued by the environment's SDN apply
+    // clones the gateway fine and then fails to start it with
+    // `bridge '<vnet>' does not exist`, minutes later and in a log nobody is
+    // reading. Placing only on ready nodes is what makes a freshly created
+    // environment deployable now rather than after the slowest node finishes.
+    let bestNodeInfo;
+    try {
+      bestNodeInfo = await selectBestNode({
+        requireBridges: bridgeNames([vnet, vnetInt]),
+        waitMs: HTTP_BRIDGE_WAIT_MS,
+      });
+    } catch (e) {
+      if (e.code === 'BRIDGES_NOT_ON_ANY_NODE') {
+        return res.status(503).json({
+          error: e.message,
+          code: e.code,
+          required_bridges: e.requiredBridges,
+          missing_by_node: e.missingByNode,
+          unreachable: e.unreachable,
+        });
+      }
+      throw e;
+    }
     const bestNode = bestNodeInfo.node;
     console.log(`[Deploy] Selected node ${bestNode} for lane deployment (score: ${bestNodeInfo.score})`);
 

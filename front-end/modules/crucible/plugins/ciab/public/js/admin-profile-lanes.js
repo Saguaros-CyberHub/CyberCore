@@ -295,10 +295,14 @@ async function renderEngagementPanel(profileId, el) {
   }
 
   // ready
+  // Not a failure, and it must not read as one: a deploy places lanes only on the
+  // nodes whose bridges are up, so an unconfirmed node costs capacity until its
+  // SDN reload finishes, not lanes. Re-provisioning would not speed that up.
   const bridgeNote = eng.bridges_ready
     ? '<span class="muted">Bridges confirmed on every online node.</span>'
-    : `<span class="muted">⚠ Bridges not confirmed on every node — lanes placed on an
-       unconfirmed node will fail to cable. Re-provision once the node is back.</span>`;
+    : `<span class="muted">Bridges not confirmed on every node yet. Lanes are placed only on
+       nodes whose bridges are up; the rest join as each finishes its SDN reload, so you can
+       deploy now at reduced spread.</span>`;
   el.innerHTML = `<div class="status-banner ${eng.bridges_ready ? 'info' : 'warning'}">
     ✅ <strong>Network ready</strong> — ${eng.max_students} slots,
     engagement <code>${escapeHtml(eng.engagement_type)}</code>,

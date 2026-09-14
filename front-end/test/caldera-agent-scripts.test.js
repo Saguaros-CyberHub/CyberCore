@@ -85,7 +85,7 @@ for (const download of ['failure', 'html']) {
       // The pre-rename directory is rewritten too, so the isolation promise
       // above still holds: the installer removes it, and it must not resolve to
       // a real path outside this temporary tree.
-      .replace('legacy_dir="/opt/CyberCore/Caldera/$group/$paw"', 'legacy_dir="$CALDERA_TEST_DIRECTORY/legacy"');
+      .replace('legacy_base="/opt/CyberCore"', 'legacy_base="$CALDERA_TEST_DIRECTORY/legacy"');
     const result = spawnSync(shell, [], {
       input: script, encoding: 'utf8', timeout: 10000,
       env: { ...process.env, CALDERA_TEST_DIRECTORY: temporary.replace(/\\/g, '/') },

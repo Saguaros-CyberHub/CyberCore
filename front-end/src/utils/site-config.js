@@ -123,7 +123,14 @@ function getSchedulingConfig() {
     min_free_disk_gb:     s.min_free_disk_gb     ?? 20,
     max_concurrent_lanes: s.max_concurrent_lanes ?? 5,
     max_concurrent_clones:s.max_concurrent_clones?? 4,
-    node_score_weights:   s.node_score_weights   ?? { cpu: 0.35, mem: 0.55, disk: 0.10 }
+    node_score_weights:   s.node_score_weights   ?? { cpu: 0.35, mem: 0.55, disk: 0.10 },
+    // How long a BACKGROUND lane deploy waits for at least one schedulable node
+    // to have the lane's SDN VNet bridge(s) up before giving up. PUT /cluster/sdn
+    // only queues a per-node "SRV Networking" reload (ifreload -a), and on this
+    // cluster those finish minutes to HOURS apart -- see utils/node-bridges.js.
+    // The two synchronous admin HTTP routes ignore this and use a fixed short
+    // wait, because a request cannot sit open for minutes.
+    bridge_wait_s:        Number.isFinite(Number(s.bridge_wait_s)) ? Number(s.bridge_wait_s) : 300,
   };
 }
 

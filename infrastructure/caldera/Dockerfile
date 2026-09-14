@@ -131,8 +131,17 @@ RUN rm -rf \
 # console lists it, and its ability count simply stays blank forever.
 #
 # So the fetch happens in THIS stage, which already has git, at a PINNED commit.
-# Sparse and blobless: `atomics/` is the only tree the plugin ingests, while the
-# full repository is ~610 MB of which almost none is read.
+# Sparse and blobless, because the full repository is ~610 MB of which almost
+# none is read. TWO trees are required and it is not obvious why:
+#
+#   atomics/            the technique YAML the plugin turns into abilities
+#   atomic_red_team/    holds enterprise-attack.json, the 47 MB ATT&CK STIX
+#                       bundle the plugin loads to map techniques to tactics
+#
+# Checking out only `atomics/` looks complete and is not: the plugin refuses to
+# enable at all, with `Error enabling plugin=atomic ... enterprise-attack.json`,
+# and Caldera then continues starting as if nothing were wrong. The `test -s`
+# below exists so that build fails here instead.
 #
 # Moving the pin is a deliberate act — it changes which technique tests the
 # class can run. Same rule as CALDERA_VERSION above.
@@ -147,7 +156,7 @@ RUN set -eu; \
     git init -q; \
     git remote add origin https://github.com/redcanaryco/atomic-red-team.git; \
     git sparse-checkout init --cone; \
-    git sparse-checkout set atomics; \
+    git sparse-checkout set atomics atomic_red_team; \
     git fetch -q --depth 1 --filter=blob:none origin "${ATOMIC_RED_TEAM_REF}"; \
     git checkout -q FETCH_HEAD; \
     rm -rf .git; \
@@ -156,6 +165,7 @@ RUN set -eu; \
       echo "atomic-red-team vendored only $count technique files" >&2; \
       exit 1; \
     fi; \
+    test -s atomic_red_team/enterprise-attack.json; \
     echo "--- atomic-red-team vendored at ${ATOMIC_RED_TEAM_REF}: $count techniques ---"
 
 # -----------------------------------------------------------------------------

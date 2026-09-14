@@ -44,6 +44,11 @@ function fixture(routeName, faults = {}) {
     '../../utils/script-executor': { waitForGuestAgent: async () => true, executeScriptsOnVM: noop, getVMIPs: async () => [] },
     '../../utils/flag-manager': { plantFlagsForLane: noop },
     '../../utils/node-selector': { selectBestNode: async () => ({ node: 'node1', score: 1 }) },
+    // The real one is pure (utils/node-bridges.js): it normalizes
+    // [vnet, vnetInt] rows into the vnet names placement must find on a node.
+    '../../utils/node-bridges': { bridgeNames: items => (items || [])
+      .map(i => (typeof i === 'string' ? i : i && i.vnet))
+      .filter(Boolean) },
     '../../utils/goad-deploy': {
       CONTROLLER_TEMPLATE_VMID: 1700,
       prepareGoadDeploymentSpec: value => { calls.push({ kind: 'prepare' }); return value; },

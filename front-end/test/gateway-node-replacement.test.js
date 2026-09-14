@@ -292,6 +292,13 @@ test('THE FIX: a gateway that never reaches running is destroyed and re-placed',
   // capacity, and a backfilling node has plenty.
   assert.strictEqual(selectCalls.length, 1);
   assert.deepStrictEqual(selectCalls[0].exclude, [BAD_NODE]);
+  // AND the rescue node must already have this lane's VNet bridges up. A gateway
+  // that will not start has two causes that arrive here identically: the RBD/udev
+  // race this file was written for, and `bridge '<vnet>' does not exist` on a node
+  // whose post-apply "SRV Networking" reload has not finished. Re-placing onto a
+  // second node that is also mid-reload spends the one allowed hop proving it.
+  assert.deepStrictEqual(selectCalls[0].requireBridges, ['aaaabgdc', 'aaaabgdd'],
+    'the re-placement must require both of this lane vnets: external and internal');
 
   // node-5 held no replica of the gateway template, so the second clone is a
   // cross-node copy from the ORIGIN. That is intended, not a fallback bug.
@@ -412,6 +419,9 @@ test('two lanes on the failing node: the second skips the replica, and both move
   assert.deepStrictEqual(calls.vmidsGone, [[gw1], [gw2]]);
   assert.strictEqual(calls.destroys.filter(d => d.node === BAD_NODE).length, 2);
   assert.deepStrictEqual(selectCalls.map(o => o.exclude), [[BAD_NODE], [BAD_NODE]]);
+  assert.deepStrictEqual(selectCalls.map(o => o.requireBridges),
+    [['aaaabgdc', 'aaaabgdd'], ['aaaabgdc', 'aaaabgdd']],
+    'every re-placement carries its own lane bridge requirement');
   assert.strictEqual(jobs[0].targetNode, RESCUE_NODE);
   assert.strictEqual(jobs[1].targetNode, RESCUE_NODE);
 });

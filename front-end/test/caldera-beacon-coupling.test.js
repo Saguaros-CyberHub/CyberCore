@@ -31,7 +31,7 @@ const path = require('node:path');
 
 const agents = require('../src/utils/caldera-lane-agents');
 const { AGENT_FRESH_MS, AGENT_SKEW_MS, CHECK_IN_ATTEMPTS, CHECK_IN_INTERVAL_MS,
-  CHECK_IN_MARGIN_MS, JOB_TIMEOUT_MS } = agents;
+  CHECK_IN_MARGIN_MS, JOB_TIMEOUT_MS, EXEC_DEADLINE_MS } = agents;
 
 const AGENTS_YML = path.join(__dirname, '..', '..', 'infrastructure', 'caldera', 'conf', 'agents.yml');
 
@@ -44,6 +44,26 @@ function scalar(key) {
   }
   return null;
 }
+
+/**
+ * What the check-in loop has already spent before its first read.
+ *
+ * This is the correction that matters. The loop does not get
+ * JOB_TIMEOUT_MS - CHECK_IN_MARGIN_MS to itself: execute() first waits up to 15s
+ * for the guest agent, then polls the exec for up to EXEC_DEADLINE_MS — and on
+ * Windows it ALWAYS burns that full deadline, because the detached agent holds
+ * the guest-agent pipes open so the exec never reports `exited`. Measuring the
+ * loop against the whole job budget therefore passes for CHECK_IN_ATTEMPTS
+ * values that are silently truncated on every Windows install.
+ */
+const GUEST_AGENT_WAIT_MS = 15000;
+const PRE_LOOP_MS = GUEST_AGENT_WAIT_MS + EXEC_DEADLINE_MS;
+
+/** The polling the loop actually gets, not the polling it advertises. */
+const effectiveCheckInMs = () => Math.min(
+  CHECK_IN_ATTEMPTS * CHECK_IN_INTERVAL_MS,
+  Math.max(0, JOB_TIMEOUT_MS - CHECK_IN_MARGIN_MS - PRE_LOOP_MS),
+);
 
 const num = (key) => {
   const raw = scalar(key);
@@ -122,9 +142,9 @@ test('an agent between beacons is still fresh to freshAgent()', () => {
  */
 test('the install check-in window outlasts one full beacon interval', () => {
   const max = num('sleep_max');
-  const window = CHECK_IN_ATTEMPTS * CHECK_IN_INTERVAL_MS;
-  assert.ok(window > max * 1000,
-    `the check-in window is ${window / 1000}s but a missed first beacon costs up to ${max}s; installs would report false failures`);
+  assert.ok(effectiveCheckInMs() > max * 1000,
+    `the EFFECTIVE check-in window is ${effectiveCheckInMs() / 1000}s but a missed first beacon costs up to ${max}s; `
+    + 'installs would report false failures on healthy agents');
 });
 
 /**
@@ -132,12 +152,12 @@ test('the install check-in window outlasts one full beacon interval', () => {
  * JOB_TIMEOUT_MS into currentJob() and the atomic claim, where a retry can steal
  * the VM from the installer still working on it.
  */
-test('the check-in window still fits inside the job timeout', () => {
-  const window = CHECK_IN_ATTEMPTS * CHECK_IN_INTERVAL_MS;
-  const budget = JOB_TIMEOUT_MS - CHECK_IN_MARGIN_MS;
-  assert.ok(window <= budget,
-    `the check-in window (${window / 1000}s) exceeds the job budget (${budget / 1000}s); `
-    + 'raising it further means raising JOB_TIMEOUT_MS and re-checking the claim SQL, not just this constant');
+test('the check-in loop is not silently truncated by the job deadline', () => {
+  const nominal = CHECK_IN_ATTEMPTS * CHECK_IN_INTERVAL_MS;
+  assert.equal(effectiveCheckInMs(), nominal,
+    `the loop advertises ${nominal / 1000}s of polling but only ${effectiveCheckInMs() / 1000}s survives `
+    + `the job deadline once the ${PRE_LOOP_MS / 1000}s spent before it is counted. Raising CHECK_IN_ATTEMPTS `
+    + 'further means raising JOB_TIMEOUT_MS and re-checking the claim SQL, not just this constant.');
 });
 
 test('the forward skew window stays smaller than the freshness window', () => {
@@ -174,16 +194,28 @@ test('neither the implant name nor the installer paths name the product or the t
     paw: 'b'.repeat(24),
   });
 
-  // Asserted on where the agent INSTALLS AND RUNS, which is what a student
-  // browsing the filesystem or reading Sysmon sees. Not on the operator-facing
-  // progress text, which reaches an instructor through the guest-agent exec and
-  // never lands on disk; and deliberately not on the `legacy_` assignments,
-  // which name the pre-rename location precisely so the installer can stop and
-  // delete it.
-  const assignments = (script, keys) => keys.map((key) => {
-    const m = new RegExp(`^\\s*\\$?${key}\\s*=\\s*(.+)$`, 'm').exec(script);
-    assert.ok(m, `install script no longer assigns ${key}; this test is now checking nothing`);
-    return m[1];
+  // Asserted on where the agent INSTALLS AND RUNS — the paths a student sees in
+  // Sysmon process-create and file events, and in a directory listing.
+  //
+  // NOT a claim that the tooling's name is absent from the lane altogether, and
+  // an earlier version of this comment wrongly said so. Two known residuals
+  // remain, both predating the rename: the installer still emits the
+  // CYBERCORE_CALDERA_STARTED marker that caldera-lane-agents.js parses, and the
+  // `legacy_` assignments name the pre-rename location so the installer can stop
+  // and delete it. PowerShell script-block logging — which CyberCore itself
+  // enables — records the whole script, so both DO reach the lane's event log.
+  // Closing that means renaming the marker contract on both sides; it is a
+  // separate change, and pretending otherwise here would be worse than saying so.
+  //
+  // EVERY assignment is checked, not the first: the Windows script sets
+  // `$download = $null` well before its real value, so matching once bound to
+  // the placeholder and checked nothing at all.
+  const assignments = (script, keys) => keys.flatMap((key) => {
+    const found = [...script.matchAll(new RegExp(`^\\s*\\$?${key}\\s*=\\s*(.+)$`, 'gm'))]
+      .map((m) => m[1].trim())
+      .filter((value) => value !== '$null');
+    assert.ok(found.length, `install script no longer assigns ${key}; this test is now checking nothing`);
+    return found;
   });
 
   for (const value of assignments(linux, ['agent_dir', 'binary', 'download'])) {

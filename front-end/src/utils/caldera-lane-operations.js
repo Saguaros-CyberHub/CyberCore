@@ -9,7 +9,7 @@ const { v5: uuidv5 } = require('uuid');
 // page, and two copies of "this machine has checked in" would eventually
 // disagree about which lanes an instructor may launch on.
 const { targetsFor, pawFor, groupFor, laneEligible, eligibleLaneSql, retainedAfterFailure,
-  freshAgent, laneContext, enrichTargets } = require('./caldera-lane-agents');
+  freshAgent, laneContext, enrichTargets, AGENT_FRESH_MS } = require('./caldera-lane-agents');
 const { environmentOf, machineIdentity, createEnvironmentDirectory } = require('./lane-environment');
 const { normalizeAbility } = require('../incident/caldera/adversary');
 const { laneFactsFor } = require('./caldera-lane-facts');
@@ -39,6 +39,12 @@ const OBFUSCATORS = new Set(['plain-text', 'base64']);
 const JITTER_PATTERN = /^([0-9]{1,4})\/([0-9]{1,4})$/;
 const DEFAULT_OBFUSCATOR = 'plain-text';
 const DEFAULT_JITTER = '4/16';
+/**
+ * Derived from the trust window rather than picked, so it cannot drift away from
+ * it. Half of AGENT_FRESH_MS leaves a whole extra interval of margin before an
+ * agent would fall out of Caldera's trust window mid-operation.
+ */
+const MAX_JITTER_SECONDS = Math.floor(AGENT_FRESH_MS / 2000);
 const TERMINAL = new Set(['finished', 'out_of_time', 'cleanup', 'stopped', 'failed']);
 // The ability catalog is per-SERVER state that only changes when a plugin is
 // installed or removed, while this dialog polls every five seconds. One read a
@@ -103,6 +109,20 @@ function resolveTradecraft(input) {
   const parts = JITTER_PATTERN.exec(jitter);
   if (!parts || Number(parts[1]) > Number(parts[2]) || Number(parts[2]) === 0) {
     throw fail(400, 'Jitter must be "min/max" seconds between steps, with min no greater than max.');
+  }
+  // A CEILING, and it is not tidiness. Caldera documents an operation's jitter as
+  // the agents' in-operation check-in interval, so a max above the trust window
+  // drives every agent in the batch untrusted MID-EXERCISE. freshAgent() then
+  // returns false for every target and every later launch on those lanes is
+  // refused — the same total refusal the beacon coupling exists to prevent,
+  // reached through an instructor-settable field instead of a config file.
+  if (Number(parts[2]) > MAX_JITTER_SECONDS) {
+    throw fail(400, `Jitter must stay at or below ${MAX_JITTER_SECONDS} seconds, or agents fall out of Caldera's trust window mid-exercise.`);
+  }
+  // min === max is a metronome, which is exactly what the beacon change removed
+  // from the agent config; allowing it back in here would undo that one layer up.
+  if (Number(parts[1]) === Number(parts[2])) {
+    throw fail(400, 'Jitter needs a range: an identical min and max is a fixed interval, which is the pattern this avoids.');
   }
   return { obfuscator, jitter };
 }
@@ -673,7 +693,7 @@ function createService(deps = {}) {
     }
     const client = clientFor();
     const [available, catalog] = await Promise.all([roster(selected, client), client.listAdversaries()]);
-    if (selected.some(lane => !available.get(lane.lane_id)?.runnable)) throw fail(409, 'Every selected lane needs a running VM with a trusted agent seen in the last two minutes. Refresh status.');
+    if (selected.some(lane => !available.get(lane.lane_id)?.runnable)) throw fail(409, `Every selected lane needs a running VM with a trusted agent seen in the last ${Math.round(AGENT_FRESH_MS / 60000)} minutes. Refresh status.`);
     const adversary = Array.isArray(catalog) && catalog.find(item => item.adversary_id === input.adversary_id);
     if (!adversary || !Array.isArray(adversary.atomic_ordering) || !adversary.atomic_ordering.length) throw fail(400, 'This adversary is unavailable or has no abilities.');
     const entries = Object.fromEntries(selected.map(lane => [lane.lane_id, {

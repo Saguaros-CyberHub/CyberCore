@@ -47,9 +47,11 @@ download="$agent_dir/epmagent.download"
 # Where installs before the rename put the agent. Referenced ONLY to stop and
 # remove it: two processes sharing one paw beacon twice and execute every
 # ability twice, and nothing in Caldera would show why.
-legacy_dir="/opt/CyberCore/Caldera/$group/$paw"
+legacy_base="/opt/CyberCore"
+legacy_root="$legacy_base/Caldera"
+legacy_group_dir="$legacy_root/$group"
+legacy_dir="$legacy_group_dir/$paw"
 legacy_binary="$legacy_dir/mitre-sandcat"
-legacy_pid_file="$legacy_dir/agent.pid"
 fail() { printf '%s\\n' "CyberCore Caldera: $*" >&2; exit 1; }
 for dependency in curl uname od tr mkdir chmod mv rm rmdir readlink nohup sleep cat; do
   command -v "$dependency" >/dev/null 2>&1 || fail "Required command missing: $dependency"
@@ -68,25 +70,23 @@ cleanup() {
 }
 trap cleanup 0
 trap 'exit 1' HUP INT TERM
-if [ -f "$legacy_pid_file" ]; then
-  legacy_pid=$(cat "$legacy_pid_file" 2>/dev/null || true)
-  case "$legacy_pid" in
-    ''|*[!0-9]*) legacy_pid='' ;;
-  esac
-  if [ -n "$legacy_pid" ] && kill -0 "$legacy_pid" 2>/dev/null; then
-    legacy_exe=$(readlink "/proc/$legacy_pid/exe" 2>/dev/null || true)
-    if [ "$legacy_exe" = "$legacy_binary" ]; then
-      kill "$legacy_pid" 2>/dev/null || true
-      attempt=0
-      while kill -0 "$legacy_pid" 2>/dev/null; do
-        attempt=$((attempt + 1))
-        [ "$attempt" -lt 10 ] || fail 'A previously installed agent is still running and could not be stopped; it would execute every ability a second time'
-        sleep 1
-      done
-    fi
-  fi
-fi
+legacy_running() {
+  for legacy_proc in /proc/[0-9]*; do
+    [ "$(readlink "$legacy_proc/exe" 2>/dev/null)" = "$legacy_binary" ] || continue
+    printf '%s\\n' "\${legacy_proc#/proc/}"
+  done
+}
+for legacy_pid in $(legacy_running); do
+  kill "$legacy_pid" 2>/dev/null || true
+done
+attempt=0
+while [ -n "$(legacy_running)" ]; do
+  attempt=$((attempt + 1))
+  [ "$attempt" -lt 10 ] || fail 'A previously installed agent is still running and could not be stopped; it would execute every ability a second time'
+  sleep 1
+done
 rm -rf "$legacy_dir" 2>/dev/null || true
+rmdir "$legacy_group_dir" "$legacy_root" "$legacy_base" 2>/dev/null || true
 printf '%s\\n' 'CyberCore agent: downloading'
 curl --fail --silent --show-error --connect-timeout 15 --max-time 90 \\
   --proto '=https' --request POST \\
@@ -149,9 +149,12 @@ try {
   # Where installs before the rename put the agent. Referenced ONLY to stop and
   # remove it: two processes sharing one paw beacon twice and execute every
   # ability twice, and nothing in Caldera would show why.
-  $legacyDir = Join-Path $env:ProgramData ('CyberCore\\Caldera\\' + $group + '\\' + $paw)
-  $legacyBinary = Join-Path $legacyDir 'mitre-sandcat.exe'
-  $legacyPidFile = Join-Path $legacyDir 'agent.pid'
+  $legacyBase = Join-Path $env:ProgramData 'CyberCore'
+  $legacyRoot = Join-Path $legacyBase 'Caldera'
+  $legacyGroupDir = Join-Path $legacyRoot $group
+  $legacyDir = Join-Path $legacyGroupDir $paw
+  $legacyProcessName = 'mitre-sandcat'
+  $legacyBinary = Join-Path $legacyDir ($legacyProcessName + '.exe')
   $pidFile = Join-Path $agentDir 'agent.pid'
   $stdoutLog = Join-Path $agentDir 'agent.stdout.log'
   $stderrLog = Join-Path $agentDir 'agent.stderr.log'
@@ -231,25 +234,35 @@ try {
   } else {
     Write-Output 'CyberCore Caldera: Microsoft Defender management commands are unavailable; continuing without changing security settings'
   }
-  if (Test-Path -LiteralPath $legacyPidFile) {
-    $legacyPidText = (Get-Content -LiteralPath $legacyPidFile -Raw).Trim()
-    [int]$legacyPid = 0
-    if ([int]::TryParse($legacyPidText, [ref]$legacyPid) -and $legacyPid -gt 0) {
-      $legacyProcess = Get-Process -Id $legacyPid -ErrorAction SilentlyContinue
-      if ($legacyProcess -and $legacyProcess.Path -eq $legacyBinary) {
-        try { Stop-Process -Id $legacyPid -Force -ErrorAction Stop } catch {}
-        $stopped = $false
-        foreach ($wait in 1..10) {
-          if (-not (Get-Process -Id $legacyPid -ErrorAction SilentlyContinue)) { $stopped = $true; break }
-          Start-Sleep -Seconds 1
-        }
-        if (-not $stopped) {
-          throw 'A previously installed agent is still running and could not be stopped; it would execute every ability a second time'
-        }
-      }
+  $legacyRunning = { @(Get-Process -Name $legacyProcessName -ErrorAction SilentlyContinue |
+    Where-Object { $_.Path -eq $legacyBinary }) }
+  $legacyFound = & $legacyRunning
+  foreach ($legacyProcess in $legacyFound) {
+    try { Stop-Process -Id $legacyProcess.Id -Force -ErrorAction Stop } catch {}
+  }
+  if ($legacyFound.Count -gt 0) {
+    $legacyStopped = $false
+    foreach ($wait in 1..10) {
+      if ((& $legacyRunning).Count -eq 0) { $legacyStopped = $true; break }
+      Start-Sleep -Seconds 1
+    }
+    if (-not $legacyStopped) {
+      throw 'A previously installed agent is still running and could not be stopped; it would execute every ability a second time'
     }
   }
+  if (Get-Command Remove-MpPreference -ErrorAction SilentlyContinue) {
+    try { Remove-MpPreference -ExclusionPath $legacyDir -ErrorAction Stop } catch {}
+  }
   Remove-Item -LiteralPath $legacyDir -Recurse -Force -ErrorAction SilentlyContinue
+  foreach ($legacyStale in @($legacyGroupDir, $legacyRoot, $legacyBase)) {
+    if ((Test-Path -LiteralPath $legacyStale) -and
+        -not (Get-ChildItem -LiteralPath $legacyStale -Force -ErrorAction SilentlyContinue)) {
+      Remove-Item -LiteralPath $legacyStale -Force -ErrorAction SilentlyContinue
+    }
+  }
+  if (Test-Path -LiteralPath $legacyDir) {
+    Write-Output 'CYBERCORE_CALDERA_WARNING:legacy_agent_dir_retained'
+  }
   $download = Join-Path $agentDir ('epmagent-' + [Guid]::NewGuid().ToString('N') + '.download')
   Write-Output 'CyberCore Caldera: downloading MITRE Sandcat'
   $headers = @{ 'platform' = 'windows'; 'file' = 'sandcat.go'; 'architecture' = $architecture }
