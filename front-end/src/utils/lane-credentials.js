@@ -32,6 +32,7 @@
  */
 
 const { cybercoreQuery } = require('./cybercore-db');
+const courseDirectory = require('./course-directory');
 const { claimsSql } = require('./lane-claims');
 const {
   hiddenBindValues, catalogJoinSql, studentHiddenSql,
@@ -118,12 +119,50 @@ function resolveLaneWorkstationCredential(laneConfig, providerVmid) {
 /**
  * Read the credential for one workstation, enforcing ownership.
  *
- * Scope is deliberately NARROW — the owner, or an admin. It is NOT the
- * `isPrivileged` (admin OR instructor) test the console-launch route uses: that
- * test is cluster-wide with no course scoping, so applying it here would let any
- * instructor read any other instructor's students' machines. An instructor
- * reading their OWN students goes through the course-scoped CLE routes, which
- * check course management first.
+ * Three scopes, tried in that order, and the ORDER is the design:
+ *
+ *   1. the OWNER  - the student whose allocation holds the machine
+ *   2. an ADMIN   - no ownership join at all
+ *   3. the INSTRUCTOR WHO TEACHES THIS LANE'S COURSE
+ *
+ * Scope 3 is emphatically NOT the `isPrivileged` (admin OR instructor) test the
+ * console-launch route uses. That test is cluster-wide with no course scoping,
+ * so applying it here would let any instructor read any other instructor's
+ * students' machine passwords. This one matches a single fact -
+ * `cybercore_lane.config->>'course_id'` - against the courses cle_db says this
+ * person teaches, so an instructor reaches their own students and nobody else's.
+ *
+ * It discloses nothing the same instructor cannot already read: the course VM
+ * list at cle/routes/vms.js GET / is `instructorOnly` + getManagedCourse and
+ * already returns `workstation_pass` in plaintext for every lane of a course
+ * they manage, and courses.html renders it. This route reaches the SAME lanes
+ * by the SAME rule - it just answers per-VM, from the hub, with an audit row.
+ *
+ * WHY THE COURSE LOOKUP IS LAZY. It runs only when scopes 1 and 2 have already
+ * missed. Courses live in cle_db and lanes in cybercore_db - separate pools, no
+ * join - so scope 3 costs a query against a second database. An instructor
+ * opening their OWN machine must not pay for that, and a student never reaches
+ * it at all.
+ *
+ * FAILS CLOSED. courseIdsForInstructor funnels through course-directory's
+ * `safely()`, which turns an unregistered provider, a throwing provider, or a
+ * dead cle_db into []. An empty list matches no lane, so a directory outage
+ * denies rather than grants - the correct direction for an authorization check,
+ * and the same answer as before this scope existed.
+ *
+ * WHAT SCOPE 3 DOES NOT REACH, on purpose and by accident:
+ *   - Lanes from POST /api/admin/deploy-group. That path stamps
+ *     `config.group_id` and NO course reference (routes/admin/groups.js), and
+ *     group_id resolves in clinic_db, invisible from here. Those instructors
+ *     still get the 404 they get today. Scoping by roster instead would not
+ *     help: that path mints synthetic students and never enrolls them in
+ *     cle_course_enrollment, so an enrollment predicate matches nothing either.
+ *     The fix for those lanes is to stamp a course at deploy time, not to widen
+ *     this rule.
+ *   - Enrollment. A lane keeps its `course_id` after its owner is dropped, and
+ *     the course's own hidden infrastructure (the CYBR 400 sensor) is reachable
+ *     too. Both are deliberate: an instructor cannot fix a machine they cannot
+ *     see the login for, and this matches what the course VM list already shows.
  *
  * Restricted to vm_category='lane_vm': a self-deployed workstation
  * (routes/workstations.js) has no per-VM password at all — that path never
@@ -135,12 +174,14 @@ function resolveLaneWorkstationCredential(laneConfig, providerVmid) {
  * @param {boolean} [opts.isAdmin=false]  skips the ownership join entirely
  * @param {boolean} [opts.isPrivileged=isAdmin]  admin OR instructor; only lifts
  *   the hidden-infrastructure filter, never the ownership scope
+ * @param {string} [opts.role]  the caller's role. 'instructor' unlocks the
+ *   course-scoped scope 3 above; anything else leaves behaviour unchanged.
  * @returns {Promise<object|null>} the resolved credential plus `ownerUserId` and
  *   `vmName`, or null when the VM does not exist, is not the caller's, or is
  *   hidden from them (utils/workspace-visibility.js).
  */
 async function getLaneWorkstationCredentialForVm(
-  vmInstanceId, { userId, isAdmin = false, isPrivileged = isAdmin } = {}
+  vmInstanceId, { userId, isAdmin = false, isPrivileged = isAdmin, role = null } = {}
 ) {
   const SELECT_COLUMNS = `
       vi.provider_vmid,
@@ -210,10 +251,52 @@ async function getLaneWorkstationCredentialForVm(
   const params = isAdmin
     ? [vmInstanceId]
     : (NOT_HIDDEN ? [vmInstanceId, userId, ...hiddenBindValues()] : [vmInstanceId, userId]);
-  const result = await cybercoreQuery(sql, params).catch((err) => {
+  const run = (statement, binds) => cybercoreQuery(statement, binds).catch((err) => {
     console.warn(`${LOG} Credential lookup failed for ${vmInstanceId}: ${err.message}`);
     throw err;
   });
+
+  let result = await run(sql, params);
+  let via = isAdmin ? 'admin' : 'owner';
+
+  // SCOPE 3: the instructor who teaches this lane's course. See the header.
+  //
+  // Reached ONLY after the owner/admin scope has already missed, so the common
+  // path never crosses into cle_db.
+  if (result.rows.length === 0 && !isAdmin && role === 'instructor') {
+    // Case-folded on BOTH sides. config->>'course_id' is TEXT, and the value
+    // stamped into it comes from a route parameter, so its spelling is whatever
+    // the caller typed; the provider returns pg's canonical lowercase uuid. A
+    // bare `=` between those two silently matches nothing, which is the failure
+    // mode that makes an authorization arm look like it works and quietly deny
+    // every instructor. courseIdsForInstructor must NOT fold case itself -
+    // ticket-access.sameId compares exactly and would break.
+    const taught = (await courseDirectory.courseIdsForInstructor({ userId, role }))
+      .map(id => String(id).toLowerCase());
+
+    // No taught courses -> no query. `= ANY('{}')` is false for every row, so
+    // this is purely about not asking.
+    if (taught.length > 0) {
+      // No NOT_HIDDEN clause, matching the isPrivileged semantics above: hidden
+      // means hidden from the STUDENT, and the sensor's login is exactly what an
+      // instructor needs when it stops. Deliberately no enrollment predicate -
+      // the lane's course is the scope, not the owner's current roster status.
+      const courseScoped = await run(`
+        SELECT ${SELECT_COLUMNS} ${FROM_JOINS}
+          WHERE vi.vm_instance_id = $1
+            AND vi.destroyed_at IS NULL
+            AND r.status != 'retired'
+            AND r.metadata->>'vm_category' = 'lane_vm'
+            ${LIVE_LANE}
+            AND lower(dl.config->>'course_id') = ANY($2::text[])`,
+        [vmInstanceId, taught]);
+      if (courseScoped.rows.length > 0) {
+        result = courseScoped;
+        via = 'course';
+      }
+    }
+  }
+
   if (result.rows.length === 0) return null;
 
   const row = result.rows[0];
@@ -221,6 +304,10 @@ async function getLaneWorkstationCredentialForVm(
     ...resolveLaneWorkstationCredential(row.lane_config, row.provider_vmid),
     ownerUserId: row.owner_user_id || null,
     vmName: row.proxmox_name || row.vm_name || null,
+    // Which scope authorized this read, for the audit row. 'course' is the only
+    // one where the reader is neither the owner nor an admin, so it is the one
+    // worth being able to find again.
+    via,
   };
 }
 

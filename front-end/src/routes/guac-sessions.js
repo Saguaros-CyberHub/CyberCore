@@ -24,6 +24,7 @@ const { proxmoxAPI } = require('../utils/proxmox');
 const { getV2LabNetwork } = require('../utils/site-config');
 const { ipInCidr } = require('../utils/ipv4');
 const laneCreds = require('../utils/lane-credentials');
+const courseDirectory = require('../utils/course-directory');
 const {
   hiddenBindValues, catalogJoinSql, studentHiddenSql,
 } = require('../utils/workspace-visibility');
@@ -322,6 +323,16 @@ router.get('/vms', authenticateToken, async (req, res) => {
     const userId = req.user.userId;
     const isPrivileged = ['admin', 'instructor'].includes(req.user.role);
     const showAll = isPrivileged && req.query.scope !== 'mine';
+
+    // The courses this caller TEACHES, resolved once per request, for the
+    // hasCredentials flag below. Only the cluster-wide branch needs it: the
+    // per-user branch already returns nothing but the caller's own machines.
+    // [] for an admin (they are covered by isAdmin) and for a student, so
+    // nothing crosses into cle_db on either of those paths.
+    const taughtCourseIds = (showAll && req.user.role === 'instructor')
+      ? new Set((await courseDirectory.courseIdsForInstructor(req.user))
+          .map(id => String(id).toLowerCase()))
+      : null;
     let result;
 
     if (showAll) {
@@ -397,6 +408,18 @@ router.get('/vms', authenticateToken, async (req, res) => {
       `, [userId, ...hiddenBindValues()]);
     }
 
+    // Mirrors getLaneWorkstationCredentialForVm's three scopes exactly. If the
+    // two ever disagree the symptom is a button that 404s (too loose) or a
+    // credential that is readable but unreachable from the UI (too tight).
+    const canReadCredential = (row) => {
+      if (!showAll) return true;          // per-user branch: already only theirs
+      if (req.user.role === 'admin') return true;
+      if (row.owner_id && row.owner_id === userId) return true;
+      if (!taughtCourseIds || taughtCourseIds.size === 0) return false;
+      const courseId = row.lane_config && row.lane_config.course_id;
+      return !!courseId && taughtCourseIds.has(String(courseId).toLowerCase());
+    };
+
     const vms = result.rows.map(row => {
       const os = resolveOs(row);
       return {
@@ -417,8 +440,19 @@ router.get('/vms', authenticateToken, async (req, res) => {
         // itself. The privileged branch of this query is cluster-wide, so a
         // password here would be disclosed to every instructor on every page
         // load, unlogged. The secret is fetched per-VM below instead.
-        hasCredentials: laneCreds.resolveLaneWorkstationCredential(
-                          row.lane_config, row.provider_vmid).available,
+        // Whether a Credentials button should render. Two conditions, and
+        // BOTH are required: a credential has to exist, AND this caller has to
+        // be allowed to read it.
+        //
+        // The authorization half is not decoration. This branch of the query is
+        // cluster-wide for a privileged caller, so keying the button on mere
+        // existence drew one on every lane in the cluster for every instructor
+        // — and GET /vms/:id/credentials refuses all but their own course's, so
+        // almost every one of those buttons answered "VM not found or access
+        // denied". The button now appears exactly where it works.
+        hasCredentials: canReadCredential(row)
+          && laneCreds.resolveLaneWorkstationCredential(
+               row.lane_config, row.provider_vmid).available,
         // Privileged-only, like ownerEmail. A student's list has already had
         // these rows removed, so shipping the flag there would only tell them
         // that a hidden machine exists.
@@ -744,6 +778,11 @@ router.get('/vms/:vmId/credentials', authenticateToken, async (req, res) => {
       // scope above — an instructor still reaches nothing but their own
       // machines here. See that function's header.
       isPrivileged: isAdmin || req.user.role === 'instructor',
+      // Unlocks the COURSE-SCOPED scope: an instructor reaches a lane whose
+      // config.course_id is a course cle_db says they teach, and no other.
+      // This is not a role widening — the role alone still reaches nothing.
+      // See getLaneWorkstationCredentialForVm's header for why they differ.
+      role: req.user.role,
     });
 
     if (!cred) {
@@ -768,6 +807,11 @@ router.get('/vms/:vmId/credentials', authenticateToken, async (req, res) => {
         // '[redacted]' and cost the row the one field that says WHICH kind of
         // credential was disclosed.
         kind: 'lane_workstation',
+        // WHICH scope authorized this: 'owner', 'admin' or 'course'. A
+        // 'course' read is the only one where the reader is neither the
+        // owner nor an admin, so it is the one an investigation needs to
+        // be able to find again.
+        via: cred.via || null,
         source: cred.source,
         available: cred.available,
         shared: cred.shared,

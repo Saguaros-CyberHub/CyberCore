@@ -153,6 +153,30 @@ async function describeCourse(courseId) {
 }
 
 /**
+ * The ids of the courses this person TEACHES, for scoping a privileged read.
+ *
+ * Returns [] for anyone who is not an instructor or admin, so the common path
+ * never crosses into cle_db. Resolve it ONCE per request and thread it through:
+ * the lookup is a query against another database, and asking per row turns a
+ * 50-row list into 50 of them.
+ *
+ * Ids come back EXACTLY as the provider spelled them. Do not lowercase here:
+ * utils/ticket-access.sameId compares with `String(a) === String(b)`, so
+ * normalising in this function would silently break ticket scoping. A caller
+ * comparing against a TEXT column in SQL must case-fold BOTH sides itself --
+ * see getLaneWorkstationCredentialForVm.
+ *
+ * Note an ADMIN gets the courses they personally teach, which is usually none.
+ * That is deliberate: admin authority is granted by the `isAdmin` branch of
+ * whatever calls this, never by pretending an admin teaches everything.
+ */
+async function courseIdsForInstructor(user) {
+  if (!user || (user.role !== 'instructor' && user.role !== 'admin')) return [];
+  const courses = await coursesForInstructor(user.userId);
+  return courses.map(c => c.courseId).filter(Boolean);
+}
+
+/**
  * THE AUTHORITY for "may this person file a ticket against this course".
  *
  * Resolved from the enrolled list rather than by asking the provider a yes/no
@@ -211,6 +235,7 @@ module.exports = {
   resetCourseDirectory,
   coursesForStudent,
   coursesForInstructor,
+  courseIdsForInstructor,
   describeCourse,
   isEnrolled,
   resolveTicketCourse,

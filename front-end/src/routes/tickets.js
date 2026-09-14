@@ -74,9 +74,7 @@ const MAX_BODY = 10000;
  * Always [] for a student, so nothing crosses databases on the common path.
  */
 async function taughtIds(user) {
-  if (!user || (user.role !== 'instructor' && user.role !== 'admin')) return [];
-  const courses = await courseDirectory.coursesForInstructor(user.userId);
-  return courses.map(c => c.courseId);
+  return courseDirectory.courseIdsForInstructor(user);
 }
 
 /** Every machine belonging to this user, rebuilt server-side. */
