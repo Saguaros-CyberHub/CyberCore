@@ -83,6 +83,20 @@ const projection = require('../../../../../src/incident/projection');
  * drift test/blueteam-mount.test.js exists to catch.
  */
 const authoring = require('../../../../../src/incident/caldera/authoring');
+const adversaryPack = require('../../../../../src/incident/caldera/adversary-pack');
+
+/** The instructor-facing shape of one resolved pack: what it will run, and what
+ *  it could not find. Ability ids are included because they are the only thing
+ *  that ties a step in the picker to a link in the operation. */
+const summarisePack = (pack) => ({
+  key: pack.key,
+  adversary_id: pack.adversary_id,
+  name: pack.name,
+  platform: pack.platform,
+  steps: pack.resolved.map((step) => ({ technique: step.technique, ability_id: step.ability_id,
+    name: step.name, tactic: step.tactic, plugin: step.plugin })),
+  unresolved: pack.unresolved,
+});
 const {
   authoringConfig,
   PUBLIC_PATH: AUTHORING_PATH,
@@ -353,6 +367,47 @@ router.get('/authoring/adversaries', async (req, res) => {
     return res.json({ ...result, upstream: target.upstream });
   } catch (error) {
     return fail(res, error, 'GET /authoring/adversaries');
+  }
+});
+
+/**
+ * POST /authoring/adversary-pack — create CyberCore's own adversary profiles.
+ *
+ * Resolved against the catalog the server has RIGHT NOW rather than shipped as
+ * files, because the atomic plugin derives its ability ids from a hash of each
+ * Atomic Red Team test: a hardcoded id survives only until the pinned ref moves,
+ * and then the step vanishes from the profile without anything failing.
+ *
+ * Idempotent. The profile ids are uuidv5 over the pack key, and createAdversary
+ * tolerates the 409, so re-running this after installing a plugin picks up the
+ * abilities that plugin added and changes nothing else.
+ */
+router.post('/authoring/adversary-pack', async (req, res) => {
+  try {
+    const ctx = await loadStaffCourse(req, res);
+    if (!ctx) return undefined;
+    const target = authoring.resolveTarget(authoringConfig());
+    if (!target.client) {
+      return res.status(503).json({ error: 'Caldera is not reachable for authoring', unavailable: target.unavailable });
+    }
+    const abilities = await target.client.listAbilities();
+    if (!Array.isArray(abilities)) return res.status(502).json({ error: 'Caldera returned an invalid ability catalog' });
+    const packs = adversaryPack.resolveAll(abilities);
+    const created = [];
+    for (const pack of packs) {
+      // A profile with no resolvable step is reported, never created: an empty
+      // adversary in the picker is worse than an absent one, because it launches
+      // and does nothing.
+      if (!pack.atomic_ordering.length) { created.push({ ...summarisePack(pack), created: false, reason: 'no_resolvable_steps' }); continue; }
+      await target.client.createAdversary(adversaryPack.toWire(pack));
+      created.push({ ...summarisePack(pack), created: true });
+    }
+    audit.log({ req, action: 'caldera_adversary_pack_seed', target: { type: 'course', id: ctx.courseId },
+      metadata: { created: created.filter(row => row.created).length, packs: created.length } }).catch(() => {});
+    res.set('Cache-Control', 'no-store');
+    return res.json({ packs: created, catalog_size: abilities.length, upstream: target.upstream });
+  } catch (error) {
+    return fail(res, error, 'POST /authoring/adversary-pack');
   }
 });
 

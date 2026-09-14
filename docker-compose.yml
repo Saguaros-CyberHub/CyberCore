@@ -13,6 +13,10 @@ volumes:
   # image and everything in it, and an instructor's afternoon of adversary
   # authoring must not be part of what gets replaced.
   cybercore-caldera-data:
+  # The atomic plugin's ingested abilities. Separate from the volume above
+  # because the plugin writes them under plugins/, not under data/ — see the
+  # mount in the caldera service for why that distinction costs an import.
+  cybercore-caldera-atomic:
 
 services:
   # ============================================================================
@@ -579,6 +583,12 @@ services:
       # Authored adversaries, sources, objectives and the object store. Survives
       # `docker compose build caldera`, which is the whole reason it is named.
       - cybercore-caldera-data:/usr/src/app/data
+      # The atomic plugin's INGESTED abilities, which do NOT live under data/.
+      # It writes them to plugins/atomic/data/abilities/<tactic>/<id>.yml — an
+      # image layer — so without this volume the one-time "add abilities" import
+      # is silently undone by the next `--force-recreate`, and the ability count
+      # drops back to stockpile's alone with nothing explaining why.
+      - cybercore-caldera-atomic:/usr/src/app/plugins/atomic/data/abilities
     healthcheck:
       # Defined in the Dockerfile (this image is ours, so it has one). Repeated
       # here only to give the app-side `depends_on` something to wait on if one
