@@ -356,18 +356,23 @@
        modules/) and every generic-element rule is scoped under .cal-modal, so
        nothing here can reach another page or another dialog on this one.
 
-       Colour rule: a token, or a color-mix() of a token. No new hex. The tints
-       below are derived from --danger/--warning/--info/--success/--primary, so
-       the [data-theme="dark"] swap of those tokens carries the tints with it
-       and there is no second set of values to keep in sync. Where color-mix is
-       unavailable the fill drops out and the strip keeps its coloured left
-       border and its glyph, which still reads.
+       Colour rule: a token, or a color-mix() of a token. No new hex — not even
+       inside these comments, because the block is audited with a flat regex.
+       The tints below are derived from --danger/--warning/--info/--success/
+       --primary, so the [data-theme="dark"] swap of those tokens carries the
+       tints with it and there is no second set of values to keep in sync.
+       Where color-mix is unavailable the fill drops out and the strip keeps its
+       coloured left border and its glyph, which still reads.
 
        Deliberately NOT used: .alert-* and .badge-primary (neither has a
        [data-theme="dark"] rule anywhere in main.css), --bg-card-elevated
        (dark-only, no light value), and .form-group (its descendant rule near
        the top of this file puts 0.6rem of padding on every input, which
        mangles a checkbox).
+
+       The admin sibling of this dialog is public/css/admin-wazuh.css. Shapes
+       that exist in both files are deliberately identical modulo the waz- /
+       cal- prefix, so a fix found in one transplants to the other verbatim.
        ==================================================================== */
 
     /* .modal above resolves var(--card-bg) — a token defined NOWHERE in this
@@ -415,7 +420,15 @@
       padding: 1rem 1.25rem 1.25rem;
       display: flex; flex-direction: column; gap: 0.85rem;
     }
-    .cal-body > * { min-width: 0; }
+    /* flex-shrink:0 is load-bearing, not tidiness. .cal-body is a column flex
+       container with a definite height, and .cal-panel sets overflow:hidden —
+       which zeroes a flex item's AUTOMATIC MINIMUM SIZE. Without this line the
+       panels shrink to share out the body's height instead of the body
+       scrolling, and whatever falls off the bottom of a panel is clipped by that
+       same overflow:hidden. That is exactly how the selected-profile card, the
+       last child of the step-1 island in "Run Caldera attack", went missing.
+       admin-wazuh.css:19 carries this fix for the same reason. */
+    .cal-body > * { min-width: 0; flex-shrink: 0; }
     /* .info-box below ships a 1rem bottom margin; inside a gapped flex column
        that reads as a double gap under the lede alone. */
     .cal-body .cal-lede { margin-bottom: 0; }
@@ -469,11 +482,20 @@
       margin: 0; font-size: 0.78rem; font-weight: 600;
       text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-secondary);
     }
-    .cal-panel-actions { margin-left: auto; display: flex; gap: 0.3rem; }
+    /* The quick-action cluster grew from one button to four ("shown", "missing
+       agents", "retry failed", "clear"), which is wider than what the panel
+       title leaves on a laptop — wrap rather than crush the title. */
+    .cal-panel-actions { margin-left: auto; display: flex; gap: 0.3rem; flex-wrap: wrap; }
     .cal-panel-body { padding: 0.65rem 0.7rem; }
     .cal-panel-body:empty { display: none; }
     .cal-hint { margin: 0 0 0.5rem; font-size: 0.78rem; color: var(--text-muted); }
     .cal-hint:last-child { margin-bottom: 0; }
+    /* The "K selected lanes are hidden by the filter" warning. It is written
+       with .textContent on every render, so :empty is what hides it — a JS
+       branch toggling a class would be one more thing to keep in sync with the
+       text, and the failure mode is a stale warning about nothing. */
+    .cal-hint.is-warn { color: var(--warning); font-weight: 600; }
+    .cal-hint.is-warn:empty { display: none; }
 
     /* Live per-panel counter. Written with .textContent + .className because the
        three elements the tests read back are plain-text seams that cannot hold
@@ -494,39 +516,137 @@
     }
     .cal-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85em; }
 
+    /* ── the lane toolbar ─────────────────────────────────────────────────
+       Search, "group by", facet pills and the shown/hidden line. These are
+       SHELL-OWNED: built once and never re-rendered, because the dialog polls
+       every five seconds and rebuilding a search box under the instructor's
+       fingers would eat the caret mid-keystroke. They sit outside
+       .cal-panel-body so the scroll cap below can own the list alone, which is
+       why each row carries its own matching horizontal padding. */
+    .cal-tools { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; padding: 0.5rem 0.7rem 0; }
+    /* display:flex outranks the UA sheet's [hidden] { display: none }, so a
+       toolbar the renderer hides would otherwise stay on screen. */
+    .cal-tools[hidden] { display: none; }
+    .cal-toollabel {
+      display: inline-flex; align-items: center; gap: 0.3rem; margin: 0;
+      font-size: 0.75rem; color: var(--text-muted); font-weight: 400;
+    }
+    /* .cal-select is 100%-wide for the machine grid's fixed column; the toolbar
+       copy shrinks to its content so it can share a row with the pills. */
+    .cal-select-sm { width: auto; min-width: 8rem; padding: 0.2rem 0.4rem; font-size: 0.78rem; }
+    .cal-facets { display: flex; gap: 0.3rem; flex-wrap: wrap; padding: 0.4rem 0.7rem 0; }
+    .cal-shown { margin: 0.35rem 0.7rem 0; font-size: 0.75rem; color: var(--text-muted); }
+    /* The hidden-selection count, appended inside .cal-shown. Empty is the
+       normal case, and an empty inline span still prints its leading space. */
+    .cal-flagged { color: var(--warning); font-weight: 600; }
+    .cal-flagged:empty { display: none; }
+
     /* ── lanes ────────────────────────────────────────────────────────────
        A chip grid rather than a stacked list: twenty lanes are five rows, not
        twenty, and the panel stops being the reason you scroll. */
     .cal-lanegrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); gap: 0.25rem; }
+    /* The lane list gets the scroll cap the target table has always had.
+       Without it a 45-lane course is ~50rem of chips, and steps 2 and 3 sit
+       below the fold — the instructor never sees the machine picker at all.
+       The padding moves onto the grid inside so the sticky group headings can
+       reach the full width of the scroller. */
+    .cal-lanescroll { max-height: min(30rem, 50vh); overflow: auto; padding: 0; }
+    .cal-lanescroll > .cal-lanegrid { padding: 0.65rem 0.7rem; }
+    /* TWO LINES, deliberately. On one line .cal-lane-name was the only
+       shrinkable item on the row — the meta and the badge are both flex:none —
+       so the moment a reason badge appeared the name was squeezed to zero width
+       and the lane became anonymous. Line 1 is the name alone; line 2 wraps. */
     .cal-lane {
-      display: flex; align-items: center; gap: 0.5rem; min-width: 0; margin: 0;
+      display: flex; align-items: flex-start; gap: 0.5rem; min-width: 0; margin: 0;
       padding: 0.3rem 0.45rem; border: 1px solid transparent; border-radius: 6px;
       font-size: 0.85rem; cursor: pointer; transition: var(--transition);
     }
     .cal-lane:hover { background: var(--bg-card-hover); }
     .cal-lane:focus-within { outline: 2px solid var(--primary); outline-offset: 1px; }
-    .cal-lane input { flex: none; width: auto; margin: 0; cursor: pointer; }
+    /* flex-start pins the box to the very top of a now two-line chip; the top
+       margin nudges it back down onto the first text line. */
+    .cal-lane input { flex: none; width: auto; margin: 0.15rem 0 0; cursor: pointer; }
+    .cal-lane-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 0.1rem; }
     .cal-lane-name {
-      font-weight: 600; color: var(--text-primary);
+      display: block; min-width: 0; font-weight: 600; color: var(--text-primary);
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
-    .cal-lane-meta {
-      margin-left: auto; flex: none; font-size: 0.75rem;
-      color: var(--text-muted); font-variant-numeric: tabular-nums;
+    .cal-lane-sub {
+      display: flex; align-items: center; flex-wrap: wrap; gap: 0.15rem 0.3rem;
+      font-size: 0.72rem; color: var(--text-muted);
     }
+    .cal-lane-num { flex: none; font-variant-numeric: tabular-nums; }
+    /* The environment label is the only part of the sub-line that can run long,
+       so it is the only part allowed to truncate. */
+    .cal-lane-env { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* No margin-left:auto any more: pushing the meta to the far edge is what
+       forced the name and the meta onto one contested line in the first place. */
+    .cal-lane-meta { flex: none; font-variant-numeric: tabular-nums; white-space: nowrap; }
     .cal-lane .badge { flex: none; }
+    /* A badge at full size is taller than the 0.72rem line it shares, and the
+       chip grows a whole row for it. */
+    .cal-lane-sub .badge { font-size: 0.65rem; padding: 0.05rem 0.35rem; }
     .cal-lane.is-picked { border-color: var(--primary); background: var(--cal-tint-pick); }
     .cal-lane.is-off { opacity: 0.55; cursor: default; }
     .cal-lane.is-off:hover { background: none; }
+
+    /* ── collapsible lane groups ──────────────────────────────────────────
+       44 workstation lanes plus a GOAD lane are one undifferentiated wall of
+       chips unless they can be folded by environment or by student. */
+    .cal-group + .cal-group { border-top: 1px solid var(--border-color); }
+    /* Sticky for the same reason the target table's thead is: scrolling a long
+       group must not cost you the heading that says which environment you are
+       looking at. .cal-lanescroll is the scroll container it sticks inside.
+       The hairline is an inset shadow and not a border, because a border on a
+       sticky element does not paint once the element has left flow. flex-wrap
+       is what lets the meta drop to its own line on a narrow dialog. */
+    .cal-group-head {
+      position: sticky; top: 0; z-index: 1;
+      display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+      padding: 0.35rem 0.7rem; background: var(--bg-card-hover);
+      box-shadow: inset 0 -1px 0 var(--border-color);
+    }
+    .cal-group-toggle {
+      flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 0.4rem;
+      border: 0; background: none; padding: 0.1rem 0;
+      font: inherit; font-size: 0.8rem; font-weight: 600; color: var(--text-primary);
+      cursor: pointer; text-align: left;
+    }
+    /* Disabled while a search is running: the filter forces every group open,
+       and a toggle that silently did nothing would read as broken. */
+    .cal-group-toggle:disabled { cursor: default; }
+    .cal-group-toggle:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+    /* Two borders of a square, rotated — a chevron with no icon font, no image
+       and no inline <svg>, which the results island is forbidden to contain. */
+    .cal-chev {
+      flex: none; width: 0.5rem; height: 0.5rem;
+      border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
+      transform: rotate(45deg); transition: var(--transition);
+    }
+    .cal-group-toggle[aria-expanded="false"] .cal-chev { transform: rotate(-45deg); }
+    .cal-group-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cal-gpick { margin: 0; display: inline-flex; }
+    .cal-gpick input { width: auto; margin: 0; cursor: pointer; }
+    /* Mirrors the checkbox's indeterminate PROPERTY, which several platforms
+       render almost identically to unchecked at checkbox size — so "some of
+       this group is picked" would otherwise be indistinguishable from "none". */
+    .cal-gpick.is-partial input { outline: 2px solid var(--primary); outline-offset: 1px; }
+    .cal-group-meta {
+      margin-left: auto; flex: none; font-size: 0.72rem;
+      color: var(--text-muted); font-variant-numeric: tabular-nums;
+    }
+    .cal-group .cal-lanegrid { padding: 0.45rem 0.7rem; }
 
     /* ── machine names ────────────────────────────────────────────────────
        Six rows used to repeat the label "OS for matching VMs" beside six
        identical selects. The label is now a column header printed once; each
        select keeps a real accessible name from a visually-hidden text node
        inside its own <label>, which also takes machine names out of attribute
-       position entirely — escHtml on this page does not escape quotes. */
+       position entirely — escHtml on this page does not escape quotes.
+       Four columns now: machine | role | available | operating system. The role
+       column is what tells an instructor that "elk" is a SIEM, not a target. */
     .cal-mgrid {
-      display: grid; grid-template-columns: minmax(0, 1fr) auto 10rem;
+      display: grid; grid-template-columns: minmax(0, 1fr) auto auto 11rem;
       gap: 0.25rem 0.75rem; align-items: center;
     }
     .cal-mgrid-h {
@@ -534,12 +654,29 @@
       letter-spacing: 0.04em; color: var(--text-muted);
       padding-bottom: 0.25rem; border-bottom: 1px solid var(--border-color);
     }
+    /* An environment heading spanning the whole grid. Machine names are unique
+       only WITHIN an environment — two challenge specs can each ship a DC01 —
+       so the grid has to say which environment a row belongs to or the two
+       collapse into one ambiguous line. */
+    .cal-mgroup {
+      grid-column: 1 / -1; margin-top: 0.45rem; padding: 0.3rem 0 0.15rem;
+      border-top: 1px solid var(--border-color);
+      font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.04em; color: var(--text-secondary);
+    }
+    /* The first heading follows the column headers, which already draw a rule. */
+    .cal-mgrid-h + .cal-mgroup { margin-top: 0; border-top: 0; }
     .cal-mpick {
       display: flex; align-items: center; gap: 0.5rem; min-width: 0; margin: 0;
       font-size: 0.85rem; font-weight: 400; cursor: pointer;
     }
     .cal-mpick input { flex: none; width: auto; margin: 0; cursor: pointer; }
     .cal-mname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* The role cell: a chip, plus a "not a target" badge on infrastructure. */
+    .cal-mrole {
+      display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; min-width: 0;
+      font-size: 0.78rem; color: var(--text-muted);
+    }
     .cal-molabel { display: block; margin: 0; font-weight: 400; }
     .cal-select {
       width: 100%; box-sizing: border-box; padding: 0.28rem 0.4rem;
@@ -556,6 +693,27 @@
        falls back to a 15%-alpha glow. These three are (0,3,0) and hold in
        both themes. */
     .cal-modal .cal-select:focus { outline: 2px solid var(--primary); outline-offset: -1px; border-color: var(--primary); }
+
+    /* ── role chips ───────────────────────────────────────────────────────
+       Hue is the fastest way to tell a domain controller from a workstation in
+       a fifty-row list. Each modifier sets only two custom properties, so the
+       chip geometry lives in exactly one rule and a new role costs one line,
+       not a new selector. Every tint is an existing --cal-tint-* (itself a
+       color-mix of a theme token) or --bg-card-hover, so dark mode needs no
+       second table of values. */
+    .cal-role {
+      display: inline-flex; align-items: center; flex: none;
+      padding: 0.05rem 0.4rem; border-radius: 999px;
+      font-size: 0.68rem; font-weight: 600; line-height: 1.5; white-space: nowrap;
+      background: var(--cal-role-tint, var(--bg-card-hover));
+      color: var(--cal-role-ink, var(--text-muted));
+    }
+    .cal-role-dc    { --cal-role-tint: var(--cal-tint-chip);   --cal-role-ink: var(--primary); }
+    .cal-role-srv   { --cal-role-tint: var(--cal-tint-info);   --cal-role-ink: var(--info); }
+    .cal-role-ws    { --cal-role-tint: var(--cal-tint-ok);     --cal-role-ink: var(--success); }
+    .cal-role-siem  { --cal-role-tint: var(--cal-tint-warn);   --cal-role-ink: var(--warning); }
+    .cal-role-atk   { --cal-role-tint: var(--cal-tint-danger); --cal-role-ink: var(--danger); }
+    .cal-role-other { --cal-role-tint: var(--bg-card-hover);   --cal-role-ink: var(--text-muted); }
 
     /* ── target table ─────────────────────────────────────────────────────
        Its own scroll container on BOTH axes, so a long machine name widens the
@@ -593,20 +751,52 @@
     .cal-pick { display: block; cursor: pointer; }
     .cal-c-pick { width: 2.6rem; }
     .cal-c-vm { width: 5rem; }
+    .cal-c-machine { width: 14rem; }
     .cal-c-os { width: 10rem; }
+    .cal-c-agent { width: 11rem; }
     .cal-c-status { width: 12rem; }
     .cal-modal .cal-table .cal-c-vm { text-align: right; font-variant-numeric: tabular-nums; }
+    /* Two lines inside one cell: the lane's name over its number and
+       environment, or the machine label over its role chip. Real blocks rather
+       than a <br>, so the second line can carry its own size and colour without
+       a nested font rule, and so a role chip can sit in it without breaking the
+       baseline of the line above. */
+    .cal-cell-main { display: block; color: var(--text-primary); }
+    .cal-cell-sub {
+      display: flex; align-items: center; flex-wrap: wrap; gap: 0.15rem 0.35rem;
+      margin-top: 0.1rem; font-size: 0.7rem; color: var(--text-muted);
+    }
+    /* "3m ago" beside a check-in. Tabular figures so the Agent column does not
+       jitter sideways as the five-second poll rewrites every row. */
+    .cal-ago { font-variant-numeric: tabular-nums; }
     /* Badges sit inline in the cell rather than in a flex box: display:flex on a
        <td> drops it out of the table layout and its column stops lining up with
        its own <th>. */
     .cal-modal .cal-table .cal-c-status .badge + .badge { margin-left: 0.3rem; }
 
+    /* Sortable headers. The whole header cell is the hit target, so the button
+       carries the padding the th would otherwise own — a padded th wrapping a
+       full-bleed button would double it and the header row would grow. There is
+       no shared sortable-header style in main.css; clinic-risk-assessment.html
+       keeps its own, page-scoped, and admin-wazuh.css:149 carries this twin. */
+    .cal-modal .cal-table th.cal-sortable { padding: 0; }
+    .cal-sort {
+      width: 100%; display: flex; align-items: center; gap: 0.25rem;
+      border: 0; background: none; padding: 0.4rem 0.6rem;
+      font: inherit; font-size: 0.7rem; font-weight: inherit; color: inherit;
+      cursor: pointer; text-align: left; white-space: nowrap;
+    }
+    .cal-sort:hover, .cal-sort.is-on { color: var(--text-primary); }
+    .cal-modal .cal-sort:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+    /* A FIXED width, reserved whether or not an arrow is in it, so the header
+       does not jog sideways as the indicator appears on the column you just
+       sorted and clears from the one you left. */
+    .cal-sort-ind { display: inline-block; width: 0.75rem; font-size: 0.6rem; color: var(--primary); }
+
     /* Row state as a LEFT RULE, not a fill. Three states coexist with the hover
        tint, and stacked translucent fills stop being legible the moment two of
-       them meet. Rows keep payload order because the classroomTarget{i} index is
-       a test seam, so this rule is the whole scanning affordance for thirty
-       rows. The specificity is deliberate: the transparent base is (0,2,3), so
-       each state rule has to clear it rather than merely follow it. */
+       them meet. The specificity is deliberate: the transparent base is (0,2,3),
+       so each state rule has to clear it rather than merely follow it. */
     .cal-modal .cal-table tbody td:first-child { box-shadow: inset 3px 0 0 transparent; }
     .cal-modal .cal-table tbody .cal-row.is-picked td:first-child { box-shadow: inset 3px 0 0 var(--primary); }
     .cal-modal .cal-table tbody .cal-row.is-busy td:first-child { box-shadow: inset 3px 0 0 var(--warning); }
@@ -614,6 +804,22 @@
        unless the cell is the thing dimmed. */
     .cal-modal .cal-table tbody .cal-row.is-off td { color: var(--text-muted); opacity: 0.7; }
     .cal-modal .cal-table td.cal-cell-err { color: var(--danger); }
+    /* When the OS came from the challenge spec there is nothing to decide, and
+       a column of forty-five identical bordered dropdowns reads as forty-five
+       open questions. A known row renders its select as plain text — but it
+       stays a real <select>, and hover or focus paints the control back in, so
+       an instructor who knows better can still override it. */
+    .cal-modal .cal-table .cal-row.is-known .cal-select {
+      border-color: transparent; background: transparent; color: var(--text-secondary);
+    }
+    .cal-modal .cal-table .cal-row.is-known .cal-select:hover {
+      border-color: var(--border-color); background: var(--bg-input); color: var(--text-primary);
+    }
+    /* Restated at this specificity because the rule above is (0,5,0) and would
+       otherwise keep the border transparent through the (0,3,0) focus rule. */
+    .cal-modal .cal-table .cal-row.is-known .cal-select:focus {
+      border-color: var(--primary); background: var(--bg-input); color: var(--text-primary);
+    }
 
     /* ── the basket bar ───────────────────────────────────────────────────
        Selection state and both actions, pinned outside the scroll area. */
@@ -650,8 +856,9 @@
     #classroomCalderaError:empty { display: none; }
 
     /* ── severity strips ──────────────────────────────────────────────────
-       Replaces <p style="color:#e53e3e"> in the renderer. .env-warn above is
-       the same shape but hardcodes #92400e, which has no dark counterpart. */
+       Replaces an inline red style attribute in the renderer. .env-warn above
+       is the same shape but hardcodes a literal amber, which has no dark
+       counterpart and so goes unreadable the moment the theme flips. */
     .cal-note {
       display: flex; gap: 0.5rem; align-items: flex-start; margin: 0.4rem 0 0;
       padding: 0.5rem 0.7rem; border-radius: var(--border-radius);
@@ -666,6 +873,11 @@
     .cal-note-danger { --cal-edge: var(--danger);  --cal-tint: var(--cal-tint-danger); }
     .cal-note-warn   { --cal-edge: var(--warning); --cal-tint: var(--cal-tint-warn); }
     .cal-note-info   { --cal-edge: var(--info);    --cal-tint: var(--cal-tint-info); }
+    /* The fourth verdict: every step of the chosen profile can run on the agents
+       that have actually checked in. The other three strips all mean "something
+       is wrong", so a clean answer wearing their colours reads as one more
+       complaint and the instructor hesitates over a launch that is fine. */
+    .cal-note-ok     { --cal-edge: var(--success); --cal-tint: var(--cal-tint-ok); }
 
     /* ── progress metrics ─────────────────────────────────────────────────
        "0 queued - 0 running - 0 completed - 1 failed" was one flat text line in
@@ -714,6 +926,11 @@
     .cal-job-msg { margin: 0.25rem 0 0; font-size: 0.8rem; color: var(--text-secondary); white-space: pre-wrap; }
     .cal-job-note { margin-top: 0.3rem; font-size: 0.78rem; }
     .cal-job-ok { margin: 0.3rem 0 0; font-size: 0.8rem; color: var(--success); }
+    /* The plain-English reading of a raw failure string — a Windows "timed out"
+       almost always means the detached agent is holding the guest-exec output
+       pipes open, not that the install failed. Muted and a size down, because it
+       explains the error above it rather than competing with it for attention. */
+    .cal-job-hint { margin: 0.3rem 0 0; font-size: 0.78rem; color: var(--text-muted); }
 
     /* ── adversary picker ─────────────────────────────────────────────────
        Was a native <select> of 25+ opaque entries that covered the lane
@@ -726,6 +943,10 @@
       border: 1px solid var(--border-color); border-radius: 6px;
       background: var(--bg-input); color: var(--text-primary);
     }
+    /* type=search draws its own clear button in Chromium and WebKit, which lands
+       immediately beside the .cal-search-clear we position inside the same box —
+       two X's in one field, one of which is ours and one of which is not. */
+    .cal-searchbox::-webkit-search-cancel-button { -webkit-appearance: none; display: none; }
     .cal-modal .cal-searchbox:focus { outline: 2px solid var(--primary); outline-offset: -1px; border-color: var(--primary); }
     .cal-search-clear {
       position: absolute; right: 0.3rem; top: 50%; transform: translateY(-50%);
@@ -735,15 +956,18 @@
     .cal-search-clear:hover { color: var(--danger); }
     .cal-search-clear:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
     .cal-advpills { display: flex; gap: 0.3rem; flex-wrap: wrap; }
-    /* The scope pills reuse .filter-pill, whose .active state (main.css:1586)
-       fills with var(--primary) and hardcodes color:#fff. In light mode that is
-       white on Arizona Blue #0c234b and reads correctly, but --primary is
-       lifted to azurite #5c9fe6 in dark, where white text lands at 2.8:1 —
-       under AA for any size. This is the same hazard .cal-step sidesteps by
-       never filling with --primary; here the fill comes from main.css, so the
-       text colour is corrected instead. --bg-card on that fill is 6.3:1.
-       Scoped to this dialog so every other filter pill in the app is untouched.
-       (0,4,0) clears .filter-pill.active at (0,2,0). */
+    /* The scope pills — and now the lane facet pills in .cal-facets — reuse
+       .filter-pill, whose .active state (main.css:1586) fills with
+       var(--primary) and hardcodes a literal white. In light mode that is white
+       on the near-black Arizona Blue --primary and reads correctly, but
+       --primary is lifted to a light azurite in dark, where white text lands at
+       2.8:1 — under AA for any size. This is the same hazard .cal-step
+       sidesteps by never filling with --primary; here the fill comes from
+       main.css, so the text colour is corrected instead. --bg-card on that fill
+       is 6.3:1. It keys on .filter-pill and not on the containing row, so it
+       already covers every pill added since. Scoped to this dialog so every
+       other filter pill in the app is untouched. (0,4,0) clears
+       .filter-pill.active at (0,2,0). */
     [data-theme="dark"] .cal-modal .filter-pill.active { color: var(--bg-card); }
     /* size="8" in the markup makes this a LISTBOX rather than a dropdown, so it
        can no longer cover the lane selector below it — and it stays a real
@@ -770,6 +994,63 @@
     .cal-advcard-name { font-size: 0.9rem; color: var(--text-primary); }
     .cal-advcard-desc { margin: 0.35rem 0 0; font-size: 0.82rem; color: var(--text-secondary); }
     .cal-advcard-desc.is-muted { color: var(--text-muted); font-style: italic; }
+    /* The deterministic rollup — "13 steps across 4 tactics … runs on Windows".
+       Carried at --text-primary because it, and not the vendor description
+       above it, is the sentence an instructor reads before launching. */
+    .cal-advcard-summary { margin: 0.4rem 0 0; font-size: 0.82rem; color: var(--text-primary); }
+
+    /* ── ability list ─────────────────────────────────────────────────────
+       The ordered steps of the selected profile. Capped and scrollable for the
+       same reason the lane list is: a sixty-ability adversary would otherwise
+       push the lane picker and the launch button off the bottom of the dialog,
+       which is the bug this whole block exists to stop repeating. */
+    .cal-abilities {
+      margin: 0.5rem 0 0; padding: 0; list-style: none;
+      max-height: min(18rem, 35vh); overflow: auto;
+      border: 1px solid var(--border-color); border-radius: var(--border-radius);
+      background: var(--bg-card);
+    }
+    /* step | main | platforms. The step number is its own column so a wrapped
+       ability name stays hung off a straight left edge instead of sliding back
+       under the number. */
+    .cal-ab {
+      display: grid; grid-template-columns: 2.1rem minmax(0, 1fr) auto;
+      gap: 0.1rem 0.5rem; align-items: baseline;
+      padding: 0.35rem 0.6rem; font-size: 0.8rem;
+      border-bottom: 1px solid var(--border-light);
+    }
+    .cal-abilities > .cal-ab:last-child { border-bottom: 0; }
+    .cal-ab-step { font-variant-numeric: tabular-nums; font-weight: 700; color: var(--text-muted); }
+    .cal-ab-name { grid-column: 2; color: var(--text-primary); font-weight: 600; overflow-wrap: anywhere; }
+    /* Tactic and technique share one wrapped line under the name. Each of them
+       also carries grid-column:2 on its own, so the list still reads correctly
+       if the renderer emits them as direct children of .cal-ab instead of
+       inside this wrapper — grid placement is simply ignored on a flex child. */
+    .cal-ab-sub {
+      grid-column: 2; display: flex; flex-wrap: wrap; align-items: baseline;
+      gap: 0.1rem 0.45rem;
+    }
+    .cal-ab-tactic { grid-column: 2; font-size: 0.72rem; color: var(--text-secondary); }
+    .cal-ab-tech {
+      grid-column: 2; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.72rem; color: var(--text-muted);
+    }
+    .cal-ab-techname { grid-column: 2; font-size: 0.72rem; color: var(--text-muted); }
+    .cal-plats { grid-column: 3; font-size: 0.72rem; color: var(--text-muted); white-space: nowrap; }
+    /* A step no checked-in agent can run. Kept in the list at full detail rather
+       than dropped, because "why did my operation only do nine of thirteen
+       things" is the exact question this list exists to answer. */
+    .cal-ab.is-skipped { opacity: 0.6; }
+    /* An id in the profile's ordering that the ability catalog does not contain
+       — the server could not describe it, so the row says so rather than
+       printing a bare identifier as if it were a name. */
+    .cal-ab.is-unknown .cal-ab-name { color: var(--warning); }
+    /* Spans from the name column to the end, so a paragraph is not squeezed into
+       the narrow middle column beside the platform text. */
+    .cal-ab-desc { grid-column: 2 / -1; margin-top: 0.15rem; font-size: 0.76rem; color: var(--text-secondary); }
+    .cal-ab-desc > summary { cursor: pointer; font-size: 0.72rem; color: var(--primary); }
+    .cal-ab-desc > summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+    .cal-ab-desc p { margin: 0.2rem 0 0; line-height: 1.45; }
 
     /* ── empty states ─────────────────────────────────────────────────────
        Says what to do next, not just that there is nothing here. */
@@ -786,11 +1067,32 @@
       .cal-mgrid .cal-mgrid-h { display: none; }
       .cal-lanegrid { grid-template-columns: minmax(0, 1fr); }
       .cal-modal .modal-header, .cal-body, .cal-footer { padding-left: 0.9rem; padding-right: 0.9rem; }
+      /* The toolbar rows sit outside .cal-panel-body, so they carry their own
+         padding and have to be narrowed here too or they stay indented past
+         everything else in the panel. */
+      .cal-tools, .cal-facets, .cal-shown { padding-left: 0.5rem; padding-right: 0.5rem; }
+      /* A 14rem search basis beside a "group by" select is wider than the dialog
+         at this width, and a flex line that cannot fit shrinks the input to a
+         slot too narrow to read back what you typed. */
+      .cal-search { flex-basis: 100%; }
+      /* "44 lanes · 88 VMs · 12 agents" does not fit beside a group title on a
+         phone. It drops to its own line, indented past the chevron so it still
+         reads as belonging to the heading above it rather than to the first
+         chip below it. */
+      .cal-group-meta { flex-basis: 100%; margin-left: 1.4rem; }
+      .cal-panel-actions { width: 100%; }
+      /* Two columns: the platform text moves under the name rather than
+         competing with it for a line barely wider than the name itself. */
+      .cal-ab { grid-template-columns: 2.1rem minmax(0, 1fr); }
+      .cal-plats { grid-column: 2; white-space: normal; }
     }
 
     /* Scoped to the dialog so it cannot reach the rest of the app. !important is
        needed to clear the blanket theme-transition rule in main.css, which puts
-       a 0.3s transition on every input, button, badge and table cell. */
+       a 0.3s transition on every input, button, badge and table cell. The
+       universal selector already covers every control added since — the group
+       chevron's rotation and the lane chip's tint included — so there is
+       nothing further to list here for them. */
     @media (prefers-reduced-motion: reduce) {
       .cal-modal, .cal-modal * {
         transition: none !important;

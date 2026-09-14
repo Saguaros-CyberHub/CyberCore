@@ -5,6 +5,10 @@ const crypto = require('node:crypto');
 const { targetsFor, laneEligible, eligibleLaneSql, seenAt } = require('./caldera-lane-agents');
 const { defaultSettings } = require('./wazuh-client');
 const { isMalwareLane } = require('./malware-analysis-state');
+// NAME_SUFFIX and laneKind now live in lane-environment.js, which the Caldera
+// classroom dialogs share. isMalwareLane stays required here: it independently
+// gates assertTarget's malware refusal and each target's runnable flag.
+const { NAME_SUFFIX, laneKind } = require('./lane-environment');
 const { readableAgentName, keyFingerprint, rawKeyFingerprint } = require('./wazuh-agent-identity');
 
 const JOB_TIMEOUT_MS = 30 * 60 * 1000;
@@ -50,26 +54,6 @@ function publicJob(job, now) {
   return Object.fromEntries(['job_id', 'status', 'vm_id', 'platform', 'manager', 'agent_name', 'agent_id',
     'started_at', 'dispatched_at', 'finished_at', 'message', 'error', 'windows_telemetry', 'linux_suricata', 'telemetry_status', 'telemetry_warnings'].filter(key => safe[key] !== undefined)
     .map(key => [key, safe[key]]));
-}
-
-// Every lane name across every deployer ends in `-<vxlanId>`; everything before
-// that last hyphen is the lane's "family" (cle-cybr388, ciab-cochise101,
-// crucible). See cle/utils/lane-provision.js:198 and ciab equivalent at :159.
-const NAME_SUFFIX = /^(.*?)-(\d+)$/;
-
-// One coarse label per deployment path, derived from flags the deployers
-// already write. Order matters: a bake lane is also `ciab`, and a malware lane
-// can also be a course lane, so the most specific test comes first.
-function laneKind(cfg) {
-  if (cfg.ciab_bake || cfg.staging) return 'staging';
-  if (isMalwareLane(cfg)) return 'malware';
-  if (cfg.goad) return 'goad';
-  if (cfg.profile_lane_group || cfg.ciab) return 'ciab';
-  if (cfg.cle && cfg.material_id) return 'course-lab';
-  if (cfg.cle || cfg.course_id) return 'course';
-  if (cfg.group_id) return 'group';
-  if (cfg.challenge_key || cfg.challenge_id) return 'challenge';
-  return 'lane';
 }
 
 // The grouping/sorting context the admin dialog needs, ENUMERATED BY NAME.

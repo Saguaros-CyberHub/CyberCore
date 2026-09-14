@@ -547,9 +547,18 @@ function scopeLanePredicate(scopeType) {
  * engagement arm too, and for a stronger reason: a CiAB profile lane IS the
  * student's one lane for that engagement, so there is nothing to disambiguate
  * and a material_id filter could only ever exclude the lane we are looking for.
+ *
+ * l.vxlan_id and l.created_at are carried for the Caldera classroom dialogs,
+ * which label and group forty-odd otherwise-identical lane chips by their lane
+ * number and show when each lane was deployed. The number CAN be parsed back
+ * out of the lane name — every deployer ends a name in `-<vxlanId>` — but that
+ * is a fallback for legacy rows, not the source of truth: a renamed lane, or
+ * one whose name never carried the suffix, would otherwise render as an
+ * anonymous chip in a wall of forty-four and be unpickable by an instructor.
  */
 function scopeLanesSql(scopeType, { includeSuspended = false } = {}) {
   return `SELECT l.lane_id, l.user_id, l.name, l.status, l.module_key, l.config,
+            l.vxlan_id, l.created_at,
             u.email AS student_email, u.first_name, u.last_name
        FROM cybercore_lane l
        JOIN cybercore_user u ON u.user_id = l.user_id

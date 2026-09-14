@@ -31,8 +31,14 @@ function assertLifecycleSql(sql, alias = '') {
 // an occupied lane. Assertions on its SQL conditions keep the fake honest about
 // the concurrency and scope guarantees production PostgreSQL must enforce.
 function harness(options = {}) {
+  // agentPid models the ONE thing that separates a Sandcat this install started
+  // from one an earlier install left running: pawFor is a hash of (lane, vm) and
+  // groupFor is per lane, so both register under identical paw, group and
+  // platform for ever. captureScript advances it, because that is the moment the
+  // installer actually reaches the guest. A test that wants the "the agent here
+  // is the old one" case simply pins it.
   const state = { lane: laneFixture(), clock: START, scheduled: [], sql: [], calls: [],
-    agentReads: 0, sleepCalls: [], script: null, token: null,
+    agentReads: 0, sleepCalls: [], script: null, token: null, agentPid: 3100, agentPidFrozen: false,
     resources: [{ vmid: 901, node: 'actual-node', type: 'qemu', status: 'running' }] };
   Object.assign(state, options.state);
   const query = async (sql, args) => {
@@ -82,7 +88,7 @@ function harness(options = {}) {
   };
   const freshAgent = () => ({ paw: pawFor(LANE_ID, 901), group: groupFor(LANE_ID), platform: 'windows',
     last_seen: new Date(state.clock).toISOString().replace('T', ' ').replace('Z', ''),
-    host: 'LAB-WKS', trusted: true, server: 'private-server', contact: 'private-contact',
+    host: 'LAB-WKS', trusted: true, pid: state.agentPid, server: 'private-server', contact: 'private-contact',
     pending_contact: 'private-pending', executors: ['private-executor'], ...state.agentOverride });
   const client = { listAgents: async () => {
     state.agentReads++;
@@ -94,6 +100,10 @@ function harness(options = {}) {
     state.script = script;
     state.token = /\/agent\/([a-f0-9]{64})/.exec(script)?.[1];
     assert.ok(state.token, 'executor must receive the scoped ingress credential');
+    // The install reached the guest, so the Sandcat that registers next is a new
+    // process. Pinning agentPidFrozen is how a test says "the install stalled
+    // and the only agent on this machine is still the previous one".
+    if (!state.agentPidFrozen) state.agentPid += 1;
     return { pid: 4321 };
   }
   const executor = {
@@ -118,6 +128,11 @@ function harness(options = {}) {
   };
   const service = createService({ query, executor,
     settings: () => ({ serverUrl: 'https://caldera.saguaroscyberhub.org', consoleUrl: 'https://caldera.saguaroscyberhub.org/', client }),
+    // Left undefined by nearly every test on purpose: the default directory then
+    // runs against the query fake above, whose fall-through rejects any SQL that
+    // is not the dispatch re-read, so an environment lookup firing for a lane
+    // with no challenge_key shows up as a recorded query rather than passing.
+    environments: options.environments,
     now: () => state.clock,
     sleep: async ms => { state.sleepCalls.push(ms); state.clock += ms; },
     schedule: task => state.scheduled.push(task),
@@ -136,13 +151,27 @@ test('targets include lane guests, attached modules and attack box, excluding ga
   const lane = laneFixture();
   lane.config.vms.push({ vm_id: 900, os: 'linux' }, { vm_id: 902, type: 'lxc' }, { vm_id: -1 });
   lane.config.workstations = [{ vmid: 903, name: 'Ubuntu workstation' }, { vm_id: 901 }];
-  lane.config.attached_modules = [{ vms: [{ vm_id: 904, template_name: 'win2022' }, { vm_id: 905, name: 'Unknown OS' }] }];
+  lane.config.attached_modules = [{ challenge_key: 'forensics-mod', vms: [{ vm_id: 904, template_name: 'win2022' }, { vm_id: 905, name: 'Unknown OS' }] }];
   lane.config.attack_box_vm_id = 906;
   const targets = targetsFor(lane);
   assert.deepEqual(targets.map(t => [t.vm_id, t.platform]), [[901, 'windows'], [903, 'linux'], [904, 'windows'], [905, null], [906, 'linux']]);
   assert.equal(targets.every(t => t.type === 'qemu'), true);
   assert.doesNotMatch(JSON.stringify(targets), /lane-password-private/);
   assert.deepEqual(targetsFor({ config: JSON.stringify({ challenge_vm_id: 907, challenge_key: 'Challenge' }) }).map(t => t.vm_id), [907]);
+  // The row cannot say where it came from once the lists are flattened, so the
+  // provenance every classroom dialog groups on is stamped on before that.
+  assert.deepEqual(targets.map(t => [t.vm_id, t.source, t.slot, t.template_name, t.module_key]), [
+    [901, 'environment', null, null, null],
+    [903, 'workstation', 0, null, null],
+    [904, 'attached', null, 'win2022', 'forensics-mod'],
+    [905, 'attached', null, null, 'forensics-mod'],
+    [906, 'attack_box', null, null, null],
+  ]);
+  assert.equal(targets.at(-1).role, 'attacker');
+  assert.deepEqual(targetsFor({ config: JSON.stringify({ challenge_vm_id: 907, challenge_key: 'Challenge' }) })
+    .map(t => [t.source, t.slot, t.module_key]), [['challenge', null, null]]);
+  assert.deepEqual(targetsFor({ config: { workstations: [{ vm_id: 910, name: 'Desk', slot: 2, templateName: 'win11' }] } })
+    .map(t => [t.source, t.slot, t.template_name, t.platform]), [['workstation', 2, 'win11', 'windows']]);
 });
 
 test('invalid platform, VM outside the lane and inactive lane fail before any database claim or execution', async () => {
@@ -238,9 +267,10 @@ test('a stale check-in is retried until a matching fresh check-in arrives', asyn
   assert.deepEqual(h.state.sleepCalls, [5000]);
 });
 
+// A run that DID report completion is still held to both of its promises. Only
+// the never-reported case below is reconciled against the check-in.
 for (const [reason, result] of [
   ['nonzero exit', state => ({ exited: true, exitcode: 1, stdout: '', stderr: 'download failed: /agent/' + state.token })],
-  ['timeout', () => ({ exited: false, exitcode: -1, stdout: '', stderr: 'Timed out' })],
   ['missing startup marker', () => ({ exited: true, exitcode: 0, stdout: 'started maybe', stderr: '' })],
 ]) {
   test(`${reason} cannot succeed and guest errors redact the agent credential`, async () => {
@@ -252,6 +282,152 @@ for (const [reason, result] of [
     assert.equal(h.state.agentReads, 1);
   });
 }
+
+// A detached Windows agent inherits the guest-exec output handles, so QGA never
+// reports the exec as exited and pollExecStatus returns its deadline verdict
+// with no stdout at all. Reporting that as a failed install is what told
+// instructors "Agent installation failed. Timed out" about agents that were
+// already beaconing, and the single-lane dialog showed the contradiction.
+test('an unfinished guest execution is reconciled by a fresh Caldera check-in', async () => {
+  const h = harness({ result: () => ({ exited: false, exitcode: -1, stdout: '', stderr: 'Timed out' }) });
+  await h.start(); await h.run();
+  assert.equal(h.job().status, 'completed');
+  assert.equal(h.job().message, 'Agent checked in to Caldera.');
+  assert.equal(h.job().exec_incomplete, true);
+  assert.equal(h.job().error, undefined);
+  assert.match(h.job().warnings.at(-1), /did not report completion within 120 seconds/);
+  assert.doesNotMatch(JSON.stringify(h.job()), /Agent installation failed/);
+  assert.deepEqual(Object.keys(h.job().agent).sort(), ['group', 'host', 'last_seen', 'paw', 'platform', 'trusted']);
+  assert.equal(h.state.agentReads, 2, 'the preflight plus the one check-in that settled it');
+  assert.equal(h.state.sleepCalls.length, 0);
+  assert.deepEqual(h.state.calls.find(c => c[0] === 'poll'), ['poll', 'actual-node', 901, 4321, 120000]);
+  const status = await h.service.status([h.state.lane]);
+  assert.equal(status.lanes[0].job.status, 'completed');
+  assert.equal(status.lanes[0].targets[0].last_job.status, 'completed');
+  assert.equal(status.lanes[0].targets[0].last_job.exec_incomplete, true,
+    'the per-machine job line carries it so the dialog can explain the ONE machine it happened to');
+});
+
+// The trap under the reconciliation above. pawFor is a hash of (lane, vm) and
+// groupFor is per lane, so a Sandcat left running by an EARLIER install keeps
+// beaconing under exactly the paw, group and platform this install is waiting
+// for, and nothing ever deletes a Caldera agent row. The Windows script only
+// stops the old agent after the Defender block and after the download, so an
+// install that stalls there finds the previous agent sitting in the very first
+// listAgents call -- and reporting that as a completed install tells the
+// instructor a machine is done when nothing was installed on it.
+test('an unfinished guest execution is not completed by an agent that predates this install', async () => {
+  const h = harness({ state: { agentPidFrozen: true },
+    result: () => ({ exited: false, exitcode: -1, stdout: '', stderr: 'Timed out' }) });
+  await h.start(); await h.run();
+  assert.equal(h.job().status, 'failed');
+  assert.equal(h.job().exec_incomplete, true);
+  assert.equal(h.job().agent, undefined, 'an unconfirmed install must not record a previous install\'s agent');
+  assert.match(h.job().error, /did not report completion within 120 seconds/);
+  assert.match(h.job().error, /cannot be told apart from the one an earlier install left running/);
+  assert.deepEqual(h.job().prior_agent, { pid: '3100' });
+});
+
+test('an unfinished guest execution completes when no agent held the paw before it started', async () => {
+  const h = harness({
+    // A first install: Caldera has nothing under this paw until the script runs.
+    agents: (state, fresh) => (state.script ? [fresh()] : []),
+    result: () => ({ exited: false, exitcode: -1, stdout: '', stderr: 'Timed out' }),
+  });
+  await h.start(); await h.run();
+  assert.equal(h.job().status, 'completed');
+  assert.equal(h.job().prior_agent, undefined);
+  assert.equal(h.job().message, 'Agent checked in to Caldera.');
+});
+
+// The refusal to guess. If the server's agent rows carry none of the fields that
+// separate one registered process from the next, the honest answer is "I cannot
+// confirm this", not a success invented from a beacon timestamp the old agent
+// moves forward on its own.
+test('an unfinished guest execution stays unconfirmed when the agent row has no distinguishing field', async () => {
+  const h = harness({ state: { agentOverride: { pid: undefined } },
+    result: () => ({ exited: false, exitcode: -1, stdout: '', stderr: 'Timed out' }) });
+  await h.start(); await h.run();
+  assert.equal(h.job().status, 'failed');
+  assert.deepEqual(h.job().prior_agent, {});
+  assert.match(h.job().error, /this installation is unconfirmed/);
+});
+
+// The exited path is untouched by any of that: the script reported its own
+// completion WITH the startup marker, so the check-in is confirming a fact that
+// is already proved and the predicate stays exactly what it was.
+test('a run that reported completion still settles on the same check-in predicate', async () => {
+  const h = harness({ state: { agentPidFrozen: true } });
+  await h.start(); await h.run();
+  assert.equal(h.job().status, 'completed');
+  assert.equal(h.job().exec_incomplete, undefined);
+  assert.equal(h.state.agentReads, 2);
+});
+
+// job.started_at is stamped BEFORE the guest-agent wait and the 120 s exec
+// deadline, so the check-in loop spends what is left of the SAME window that
+// currentJob() and the atomic claim police. A fixed twelve iterations against a
+// Caldera whose round trip approaches client.js's 20 s ceiling runs the job past
+// JOB_TIMEOUT_MS, where currentJob() rewrites this very verdict to the false
+// "interrupted or timed out" failure and a retry can steal the VM from the
+// installer that is still running.
+test('a slow Caldera cannot push the check-in wait past the job timeout window', async () => {
+  const h = harness({
+    agents: state => { state.clock += 21000; return []; },
+    result: () => ({ exited: false, exitcode: -1, stdout: '', stderr: 'Timed out' }),
+  });
+  await h.start(); await h.run();
+  const job = h.job();
+  assert.equal(job.status, 'failed');
+  assert.ok(h.state.agentReads > 2, 'the loop must still make several attempts while time remains');
+  const elapsed = Date.parse(job.finished_at) - Date.parse(job.started_at);
+  assert.ok(elapsed < JOB_TIMEOUT_MS, `the job has to reach a terminal state inside its own window, took ${elapsed}ms`);
+  h.state.clock = Date.parse(job.started_at) + JOB_TIMEOUT_MS + 1;
+  const shown = (await h.service.status([h.state.lane])).lanes[0].job;
+  assert.match(shown.error, /did not report completion/, 'the honest verdict must survive the timeout sweep');
+  assert.doesNotMatch(shown.error, /interrupted or timed out/);
+});
+
+test('an execution that has already spent the whole window still gets one check-in attempt', async () => {
+  const h = harness({ agents: () => [],
+    result: state => { state.clock += JOB_TIMEOUT_MS; return { exited: false, exitcode: -1, stdout: '', stderr: 'Timed out' }; } });
+  await h.start(); await h.run();
+  assert.equal(h.state.agentReads, 2, 'the preflight plus one attempt: never zero');
+  assert.deepEqual(h.state.sleepCalls, []);
+  assert.equal(h.job().status, 'failed');
+  assert.match(h.job().error, /no Caldera agent checked in/);
+});
+
+// script-executor frames its answer as "Timed out (last exec-status error: ...)"
+// and that framing is the whole reason the field exists -- it is how a wedged
+// QEMU guest agent identifies itself. Keeping only the last 200 characters threw
+// it away for exactly the long Proxmox messages that needed explaining.
+test('a long guest-execution error keeps both its framing and its end', async () => {
+  const h = harness({ agents: () => [],
+    result: state => ({ exited: false, exitcode: -1, stdout: '',
+      stderr: `Timed out (last exec-status error: proxmox said ${'q'.repeat(400)} for /agent/${state.token})` }) });
+  await h.start(); await h.run();
+  assert.match(h.job().error, /Guest execution: Timed out \(last exec-status error: proxmox said q+\.\.\./);
+  assert.match(h.job().error, /\.\.\.q* for \/agent\/\[redacted\]\)$/, 'the end of the guest message survives the elision');
+  assert.equal(JSON.stringify({ job: h.job(), sql: h.state.sql }).includes(h.state.token), false);
+});
+
+test('an unfinished guest execution with no check-in fails naming both facts and redacts the credential', async () => {
+  const h = harness({
+    agents: () => [],
+    result: state => ({ exited: false, exitcode: -1, stdout: '',
+      stderr: 'Timed out (last exec-status error: got 500 for /agent/' + state.token + ')' }),
+  });
+  await h.start(); await h.run();
+  assert.equal(h.job().status, 'failed');
+  assert.match(h.job().error, /did not report completion within 120 seconds/);
+  assert.match(h.job().error, /no Caldera agent checked in/);
+  assert.match(h.job().error, /last exec-status error/, 'a wedged guest agent must still identify itself');
+  assert.doesNotMatch(h.job().error, /^Agent installation failed/);
+  assert.equal(JSON.stringify({ job: h.job(), sql: h.state.sql }).includes(h.state.token), false);
+  assert.equal(h.state.agentReads, 13);
+  assert.equal(h.state.sleepCalls.length, 12);
+});
 
 for (const outcome of ['completed', 'guest failed', 'no check-in', 'missing startup marker']) {
   test(`installation notices survive ${outcome} without replacing startup and check-in requirements`, async () => {
@@ -570,6 +746,159 @@ test('failed power discovery reports unknown power and cannot advertise runnable
   assert.equal(status.lanes[0].targets[0].runnable, false);
   assert.equal(status.lanes[0].targets[0].power_state, 'unknown');
   assert.doesNotMatch(JSON.stringify(status), /private-proxmox-credential/);
+});
+
+// The case the classroom dialog exists for: a GOAD lane whose VM rows carry no
+// OS at all, whose student identity lives in the runner's user JOIN, and whose
+// machine names only mean anything against the authored challenge spec.
+const goadEnvironment = () => ({ label: 'GOAD Active Directory', goad: true, lab: 'GOAD-Light', labLabel: 'GOAD Light',
+  machines: new Map([
+    ['dc01', { name: 'DC01', role: 'dc', os: 'Windows Server 2019', platform: 'windows', infra: false }],
+    ['elk', { name: 'elk', role: 'siem', os: 'Ubuntu 22.04', platform: 'linux', infra: true }],
+  ]) });
+
+function goadHarness(options = {}) {
+  return harness({
+    environments: { describeEnvironments: async () => new Map([['goad-ad', goadEnvironment()]]) },
+    agents: (state, fresh) => [
+      { ...fresh(), paw: pawFor(LANE_ID, 901), platform: 'windows' },
+      { ...fresh(), paw: pawFor(LANE_ID, 902), platform: 'linux', host: 'elk', last_seen: '2026-09-05 19:00:00' },
+    ],
+    ...options,
+    state: {
+      lane: { lane_id: LANE_ID, name: 'cle-cybr400-inperson-10882', status: 'active', vxlan_id: 10882,
+        created_at: '2026-09-01T00:00:00.000Z',
+        first_name: 'Ada', last_name: 'Lovelace', student_email: 'ada@example.test',
+        config: { course_id: COURSE_ID, internet_enabled: true, goad: { lab: 'GOAD-Light' }, challenge_key: 'goad-ad',
+          password: 'lane-password-private', user_email: 'owner-private@example.test',
+          vms: [{ vm_id: 901, name: 'DC01' }, { vm_id: 902, name: 'elk' }, { vm_id: 903, name: 'ws01' }] } },
+      resources: [901, 902, 903].map(vmid => ({ vmid, node: 'actual-node', type: 'qemu', status: 'running' })),
+      ...options.state,
+    },
+  });
+}
+
+test('status names the lane, its student and its GOAD machines from the environment directory', async () => {
+  const h = goadHarness();
+  await h.start({ vm_id: 901, platform: 'windows' });
+  const lane = (await h.service.status([h.state.lane])).lanes[0];
+  assert.equal(lane.lane_number, 10882);
+  assert.equal(lane.vxlan_id, 10882);
+  assert.equal(lane.family, 'cle-cybr400-inperson');
+  assert.equal(lane.kind, 'goad');
+  assert.equal(lane.created_at, '2026-09-01T00:00:00.000Z');
+  assert.deepEqual(lane.student, { name: 'Ada Lovelace', email: 'ada@example.test' });
+  assert.deepEqual(lane.environment, { key: 'goad-ad', label: 'GOAD Active Directory', type: 'goad', lab: 'GOAD Light' });
+  const [dc, elk, ws] = lane.targets;
+  assert.deepEqual([dc.platform, dc.role, dc.os, dc.infra], ['windows', 'dc', 'Windows Server 2019', false]);
+  assert.deepEqual([elk.platform, elk.role, elk.os, elk.infra], ['linux', 'siem', 'Ubuntu 22.04', true]);
+  assert.deepEqual([dc.machine_key, dc.machine_label, dc.environment_key], ['goad-ad::dc01', 'DC01', 'goad-ad']);
+  assert.equal(elk.machine_key, 'goad-ad::elk');
+  // ws01 is deployed in the lane but absent from this roster: it keeps the
+  // config's own (unknown) answer rather than inheriting a neighbour's.
+  assert.deepEqual([ws.platform, ws.os, ws.infra, ws.machine_key], [null, null, false, 'goad-ad::ws01']);
+  assert.deepEqual(Object.keys(dc.agent).sort(), ['fresh', 'host', 'last_seen', 'paw', 'platform', 'trusted']);
+  assert.equal(dc.agent.fresh, true);
+  assert.equal(dc.agent.host, 'LAB-WKS');
+  assert.equal(elk.agent.fresh, false, 'a stale beacon is reported as stale, not hidden');
+  assert.equal(ws.agent, null, 'an agent belongs to the VM whose paw it carries, not to the lane at large');
+  assert.deepEqual(Object.keys(dc.last_job).sort(), ['job_id', 'message', 'platform', 'started_at', 'status']);
+  assert.equal(dc.last_job.status, 'queued');
+  assert.equal(elk.last_job, null);
+  assert.deepEqual(lane.agents.map(agent => [agent.vm_id, agent.fresh]), [[901, true], [902, false]]);
+  assert.doesNotMatch(JSON.stringify(lane),
+    /lane-password-private|owner-private@example|user_email|token_hash|private-server|private-contact|private-pending|private-executor/);
+});
+
+test('a failing environment directory degrades labels without failing the poll or naming an error', async () => {
+  const h = goadHarness({ environments: { describeEnvironments: async () => { throw new Error('private-spec-table-failure'); } } });
+  const status = await h.service.status([h.state.lane]);
+  const lane = status.lanes[0];
+  assert.equal(lane.environment.key, 'goad-ad');
+  assert.equal(lane.environment.label, null);
+  assert.equal(lane.environment.type, 'goad', 'the lane config still classifies the environment');
+  assert.equal(lane.targets[0].platform, null, 'without the spec the OS is unknown again, never guessed');
+  assert.equal(lane.targets[0].machine_key, 'goad-ad::dc01');
+  assert.equal(lane.runnable, true);
+  assert.equal(status.power_error, null);
+  assert.equal(status.agents_error, null);
+  assert.equal(status.environments_error, undefined, 'cosmetic labels must not surface as an inventory error');
+  assert.doesNotMatch(JSON.stringify(status), /private-spec-table-failure/);
+});
+
+// The UI branches on `infra`: infrastructure machines are listed but never
+// auto-selected, and "Only missing agents" selects the non-infra VMs. Deriving
+// the flag from the spec roster ALONE therefore aims those actions at the
+// machines the flag exists to protect. The synthesised attack box is the
+// permanent case -- targetsFor names it 'Attack box' while the roster is keyed
+// by spec machine name, so it can never match -- and a lane VM the spec does not
+// list is the general one.
+test('a machine the spec roster does not name is flagged as infrastructure by its own role', async () => {
+  const h = goadHarness();
+  h.state.lane.config.vms.push({ vm_id: 904, name: 'sensor-01', role: 'sensor' });
+  h.state.lane.config.attack_box_vm_id = 906;
+  h.state.resources.push({ vmid: 904, node: 'actual-node', type: 'qemu', status: 'running' },
+    { vmid: 906, node: 'actual-node', type: 'qemu', status: 'running' });
+  const targets = new Map((await h.service.status([h.state.lane])).lanes[0].targets.map(t => [t.name, t]));
+  assert.equal(targets.get('Attack box').infra, true, 'a Sandcat install must never be aimed at the student\'s own attack box');
+  assert.equal(targets.get('Attack box').role, 'attacker');
+  assert.equal(targets.get('sensor-01').infra, true);
+  assert.equal(targets.get('elk').infra, true, 'the roster still answers for the machines it does name');
+  assert.equal(targets.get('DC01').infra, false, 'a domain controller is a target, not infrastructure');
+  assert.equal(targets.get('ws01').infra, false);
+});
+
+test('a spec outage cannot turn the attack box into an auto-selected target', async () => {
+  const h = goadHarness({ environments: { describeEnvironments: async () => { throw new Error('private-spec-table-failure'); } } });
+  h.state.lane.config.attack_box_vm_id = 906;
+  h.state.resources.push({ vmid: 906, node: 'actual-node', type: 'qemu', status: 'running' });
+  const targets = new Map((await h.service.status([h.state.lane])).lanes[0].targets.map(t => [t.name, t]));
+  assert.equal(targets.get('Attack box').infra, true);
+  // The residual gap, pinned rather than papered over: the GOAD deployer writes
+  // {vm_id, name, proxmox_name, type, node} and no role at all, so with the spec
+  // unreadable there is nothing left that says elk is the evidence plane. Only a
+  // name heuristic could recover it, and fact-source refuses name heuristics for
+  // exactly the reason they are wrong -- a machine called `elk-training-vm` is
+  // not a SIEM. The instructor sees an unflagged elk during an outage.
+  assert.equal(targets.get('elk').infra, false);
+  assert.equal(targets.get('elk').role, '', 'nothing in lane config claims a role for it');
+});
+
+// specMachines defaults a spec row with no os to the literal string 'Unknown',
+// so a spec that names a machine but never says what it runs used to overwrite
+// the config's real template name with a word that answers nothing.
+test('a spec row with no operating system falls through to the template name, then to null', async () => {
+  const h = goadHarness({ environments: { describeEnvironments: async () => new Map([['goad-ad', {
+    label: 'GOAD Active Directory', goad: true, machines: new Map([
+      ['dc01', { name: 'DC01', role: 'dc', os: 'Unknown', platform: 'windows', infra: false }],
+      ['elk', { name: 'elk', role: 'siem', os: 'unknown', platform: 'linux', infra: true }],
+    ]) }]]) } });
+  h.state.lane.config.vms[0].template_name = 'win2019-goad-base';
+  const [dc, elk] = (await h.service.status([h.state.lane])).lanes[0].targets;
+  assert.equal(dc.os, 'win2019-goad-base');
+  assert.equal(dc.platform, 'windows', 'the roster still answers the platform question it did answer');
+  assert.equal(elk.os, null, 'no template either, so the honest answer is that the OS is unknown');
+  assert.equal(elk.infra, true);
+});
+
+test('a lane without join fields or a challenge key has no student and reads no challenge spec', async () => {
+  const h = harness();
+  const lane = (await h.service.status([h.state.lane])).lanes[0];
+  assert.equal(lane.student, null);
+  assert.equal(lane.lane_number, null);
+  assert.equal(lane.family, null);
+  assert.equal(lane.created_at, null);
+  assert.equal(lane.kind, 'course');
+  assert.deepEqual(lane.environment, { key: 'lane', label: null, type: 'challenge', lab: null });
+  assert.equal(lane.targets[0].machine_key, 'lane::windows-workstation');
+  assert.equal(lane.targets[0].infra, false);
+  assert.equal(lane.targets[0].agent.fresh, true);
+  assert.equal(lane.agents[0].vm_id, 901);
+  // This harness uses the real environment directory against the query fake,
+  // which records every statement before rejecting an unrecognised one. A spec
+  // lookup for a lane that names no challenge would be recorded here even
+  // though the directory swallows its own failures.
+  assert.deepEqual(h.state.sql, []);
 });
 
 function addBatchMachines(h, count) {

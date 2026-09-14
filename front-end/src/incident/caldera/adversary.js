@@ -219,8 +219,17 @@ function parentTechnique(id) {
  * code path than production does — which is how a mapping bug survives a green
  * suite.
  *
+ * `technique_name` and `description` ride along for the classroom profile card,
+ * which has to tell an instructor what a step actually does. Both are absent
+ * from the YAML shape and from most API rows, so both collapse to null rather
+ * than to '' — a key whose value differed between the two accepted shapes would
+ * break the very equivalence this function exists to guarantee. That is also why
+ * `executors` is read for its platforms but never re-emitted: the YAML shape has
+ * no executors at all, so emitting them would make the two shapes disagree.
+ *
  * @returns {{id: string, technique: string, platforms: string[], name: string,
- *            tactic: string|null}|null} null for a row with no id or no technique
+ *            tactic: string|null, technique_name: string|null,
+ *            description: string|null}|null} null for a row with no id or no technique
  */
 function normalizeAbility(raw) {
   if (!raw || typeof raw !== 'object') return null;
@@ -248,6 +257,8 @@ function normalizeAbility(raw) {
     platforms: [...platforms].sort(),
     name: str(raw.name || raw.ability_name) || id,
     tactic: str(raw.tactic) || null,
+    technique_name: str(raw.technique_name) || null,
+    description: str(raw.description) || null,
   };
 }
 

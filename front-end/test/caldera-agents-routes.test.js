@@ -9,14 +9,64 @@ const path = require('node:path');
 const ROOT = path.join(__dirname, '..');
 const CLE = path.join(ROOT, 'modules/crucible/plugins/cle');
 const { createService, hashToken, groupFor, pawFor } = require('../src/utils/caldera-lane-agents');
+// Required BEFORE the require.cache overrides at the bottom of this preamble.
+// This module destructures caldera-lane-agents at load time, so resolving it
+// after that module has been replaced by the `{ createService }` stub would
+// leave targetsFor, laneContext and enrichTargets undefined.
+const operationsModule = require('../src/utils/caldera-lane-operations');
 const COURSE = '11111111-1111-1111-1111-111111111111';
 const OTHER_COURSE = '22222222-2222-2222-2222-222222222222';
 const LANE = '33333333-3333-3333-3333-333333333333';
 const OTHER_LANE = '44444444-4444-4444-4444-444444444444';
+const GOAD_LANE = '66666666-6666-6666-6666-666666666666';
 const TOKEN = 'a'.repeat(64);
 const API_KEY = 'private-red-api-key';
 const state = {};
 const clone = value => JSON.parse(JSON.stringify(value));
+
+// The GOAD lab roster is INJECTED, never required: goad-deploy pulls the script
+// executor and the database pool at load time, so a route test that let the
+// environment directory reach the real module would open a connection pool for
+// the sake of two machine labels.
+const goadLab = {
+  resolveGoadLab: () => ({
+    labName: 'GOAD-Light',
+    labDef: { displayName: 'GOAD Light', vms: [
+      { name: 'DC01', role: 'dc', os: 'Windows Server 2019' },
+      { name: 'ws01', role: 'workstation', os: 'Windows 11' },
+    ] },
+    extensions: { external: ['elk'] },
+  }),
+  getExtension: name => name === 'elk' ? { machine: 'elk', role: 'siem', os: 'Ubuntu 22.04' } : null,
+};
+// One authored spec, registered under a different key per test. The environment
+// directory memoises for a minute against the injected clock, which never moves,
+// so two tests sharing a key would make the second one's read count depend on
+// the order the runner happened to pick.
+const GOAD_SPEC = { name: 'GOAD Active Directory', spec: { goad: { enabled: true, lab: 'GOAD-Light' } } };
+const SPECS = { 'goad-agents': GOAD_SPEC, 'goad-operations': GOAD_SPEC, 'goad-leak': GOAD_SPEC };
+
+// A lane carrying everything the runner's JOIN adds (vxlan_id, created_at and
+// the student's name) beside a config that names a challenge, plus two config
+// fields that must never reach the wire.
+function goadLane(challengeKey, config = {}) {
+  return { lane_id: GOAD_LANE, name: 'cle-cybr400-inperson-10882', status: 'active',
+    vxlan_id: 10882, created_at: '2026-09-01T00:00:00.000Z',
+    first_name: 'Ada', last_name: 'Lovelace', student_email: 'ada@example.test',
+    config: { course_id: COURSE, internet_enabled: true, challenge_key: challengeKey,
+      goad: { lab: 'GOAD-Light' },
+      user_email: 'owner-private@example.test', lane_password: 'private-lane-password',
+      vms: [{ vm_id: 901, name: 'DC01', type: 'qemu', node: 'node-one' },
+        { vm_id: 902, name: 'elk', type: 'qemu', node: 'node-one' }],
+      ...config } };
+}
+
+// Registers the GOAD lane in the course and gives its two guests live power.
+function addGoadLane(challengeKey, config) {
+  state.lanes.push(goadLane(challengeKey, config));
+  state.resources.push({ vmid: 901, type: 'qemu', status: 'running', node: 'node-one' },
+    { vmid: 902, type: 'qemu', status: 'running', node: 'node-one' });
+}
 
 function reset() {
   state.course = { course_id: COURSE, code: 'CYBR400-01', course_name: 'Blue Team', features: { blue_team: true } };
@@ -33,6 +83,9 @@ function reset() {
   }, { paw: 'foreign-agent', host: 'OTHER-DC', group: groupFor(OTHER_LANE), platform: 'windows' }];
   state.scopeCalls = [];
   state.queries = [];
+  // Every challenge-spec lookup the environment directory issued, table and all.
+  // A lane that names no challenge must add nothing here.
+  state.specReads = [];
   state.tasks = [];
   state.audits = [];
   state.agentReads = 0;
@@ -53,41 +106,74 @@ function eligibleLane(lane) {
       || lane.config.goad?.status === 'failed'));
 }
 
+// Shared by both classroom services, so one Proxmox outage and one recorded
+// statement log cover the install dialog and the attack dialog alike.
+async function fakeProxmox(method, endpoint) {
+  assert.equal(method, 'GET');
+  assert.equal(endpoint, '/api2/json/cluster/resources?type=vm');
+  if (state.powerError) throw new Error('private Proxmox failure');
+  return clone(state.resources);
+}
+
+async function fakeQuery(sql, params) {
+  state.queries.push({ sql, params });
+  if (state.dbError) throw new Error('private database failure');
+  // The environment directory's two-rung table ladder. Recorded separately so
+  // a test can prove a lane without a challenge_key never reaches it: the
+  // directory swallows its own failures, so an unwanted lookup would otherwise
+  // be invisible.
+  const spec = /SELECT name, spec FROM (\w+) WHERE challenge_key = \$1/.exec(sql);
+  if (spec) {
+    state.specReads.push({ table: spec[1], key: params[0] });
+    return { rows: SPECS[params[0]] ? [clone(SPECS[params[0]])] : [] };
+  }
+  if (/UPDATE cybercore_lane/.test(sql) && /RETURNING lane_id/.test(sql)) {
+    const lane = state.lanes.find(row => row.lane_id === params[0] && eligibleLane(row));
+    const prior = lane?.config.caldera_agent_jobs?.[params[2]] || lane?.config.caldera_agent_job;
+    if (!lane || (String(prior?.vm_id) === params[2] && ['queued', 'running'].includes(prior?.status))) return { rows: [] };
+    lane.config.caldera_agent_job = JSON.parse(params[1]);
+    lane.config.caldera_agent_jobs ||= {};
+    lane.config.caldera_agent_jobs[params[2]] = lane.config.caldera_agent_job;
+    const token = JSON.parse(params[3]);
+    lane.config.caldera_agent_access = { tokens: (lane.config.caldera_agent_access?.tokens || []).filter(row => row.vm_id !== token.vm_id).concat(token) };
+    return { rows: [{ lane_id: lane.lane_id }] };
+  }
+  if (/SELECT l\.lane_id/.test(sql)) {
+    const wanted = params[0];
+    const lane = state.lanes.find(row => eligibleLane(row)
+      && row.config.caldera_agent_access?.tokens.some(token => token.token_hash === wanted));
+    const token = lane?.config.caldera_agent_access.tokens.find(item => item.token_hash === wanted);
+    return { rows: lane ? [{ lane_id: lane.lane_id, status: lane.status, config: clone(lane.config), paw: token.paw, vm_id: String(token.vm_id) }] : [] };
+  }
+  throw new Error('Unexpected database query in route test');
+}
+
 const service = createService({
   now: () => Date.parse('2026-09-05T01:00:00Z'),
   settings: () => ({ serverUrl: 'https://agents.test.example', consoleUrl: 'https://console.test.example/', apiKey: API_KEY,
     client: { listAgents: async () => { state.agentReads++; return clone(state.agents); } },
   }),
   schedule: task => state.tasks.push(task),
-  proxmox: async (method, endpoint) => {
-    assert.equal(method, 'GET');
-    assert.equal(endpoint, '/api2/json/cluster/resources?type=vm');
-    if (state.powerError) throw new Error('private Proxmox failure');
-    return clone(state.resources);
-  },
-  query: async (sql, params) => {
-    state.queries.push({ sql, params });
-    if (state.dbError) throw new Error('private database failure');
-    if (/UPDATE cybercore_lane/.test(sql) && /RETURNING lane_id/.test(sql)) {
-      const lane = state.lanes.find(row => row.lane_id === params[0] && eligibleLane(row));
-      const prior = lane?.config.caldera_agent_jobs?.[params[2]] || lane?.config.caldera_agent_job;
-      if (!lane || (String(prior?.vm_id) === params[2] && ['queued', 'running'].includes(prior?.status))) return { rows: [] };
-      lane.config.caldera_agent_job = JSON.parse(params[1]);
-      lane.config.caldera_agent_jobs ||= {};
-      lane.config.caldera_agent_jobs[params[2]] = lane.config.caldera_agent_job;
-      const token = JSON.parse(params[3]);
-      lane.config.caldera_agent_access = { tokens: (lane.config.caldera_agent_access?.tokens || []).filter(row => row.vm_id !== token.vm_id).concat(token) };
-      return { rows: [{ lane_id: lane.lane_id }] };
-    }
-    if (/SELECT l\.lane_id/.test(sql)) {
-      const wanted = params[0];
-      const lane = state.lanes.find(row => eligibleLane(row)
-        && row.config.caldera_agent_access?.tokens.some(token => token.token_hash === wanted));
-      const token = lane?.config.caldera_agent_access.tokens.find(item => item.token_hash === wanted);
-      return { rows: lane ? [{ lane_id: lane.lane_id, status: lane.status, config: clone(lane.config), paw: token.paw, vm_id: String(token.vm_id) }] : [] };
-    }
-    throw new Error('Unexpected database query in route test');
-  },
+  goad: goadLab,
+  proxmox: fakeProxmox,
+  query: fakeQuery,
+});
+
+// The REAL operations service, so the attack dialog's payload is asserted as the
+// route actually emits it rather than as a hand-written stub imagines it. Its
+// Caldera read deliberately does NOT touch state.agentReads: that counter is the
+// install dialog's evidence that a refused request reached no remote service, and
+// sharing it would make those assertions depend on the attack dialog's traffic.
+const operations = operationsModule.createService({
+  now: () => Date.parse('2026-09-05T01:00:00Z'),
+  goad: goadLab,
+  proxmox: fakeProxmox,
+  query: fakeQuery,
+  client: () => ({
+    listAgents: async () => clone(state.agents),
+    listAdversaries: async () => [{ adversary_id: 'discovery', name: 'Discovery', description: 'Look around.', atomic_ordering: ['one'] }],
+    listOperations: async () => [],
+  }),
 });
 
 function put(relative, exports) {
@@ -107,10 +193,13 @@ put('src/incident/board', {
 });
 put('src/incident/caldera/authoring', {});
 put('src/routes/caldera-authoring', { authoringConfig: () => ({}), PUBLIC_PATH: '/caldera' });
+// status() delegates to the real service; launch and stop stay fakes because
+// those tests are about which lanes the route resolves and hands over, not about
+// dispatching an operation to Caldera.
 put('src/utils/caldera-lane-operations', { createService: () => ({
   status: async (lanes, context) => {
     state.operationCalls.push({ action: 'status', lanes, context });
-    return { adversaries: [], lanes: lanes.map(lane => ({ lane_id: lane.lane_id, operations: [] })) };
+    return operations.status(lanes, context);
   },
   ...Object.fromEntries(['launch', 'stop'].map(action => [action, async (lanes, body, context) => {
     if (!Array.isArray(body.lane_ids) || body.lane_ids.some(id => !lanes.some(lane => lane.lane_id === id))) {
@@ -374,6 +463,97 @@ test('installation returns 202 with a public job, ignores caller destinations, a
   assert.equal(state.audits.length, 1);
 });
 
+test('the install dialog names each lane, its student and its machines from the challenge spec', async () => {
+  addGoadLane('goad-agents');
+  const response = await getStatus();
+  assert.equal(response.status, 200);
+  const lane = response.body.lanes.find(row => row.lane_id === GOAD_LANE);
+  assert.equal(lane.vxlan_id, 10882);
+  assert.equal(lane.lane_number, 10882);
+  assert.equal(lane.family, 'cle-cybr400-inperson');
+  assert.equal(lane.kind, 'goad');
+  assert.equal(lane.created_at, '2026-09-01T00:00:00.000Z');
+  assert.deepEqual(lane.student, { name: 'Ada Lovelace', email: 'ada@example.test' });
+  assert.deepEqual(lane.environment, { key: 'goad-agents', label: 'GOAD Active Directory', type: 'goad', lab: 'GOAD Light' });
+  // The deployer writes {vm_id, name, proxmox_name, type, node} with no OS, so
+  // every one of these answers comes from the spec join the route now performs.
+  const [dc, elk] = lane.targets;
+  assert.deepEqual([dc.platform, dc.role, dc.os, dc.infra, dc.machine_key],
+    ['windows', 'dc', 'Windows Server 2019', false, 'goad-agents::dc01']);
+  assert.deepEqual([elk.platform, elk.role, elk.os, elk.infra, elk.machine_key],
+    ['linux', 'siem', 'Ubuntu 22.04', true, 'goad-agents::elk']);
+  // The install dialog is the endpoint that carries per-machine job history; the
+  // key is present and null here, which is what makes its ABSENCE on the attack
+  // endpoint below a real assertion rather than a missing-property tautology.
+  assert.ok('last_job' in dc);
+  assert.equal(dc.last_job, null);
+  assert.deepEqual(state.specReads, [{ table: 'crucible_challenge', key: 'goad-agents' }],
+    'one spec read for the whole course, not one per lane');
+});
+
+test('a lane that names no challenge reads no challenge spec at all', async () => {
+  const response = await getStatus();
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body.lanes.map(row => row.lane_id), [LANE]);
+  const lane = response.body.lanes[0];
+  assert.equal(lane.student, null, 'an admin-scoped row without the runner JOIN has no student');
+  assert.deepEqual(lane.environment, { key: 'lane', label: null, type: 'challenge', lab: null });
+  assert.equal(lane.targets[0].machine_key, 'lane::windows-11');
+  // Workstation lanes carry the course's reserved-network challenge_key, so a
+  // directory keyed on "has a challenge_key" would fire this lookup 44 times per
+  // poll for a spec that describes none of those machines. The query fake
+  // records every statement before rejecting an unrecognised one, so a lookup
+  // fired here would be visible even though the directory swallows its failures.
+  assert.deepEqual(state.specReads, []);
+  assert.deepEqual(state.queries, []);
+});
+
+test('the attack dialog receives lane lifecycle, internet and enriched machine rows', async () => {
+  state.agents[0].paw = pawFor(LANE, 101);
+  addGoadLane('goad-operations', { internet_enabled: false });
+  const response = await request(courseRouter, 'GET', '/caldera-operations/status');
+  assert.equal(response.status, 200);
+  assert.equal(state.operationCalls.at(-1).action, 'status');
+  const own = response.body.lanes.find(row => row.lane_id === LANE);
+  assert.equal(own.lane_status, 'active');
+  assert.equal(own.lifecycle_eligible, true);
+  assert.equal(own.retained_after_failure, false);
+  assert.equal(own.internet_enabled, true);
+  assert.equal(own.runnable, true);
+  assert.deepEqual(own.targets.map(vm => [vm.vm_id, vm.power_state, vm.runnable]), [[101, 'running', true]]);
+  assert.deepEqual(own.agents.map(agent => [agent.vm_id, agent.machine_key]), [[101, 'lane::windows-11']]);
+  const goad = response.body.lanes.find(row => row.lane_id === GOAD_LANE);
+  // The three causes stay separate. Folding them into `runnable` is what made
+  // every agent-less lane report "lane not running" and made "internet off"
+  // unreachable in the dialog.
+  assert.equal(goad.lifecycle_eligible, true);
+  assert.equal(goad.internet_enabled, false);
+  assert.equal(goad.runnable, false);
+  assert.deepEqual(goad.student, { name: 'Ada Lovelace', email: 'ada@example.test' });
+  assert.deepEqual(goad.environment, { key: 'goad-operations', label: 'GOAD Active Directory', type: 'goad', lab: 'GOAD Light' });
+  assert.deepEqual(goad.targets.map(vm => [vm.machine_key, vm.platform, vm.power_state]),
+    [['goad-operations::dc01', 'windows', 'running'], ['goad-operations::elk', 'linux', 'running']]);
+  assert.ok(!('last_job' in goad.targets[0]), 'the attack dialog never asks for install job history');
+  assert.deepEqual(state.specReads, [{ table: 'crucible_challenge', key: 'goad-operations' }]);
+});
+
+test('neither classroom status route emits a lane config field that was never enumerated', async () => {
+  addGoadLane('goad-leak');
+  const agents = await getStatus();
+  const attack = await request(courseRouter, 'GET', '/caldera-operations/status');
+  assert.equal(agents.status, 200);
+  assert.equal(attack.status, 200);
+  const wire = JSON.stringify([agents.body, attack.body]);
+  // Lane config carries the owner's email next to the lane password and has
+  // historically carried guest credentials, and both of these payloads are
+  // polled into an instructor's browser every five seconds.
+  assert.doesNotMatch(wire, /owner-private@example|private-lane-password|private-lane-config|private-red-api-key/);
+  assert.doesNotMatch(wire, /user_email|lane_password|caldera_agent_access|token_hash|unrelated_secret|executors/);
+  // The student's own address is the one identity this payload may carry, and it
+  // comes from the runner's cybercore_user JOIN rather than from config.
+  assert.ok(wire.includes('ada@example.test'));
+});
+
 test('agent status wins Express matching before the incident run status route', async () => {
   const response = await getStatus();
   assert.equal(response.status, 200);
@@ -381,6 +561,14 @@ test('agent status wins Express matching before the incident run status route', 
   assert.equal(state.runReads, 0);
   const paths = courseRouter.stack.filter(layer => layer.route).map(layer => layer.route.path);
   assert.ok(paths.indexOf('/caldera-agents/status') < paths.indexOf('/:runId/status'));
+  // Every classroom route is a literal path registered ahead of the run-id
+  // wildcard. One of them landing after '/:runId' would be answered by the board
+  // handler with 'caldera-operations' as a run id.
+  for (const literal of ['/caldera-agents/status', '/caldera-agents', '/caldera-agents/batch',
+    '/caldera-operations/status', '/caldera-operations', '/caldera-operations/stop']) {
+    assert.ok(paths.includes(literal), `${literal} is not registered`);
+    assert.ok(paths.indexOf(literal) < paths.indexOf('/:runId'), `${literal} must precede /:runId`);
+  }
 });
 
 test('callback authorization accepts only a known token on the three agent routes and never console paths', async () => {

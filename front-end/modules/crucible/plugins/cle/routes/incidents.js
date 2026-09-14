@@ -412,7 +412,19 @@ router.get('/caldera-operations/status', async (req, res) => {
     const ctx = await loadStaffCourse(req, res);
     if (!ctx) return;
     res.set('Cache-Control', 'no-store');
-    res.json(await operationService().status(await courseAgentLanes(ctx.courseId), { courseId: ctx.courseId }));
+    // The selected profile narrows the ability catalog this payload carries:
+    // full step detail ships for this one adversary, every other profile ships
+    // only its summary. Without it the catalog was 160 KB of a 238 KB no-store
+    // payload polled every five seconds, growing with every profile authored.
+    //
+    // Express hands back an array for a repeated `?adversary_id=` and an object
+    // for `?adversary_id[x]=y`, so the type check is what stops a crafted query
+    // string from reaching the service as something other than a string. The
+    // value is a lookup key compared against Caldera's own profile list and is
+    // never interpolated into SQL or into a path.
+    const requested = req.query && req.query.adversary_id;
+    const adversaryId = typeof requested === 'string' && requested.length <= 200 ? requested : undefined;
+    res.json(await operationService().status(await courseAgentLanes(ctx.courseId), { courseId: ctx.courseId, adversaryId }));
   } catch (error) { fail(res, error, 'GET /caldera-operations/status'); }
 });
 

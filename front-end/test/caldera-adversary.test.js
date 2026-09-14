@@ -619,8 +619,46 @@ test('E9-G2: both documented catalog shapes normalize to the same ability', () =
   });
   assert.deepStrictEqual(fromApi, fromYaml);
   assert.deepStrictEqual(fromApi.platforms, ['linux', 'windows'], 'platforms are sorted');
+  // The classroom profile card reads these two. Neither documented shape above
+  // carries them, so both MUST be null on both -- a field derived from a key only
+  // one shape has (executors, say) would make the deepStrictEqual above a lie.
+  assert.strictEqual(fromApi.technique_name, null, 'an API row without a technique name yields null');
+  assert.strictEqual(fromYaml.technique_name, null, 'and so does the YAML shape');
+  assert.strictEqual(fromApi.description, null, 'an API row without a description yields null');
+  assert.strictEqual(fromYaml.description, null, 'and so does the YAML shape');
+  assert.ok(!('executors' in fromApi),
+    'executors are read for their platforms but never re-emitted: the YAML shape has none');
   assert.strictEqual(adversaryMod.normalizeAbility({ id: 'y' }), null,
     'a row with no technique cannot be mapped and must be dropped, with a warning from the caller');
+});
+
+test('E9-G2b: technique names and descriptions survive normalisation, blank ones become null', () => {
+  // Carried so the classroom profile card can say what a step does instead of
+  // showing a bare T-number. str() trims, so a catalog row padded with spaces
+  // must not produce a blank line in the UI -- it must be indistinguishable from
+  // a row that omitted the field, or the card renders an empty <details> body.
+  const described = adversaryMod.normalizeAbility({
+    ability_id: 'x', technique_id: 'T1082', name: 'System Information Discovery',
+    technique_name: '  System Information Discovery  ',
+    description: '  Collect detailed information about the operating system.  ',
+    executors: [{ platform: 'windows' }],
+  });
+  assert.strictEqual(described.technique_name, 'System Information Discovery');
+  assert.strictEqual(described.description, 'Collect detailed information about the operating system.');
+
+  const blank = adversaryMod.normalizeAbility({
+    id: 'x', technique: 'T1082', name: 'Discovery', technique_name: '   ',
+    description: '\n\t ',
+  });
+  assert.strictEqual(blank.technique_name, null, 'whitespace is not a technique name');
+  assert.strictEqual(blank.description, null, 'whitespace is not a description');
+
+  // The compiler, the fact source and the snapshot all whitelist the fields they
+  // read, so two extra keys cannot reach an answer key or a stored snapshot.
+  const missing = adversaryMod.normalizeAbility({ id: 'x', technique: 'T1082' });
+  assert.strictEqual(missing.technique_name, null);
+  assert.strictEqual(missing.description, null);
+  assert.strictEqual(missing.name, 'x', 'a nameless row still falls back to its id');
 });
 
 test('E9-G3: a structurally invalid scenario throws rather than compiling to nothing', () => {

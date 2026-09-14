@@ -79,7 +79,14 @@ profiles/
 vuln-assets/
 docker-compose.yml
 GOAD-main/
-logs/*
+# A pattern containing a slash is anchored to the directory holding this file,
+# so the old `logs/*` only ever covered the repository-root logs directory.
+# front-end/logs/ is where the test suite writes security-*.jsonl at runtime, and
+# every run left those as untracked noise in `git status` -- which is exactly how
+# three of them came to be committed by accident. `logs/` has its only slash at
+# the END, which git does not treat as anchoring, so it matches a directory named
+# logs at ANY depth while still refusing to match a FILE of that name.
+logs/
 
 # clinic
 config/n8n/workflows/Clinic-in-a-Box*

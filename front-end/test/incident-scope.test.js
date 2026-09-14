@@ -128,9 +128,17 @@ test('everything except the WHERE arm is identical across scopes', () => {
 
   const sql = strip('course');
   for (const col of ['l.lane_id', 'l.user_id', 'l.name', 'l.status', 'l.module_key', 'l.config',
+                     'l.vxlan_id', 'l.created_at',
                      'u.email AS student_email', 'u.first_name', 'u.last_name']) {
     assert.ok(sql.includes(col), `the shared SELECT lost ${col}`);
   }
+
+  // includes() alone is too weak for l.created_at: the ORDER BY already names
+  // it, so the presence loop would keep passing with the column absent from the
+  // projection. The Caldera classroom dialogs label and group lane chips by
+  // lane number and deployment date, and a column that only orders the result
+  // reaches no row — so pin both to the SELECT list itself.
+  assert.match(sql, /l\.config, l\.vxlan_id, l\.created_at, u\.email AS student_email/);
   assert.match(sql, /JOIN cybercore_user u ON u\.user_id = l\.user_id/);
   assert.match(sql, /ORDER BY u\.email, l\.created_at DESC/);
 });
