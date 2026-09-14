@@ -1,224 +1,169 @@
-/**
- * node-bridges.test.js -- "does this node actually have this SDN bridge yet?"
- *
- * WHAT THIS IS DEFENDING
- * Creating an environment commits a VXLAN block with one cluster-wide
- * `PUT /cluster/sdn`. That creates no bridges: it makes every node queue its OWN
- * "SRV Networking" reload (ifreload -a), and with hundreds of VNets in the shared
- * zone those land minutes to HOURS apart. A lane placed on a node whose reload has
- * not finished clones perfectly and then dies at `pct start`:
- *
- *     bridge 'aaaabgdc' does not exist
- *
- * So placement asks this module first. Two properties matter more than the rest:
- *
- *   1. THE PREDICATE IS STRICT. GET /nodes/<node>/network is built from the node's
- *      interface CONFIG, and that includes the generated interfaces.d/sdn, which is
- *      written at the START of the reload task. Proxmox marks a row active/exists
- *      only once the interface really is there. A "is it listed" check therefore
- *      reports every VNet as present for the whole hours-long window this exists
- *      for -- the exact false positive it is supposed to catch.
- *
- *   2. IT NEVER THROWS. A node mid-ifreload can simply stop answering. That means
- *      "not this node", which is a placement decision, not a failed deploy.
- *
- * Run: node --test test/node-bridges.test.js
- */
-
+﻿/** Kernel bridge readiness, independent of Proxmox configuration inventory. */
 const { test, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const path = require('node:path');
-
 const UTILS = path.join(__dirname, '..', 'src', 'utils');
-
-// ── the stubbed cluster ──────────────────────────────────────────────────────
-
-let rowsByNode = {};       // node -> the rows GET /nodes/<n>/network answers with
-let failNodes = {};        // node -> error message it throws instead
-let slowNodes = {};        // node -> ms before it answers
-let calls = [];            // every path that crossed the wire
-let optsSeen = [];         // the 4th argument, so the per-call timeout is provable
-let inFlight = 0;
-let peakInFlight = 0;
-
-require.cache[require.resolve(path.join(UTILS, 'proxmox.js'))] = {
-  id: 'proxmox', filename: 'proxmox', loaded: true,
-  exports: {
-    PROXMOX_URL: 'https://stub',
-    async proxmoxAPI(method, apiPath, body, opts) {
-      calls.push(apiPath);
-      optsSeen.push(opts);
-      const m = apiPath.match(/\/api2\/json\/nodes\/([^/]+)\/network$/);
-      if (!m) throw new Error(`unexpected call: ${method} ${apiPath}`);
-      const node = m[1];
-      inFlight++;
-      peakInFlight = Math.max(peakInFlight, inFlight);
-      try {
-        if (slowNodes[node]) await new Promise(r => setTimeout(r, slowNodes[node]));
-        if (failNodes[node]) throw new Error(failNodes[node]);
-        return rowsByNode[node] || [];
-      } finally {
-        inFlight--;
-      }
-    },
+let rowsByNode = {}, rawByNode = {}, failNodes = {}, slowNodes = {};
+let calls = [], apiCalls = [], inFlight = 0, peakInFlight = 0;
+function stub(file, exports) {
+  const p = require.resolve(path.join(UTILS, file));
+  require.cache[p] = { id: p, filename: p, loaded: true, exports };
+}
+stub('proxmox.js', {
+  async proxmoxAPI(method, apiPath) {
+    apiCalls.push(apiPath);
+    // Proxmox's normal inventory omits existing SDN interfaces.
+    if (/\/network$/.test(apiPath)) return [{ iface: 'vmbr0', active: 1 }];
+    throw new Error(`unexpected API request: ${method} ${apiPath}`);
   },
-};
-
-const {
-  bridgeIsUp, readNodeBridges, bridgeNames, probeNodesForBridges, BRIDGE_PROBE_MS,
-} = require(path.join(UTILS, 'node-bridges.js'));
-
+});
+stub('node-ssh.js', {
+  async nodeExec(node, command, opts) {
+    calls.push({ node, command, opts });
+    inFlight++;
+    peakInFlight = Math.max(peakInFlight, inFlight);
+    try {
+      if (slowNodes[node]) await new Promise(r => setTimeout(r, slowNodes[node]));
+      if (failNodes[node]) throw new Error(failNodes[node]);
+      const stdout = Object.hasOwn(rawByNode, node)
+        ? rawByNode[node] : JSON.stringify(rowsByNode[node] || []);
+      return { stdout, stderr: '' };
+    } finally { inFlight--; }
+  },
+});
+const { bridgeIsUp, readNodeBridges, bridgeNames, probeNodesForBridges, BRIDGE_PROBE_MS } =
+  require(path.join(UTILS, 'node-bridges.js'));
 beforeEach(() => {
-  rowsByNode = {}; failNodes = {}; slowNodes = {};
-  calls = []; optsSeen = []; inFlight = 0; peakInFlight = 0;
+  rowsByNode = {}; rawByNode = {}; failNodes = {}; slowNodes = {};
+  calls = []; apiCalls = []; inFlight = 0; peakInFlight = 0;
 });
+const up = (...names) => names.map(ifname => ({
+  ifname, flags: ['BROADCAST', 'MULTICAST', 'UP', 'LOWER_UP'], operstate: 'UP',
+}));
 
-const up = (...names) => names.map(iface => ({ iface, active: 1 }));
-
-// ── the predicate ────────────────────────────────────────────────────────────
-
-test('bridgeIsUp: active or exists is the evidence; being LISTED is not', () => {
-  assert.strictEqual(bridgeIsUp({ iface: 'aaaabgdc', active: 1 }), true);
-  assert.strictEqual(bridgeIsUp({ iface: 'aaaabgdc', exists: 1 }), true,
-    'exists alone is kernel-level truth too -- active is not set for every type');
-  assert.strictEqual(bridgeIsUp({ iface: 'aaaabgdc', active: 1, exists: 1 }), true);
-
-  // THE CASE THIS MODULE EXISTS FOR: the vnet is in interfaces.d/sdn, written at
-  // the start of the srvreload task, and ifreload has not created it yet.
-  assert.strictEqual(bridgeIsUp({ iface: 'aaaabgdc' }), false,
-    'listed with no active/exists means configured, NOT up');
-  assert.strictEqual(bridgeIsUp({ iface: 'aaaabgdc', active: 0 }), false);
-  assert.strictEqual(bridgeIsUp({ iface: 'aaaabgdc', active: 0, exists: 0 }), false);
+test('bridgeIsUp requires a kernel interface name and administrative UP flag', () => {
+  assert.strictEqual(bridgeIsUp(up('aaaabgdc')[0]), true);
+  for (const row of [
+    { ifname: 'aaaabgdc', flags: ['BROADCAST', 'MULTICAST'] },
+    { ifname: 'aaaabgdc', operstate: 'UP' },
+    { ifname: 'aaaabgdc', flags: 'UP' },
+    { ifname: 'aaaabgdc', flags: ['LOWER_UP'] },
+  ]) assert.strictEqual(bridgeIsUp(row), false);
 });
-
-test('bridgeIsUp: the API answers strings, so the comparison must not be ===1 on a string', () => {
-  // pvesh/pveproxy hand numbers back as JSON numbers, but a proxy or an older
-  // release can stringify them. Number() both sides rather than trust the type.
-  assert.strictEqual(bridgeIsUp({ iface: 'x', active: '1' }), true);
-  assert.strictEqual(bridgeIsUp({ iface: 'x', exists: '1' }), true);
-  assert.strictEqual(bridgeIsUp({ iface: 'x', active: '0' }), false);
-});
-
-test('bridgeIsUp: junk is not a bridge', () => {
-  for (const junk of [null, undefined, {}, { active: 1 }, { iface: '', active: 1 }, { iface: 42, active: 1 }]) {
-    assert.strictEqual(bridgeIsUp(junk), false, `accepted ${JSON.stringify(junk)}`);
+test('an empty bridge is usable without carrier when administratively UP', () => {
+  for (const operstate of ['DOWN', 'UNKNOWN']) {
+    assert.strictEqual(bridgeIsUp({
+      ifname: 'aaaabgdc', flags: ['NO-CARRIER', 'BROADCAST', 'MULTICAST', 'UP'], operstate,
+    }), true);
   }
 });
-
-// ── one node ─────────────────────────────────────────────────────────────────
-
-test('readNodeBridges returns only the interfaces that are actually up', async () => {
-  rowsByNode.n1 = [
-    { iface: 'vmbr0', active: 1 },
-    { iface: 'aaaabgdc', active: 1 },
-    { iface: 'aaaabgdd' },              // configured, reload has not reached it
-    { iface: 'aaaabgde', active: 0 },
-  ];
-  const seen = await readNodeBridges('n1');
-  assert.deepStrictEqual([...seen].sort(), ['aaaabgdc', 'vmbr0']);
+test('synthetic API active/exists values cannot prove kernel bridge readiness', () => {
+  for (const row of [
+    { iface: 'aaaabgdc', active: 1 }, { iface: 'aaaabgdc', exists: 1 },
+    { ifname: 'aaaabgdc', active: 1, exists: 1 },
+    { ifname: 'aaaabgdc', flags: [], active: 1 },
+  ]) assert.strictEqual(bridgeIsUp(row), false);
 });
-
-test('readNodeBridges carries its own timeout: a wedged node cannot hold the default 30s', async () => {
+test('bridgeIsUp rejects malformed rows', () => {
+  for (const row of [null, undefined, {}, { flags: ['UP'] },
+    { ifname: '', flags: ['UP'] }, { ifname: 42, flags: ['UP'] }]) {
+    assert.strictEqual(bridgeIsUp(row), false);
+  }
+});
+test('an SDN bridge absent from API inventory is ready when present in the kernel', async () => {
+  rowsByNode.n1 = up('vmbr0', 'aaaabhed');
+  const result = await probeNodesForBridges(['n1'], ['aaaabhed']);
+  assert.deepStrictEqual(result.ready, ['n1']);
+  assert.deepStrictEqual(result.missingByNode, {});
+  assert.deepStrictEqual(apiCalls, [], 'configuration and task APIs cannot decide readiness');
+  assert.deepStrictEqual(calls[0].command, ['ip', '-j', 'link', 'show', 'type', 'bridge']);
+});
+test('readNodeBridges returns only bridges with kernel UP flags', async () => {
+  rowsByNode.n1 = [...up('vmbr0', 'aaaabgdc'),
+    { ifname: 'aaaabgdd', flags: ['BROADCAST', 'MULTICAST'], operstate: 'DOWN' },
+    { iface: 'aaaabgde', active: 1 }];
+  assert.deepStrictEqual([...(await readNodeBridges('n1'))].sort(), ['aaaabgdc', 'vmbr0']);
+});
+test('legacy listed mode cannot admit a bridge without kernel evidence', async () => {
+  rowsByNode.n1 = [{ ifname: 'aaaabgdc', flags: [] }];
+  assert.strictEqual((await readNodeBridges('n1', { mode: 'listed' })).size, 0);
+});
+test('readNodeBridges forwards the bounded SSH timeout', async () => {
   rowsByNode.n1 = up('aaaabgdc');
   await readNodeBridges('n1', { perCallMs: 1234 });
-  assert.deepStrictEqual(optsSeen[0], { timeoutMs: 1234 });
-
-  optsSeen = [];
+  assert.deepStrictEqual(calls[0].opts, { timeoutMs: 1234 });
   await readNodeBridges('n1');
-  assert.deepStrictEqual(optsSeen[0], { timeoutMs: BRIDGE_PROBE_MS },
-    'and a default, so no caller can forget one');
+  assert.deepStrictEqual(calls[1].opts, { timeoutMs: BRIDGE_PROBE_MS });
 });
-
-test('readNodeBridges propagates a transport failure -- the CALLER decides what it means', async () => {
-  failNodes.n1 = 'socket hang up';
-  await assert.rejects(() => readNodeBridges('n1'), /socket hang up/);
+test('readNodeBridges propagates SSH failures', async () => {
+  failNodes.n1 = 'SSH connection timed out';
+  await assert.rejects(() => readNodeBridges('n1'), /timed out/);
 });
-
-test('readNodeBridges survives a node answering something that is not a list', async () => {
-  rowsByNode.n1 = null;
-  assert.strictEqual((await readNodeBridges('n1')).size, 0);
+test('malformed SSH output is unreachable rather than missing or ready', async () => {
+  for (const stdout of ['', 'not json', 'null', '{}']) {
+    rawByNode.n1 = stdout;
+    const result = await probeNodesForBridges(['n1'], ['aaaabgdc']);
+    assert.deepStrictEqual(result.ready, [], stdout);
+    assert.deepStrictEqual(result.missingByNode, {}, stdout);
+    assert.ok(result.unreachable.n1, `must report malformed output: ${stdout}`);
+  }
 });
-
-// ── names ────────────────────────────────────────────────────────────────────
-
-test('bridgeNames takes vnet rows and strings, drops blanks, de-dupes, keeps order', () => {
-  // The shape callers actually hold: [vnet, vnetInt] straight off
-  // GET /cluster/sdn/vnets, where vnetInt is null on every v2 lane.
-  assert.deepStrictEqual(bridgeNames([{ vnet: 'aaaabgdc' }, null]), ['aaaabgdc']);
-  assert.deepStrictEqual(
-    bridgeNames([{ vnet: 'b' }, 'a', { vnet: 'b' }, undefined, '', { vnet: '' }, 'a']),
-    ['b', 'a'],
-    'de-duped, blanks dropped, and NOT sorted -- the log line must be diffable'
-  );
+test('an explicitly down bridge cannot be promoted by lack of an active reload', async () => {
+  rowsByNode.n1 = [{ ifname: 'aaaabgdc', flags: [], operstate: 'DOWN' }];
+  const result = await probeNodesForBridges(['n1'], ['aaaabgdc']);
+  assert.deepStrictEqual(result.ready, []);
+  assert.deepStrictEqual(result.missingByNode.n1, ['aaaabgdc']);
+  assert.deepStrictEqual(apiCalls, []);
+});
+test('bridgeNames accepts strings and VNet rows, skipping blanks and duplicates', () => {
+  assert.deepStrictEqual(bridgeNames([{ vnet: 'b' }, 'a', { vnet: 'b' }, null,
+    undefined, '', { vnet: '' }, 'a']), ['b', 'a']);
   assert.deepStrictEqual(bridgeNames(null), []);
   assert.deepStrictEqual(bridgeNames([]), []);
 });
-
-// ── many nodes ───────────────────────────────────────────────────────────────
-
-test('probeNodesForBridges partitions every node into exactly one bucket', async () => {
+test('probeNodesForBridges partitions ready, missing, and unreachable nodes', async () => {
   rowsByNode.n1 = up('aaaabgdc', 'aaaabgdd');
-  rowsByNode.n2 = up('aaaabgdc');                 // halfway through its reload
-  rowsByNode.n3 = [{ iface: 'aaaabgdc' }, { iface: 'aaaabgdd' }];  // configured, not up
+  rowsByNode.n2 = up('aaaabgdc');
+  rowsByNode.n3 = [{ ifname: 'aaaabgdc', flags: [] }];
   failNodes.n4 = 'connect ETIMEDOUT';
-
-  const r = await probeNodesForBridges(['n1', 'n2', 'n3', 'n4'], ['aaaabgdc', 'aaaabgdd']);
-
-  assert.deepStrictEqual(r.ready, ['n1']);
-  assert.deepStrictEqual(r.missingByNode.n2, ['aaaabgdd']);
-  assert.deepStrictEqual(r.missingByNode.n3, ['aaaabgdc', 'aaaabgdd']);
-  assert.match(r.unreachable.n4, /ETIMEDOUT/);
-  assert.deepStrictEqual(r.presentByNode.n2, ['aaaabgdc']);
-
-  // exhaustive and disjoint: no node is in two buckets, none is in none
-  const buckets = [
-    ...r.ready, ...Object.keys(r.missingByNode), ...Object.keys(r.unreachable),
-  ];
+  const result = await probeNodesForBridges(['n1', 'n2', 'n3', 'n4'], ['aaaabgdc', 'aaaabgdd']);
+  assert.deepStrictEqual(result.ready, ['n1']);
+  assert.deepStrictEqual(result.missingByNode.n2, ['aaaabgdd']);
+  assert.deepStrictEqual(result.missingByNode.n3, ['aaaabgdc', 'aaaabgdd']);
+  assert.deepStrictEqual(result.presentByNode.n2, ['aaaabgdc']);
+  assert.match(result.unreachable.n4, /ETIMEDOUT/);
+  const buckets = [...result.ready, ...Object.keys(result.missingByNode), ...Object.keys(result.unreachable)];
   assert.deepStrictEqual(buckets.sort(), ['n1', 'n2', 'n3', 'n4']);
-  assert.strictEqual(new Set(buckets).size, 4);
 });
-
-test('probeNodesForBridges NEVER throws, however badly a node behaves', async () => {
-  failNodes.n1 = 'ECONNREFUSED';
+test('failed SSH probes never admit a node or throw from the cluster probe', async () => {
+  failNodes.n1 = 'Permission denied (publickey)';
   failNodes.n2 = 'Could not resolve hostname n2';
-  const r = await probeNodesForBridges(['n1', 'n2'], ['aaaabgdc']);
-  assert.deepStrictEqual(r.ready, []);
-  assert.strictEqual(Object.keys(r.unreachable).length, 2);
+  const result = await probeNodesForBridges(['n1', 'n2'], ['aaaabgdc']);
+  assert.deepStrictEqual(result.ready, []);
+  assert.strictEqual(Object.keys(result.unreachable).length, 2);
+  assert.deepStrictEqual(result.missingByNode, {});
 });
-
-test('nodes are probed CONCURRENTLY -- two slow nodes cannot delay the rest', async () => {
+test('nodes are probed concurrently once each', async () => {
   for (const n of ['n1', 'n2', 'n3', 'n4']) { rowsByNode[n] = up('aaaabgdc'); slowNodes[n] = 20; }
-  const started = Date.now();
-  const r = await probeNodesForBridges(['n1', 'n2', 'n3', 'n4'], ['aaaabgdc']);
-  const elapsed = Date.now() - started;
-
-  assert.strictEqual(r.ready.length, 4);
-  assert.strictEqual(peakInFlight, 4, 'all four were in flight at once');
-  assert.ok(elapsed < 60, `serial would be ~80ms; took ${elapsed}ms`);
-  assert.strictEqual(calls.length, 4, 'and each node was asked exactly once');
+  const result = await probeNodesForBridges(['n1', 'n2', 'n3', 'n4'], ['aaaabgdc']);
+  assert.strictEqual(result.ready.length, 4);
+  assert.strictEqual(peakInFlight, 4);
+  assert.strictEqual(calls.length, 4);
 });
-
-test('ready is in INPUT order, not settle order, so two identical deploys log the same line', async () => {
+test('ready nodes retain input order instead of completion order', async () => {
   for (const n of ['n1', 'n2', 'n3']) rowsByNode[n] = up('aaaabgdc');
-  slowNodes.n1 = 30;   // n1 answers last
-  const r = await probeNodesForBridges(['n1', 'n2', 'n3'], ['aaaabgdc']);
-  assert.deepStrictEqual(r.ready, ['n1', 'n2', 'n3']);
+  slowNodes.n1 = 30;
+  assert.deepStrictEqual((await probeNodesForBridges(['n1', 'n2', 'n3'], ['aaaabgdc'])).ready,
+    ['n1', 'n2', 'n3']);
 });
-
-test('no names to require means every node is ready and NOTHING is asked', async () => {
-  // This is what keeps every placement that does not cable a lane to a VNet --
-  // a bare workstation clone -- exactly as cheap as it was before this existed.
-  const r = await probeNodesForBridges(['n1', 'n2'], []);
-  assert.deepStrictEqual(r.ready, ['n1', 'n2']);
-  assert.strictEqual(calls.length, 0);
-
-  const r2 = await probeNodesForBridges(['n1'], [null, undefined, '']);
-  assert.deepStrictEqual(r2.ready, ['n1']);
-  assert.strictEqual(calls.length, 0);
+test('empty requirements make no SSH or API calls', async () => {
+  assert.deepStrictEqual((await probeNodesForBridges(['n1', 'n2'], [])).ready, ['n1', 'n2']);
+  assert.deepStrictEqual((await probeNodesForBridges(['n1'], [null, undefined, ''])).ready, ['n1']);
+  assert.deepStrictEqual(calls, []);
+  assert.deepStrictEqual(apiCalls, []);
 });
-
-test('no nodes means no calls and no ready nodes', async () => {
-  const r = await probeNodesForBridges([], ['aaaabgdc']);
-  assert.deepStrictEqual(r.ready, []);
-  assert.strictEqual(calls.length, 0);
+test('empty candidates make no SSH or API calls', async () => {
+  assert.deepStrictEqual((await probeNodesForBridges([], ['aaaabgdc'])).ready, []);
+  assert.deepStrictEqual(calls, []);
+  assert.deepStrictEqual(apiCalls, []);
 });

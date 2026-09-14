@@ -286,7 +286,9 @@ a shorter window while testing this runbook — leave it alone in production.)
 
 There is a **fifth placement filter**, and it is neither a drain nor a quarantine. Before
 placing a lane, the scheduler asks every candidate node whether the lane's SDN VNet bridge
-is actually up there, and skips the ones where it is not.
+is actually up there, and skips the ones where it is not. It uses the existing node SSH
+connection to run `ip -j link show type bridge` and requires the bridge's kernel flags to
+include `UP`. A failed SSH command or malformed response is reported as unreachable.
 
 **Why it exists.** Creating an environment carves a VXLAN block and commits it with a single
 cluster-wide `PUT /cluster/sdn`. That commit creates **no bridges**. It makes every node
@@ -318,27 +320,37 @@ is very likely the healthiest node in the cluster.
 
 ```
 [NodeSelector] Bridge(s) aaaabgdc up on cyberhub-node-5, cyberhub-node-6; skipping
-  cyberhub-node-8 (missing aaaabgdc) — their SDN reload has not landed yet
+  cyberhub-node-8 (missing aaaabgdc) — bridge readiness not confirmed
 ```
 
 If **no** node has them yet, the deploy waits `cluster.scheduling.bridge_wait_s` (default
 300s; the two synchronous admin routes use a fixed 15s) and then fails with
 `BRIDGES_NOT_ON_ANY_NODE`, naming the bridges and each node's state. That error means "come
-back in a few minutes", not "something is broken".
+back in a few minutes" when nodes are still reloading. If nodes are reported as unreachable,
+check their SSH connection and the reported error before retrying.
 
-**Checking it by hand.** Which nodes have a given VNet:
+**Checking it by hand.** Run this from a Proxmox node with cluster SSH access to check which
+nodes have a given VNet up:
 
 ```bash
 V=$(pvesh get /cluster/sdn/vnets --output-format json | jq -r '.[]|select(.zone=="<zone>")|.vnet' | head -1)
 for n in $(pvesh get /nodes --output-format json | jq -r '.[].node'); do
   printf '%s: ' "$n"
-  pvesh get /nodes/$n/network --output-format json | jq -r --arg v "$V" '[.[]|select(.iface==$v and (.active==1 or .exists==1))]|length'
+  if links=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "root@$n" ip -j link show type bridge); then
+    printf '%s\n' "$links" | jq -r --arg v "$V" '[.[]|select(.ifname==$v and ((.flags // []) | index("UP") != null))]|length'
+  else
+    printf 'unreachable\n'
+  fi
 done
 ```
 
-`0` means that node is still reloading. Note the `active`/`exists` test: Proxmox lists a VNet
-from the node's generated `interfaces.d/sdn`, which is written at the **start** of the reload
-task, so merely appearing in that output does not mean the bridge exists.
+`1` means the kernel bridge exists and is administratively up; `0` means it is absent or
+down. The node network API can omit SDN VNets, and API `active`/`exists` fields do not prove
+kernel readiness. The direct kernel check avoids both problems.
+
+The app uses `PROXMOX_SSH_USER`, `PROXMOX_SSH_KEY`, and the node management addresses in
+`site.json`, through the same SSH helper used for gateway deployment. The app image already
+includes the SSH client, and Compose already mounts the configured key read-only.
 
 Which nodes are still reloading:
 

@@ -32,31 +32,31 @@
  * ============================================================================
  */
 
-const { proxmoxAPI } = require('./proxmox');
+const { nodeExec } = require('./node-ssh');
 
 /** Per-node probe timeout. A node mid-ifreload can simply stop answering. */
 const BRIDGE_PROBE_MS = 10000;
 
+// Explicit operator bypass for placement. All other values, including the old
+// "listed" mode, use the kernel probe: config presence cannot prove readiness.
+const PROBE_MODE = (() => {
+  const raw = String(process.env.CYBERCORE_BRIDGE_PROBE || 'strict').trim().toLowerCase();
+  return raw === 'off' ? 'off' : 'strict';
+})();
+
+/** True when placement should not probe at all. Read by node-selector. */
+function bridgeProbeDisabled() {
+  return PROBE_MODE === 'off';
+}
+
 /**
- * THE ONE PREDICATE. Everything that asks "is this bridge up on this node"
- * answers through this function.
- *
- * GET /nodes/<node>/network is built from the node's interface CONFIG -- which
- * includes /etc/network/interfaces.d/sdn, and that file is written at the START
- * of the srvreload task, before `ifreload -a` has brought anything up. Proxmox
- * then decorates each row with `exists: 1` (the interface is in /proc/net/dev)
- * and `active: 1` (ifupdown2 reports it up), and it sets those keys ONLY when
- * they are true -- a configured-but-not-yet-created VNet comes back as a row
- * with neither key rather than with active: 0.
- *
- * So a lenient "is it listed" check reports a bridge as present for the entire
- * window this module exists for. Require the kernel-level evidence instead.
- * Either key is that evidence (`exists` is not set for every interface type on
- * every PVE version), hence the OR.
+ * Rows come from `ip -j link show type bridge` on the target node. UP is the
+ * administrative flag; an empty bridge can have operstate DOWN / no LOWER_UP
+ * until its first guest attaches, so carrier must not gate placement.
  */
 function bridgeIsUp(row) {
-  if (!row || typeof row.iface !== 'string' || row.iface === '') return false;
-  return Number(row.active) === 1 || Number(row.exists) === 1;
+  return !!row && typeof row.ifname === 'string' && row.ifname !== ''
+    && Array.isArray(row.flags) && row.flags.includes('UP');
 }
 
 /**
@@ -67,14 +67,20 @@ function bridgeIsUp(row) {
  * @returns {Promise<Set<string>>}
  */
 async function readNodeBridges(node, { perCallMs = BRIDGE_PROBE_MS } = {}) {
-  const rows = await proxmoxAPI(
-    'GET', `/api2/json/nodes/${node}/network`, null, { timeoutMs: perCallMs }
+  // The bare network API omits SDN VNets; including SDN adds config-derived
+  // active flags. Neither that inventory nor a finished reload proves a bridge
+  // exists. Reuse the SSH transport already required to configure gateways.
+  const { stdout } = await nodeExec(
+    node, ['ip', '-j', 'link', 'show', 'type', 'bridge'], { timeoutMs: perCallMs }
   );
-  const up = new Set();
-  for (const r of (Array.isArray(rows) ? rows : [])) {
-    if (bridgeIsUp(r)) up.add(r.iface);
+  let rows;
+  try { rows = JSON.parse(stdout); } catch (_) {
+    throw new Error(`Invalid bridge inventory from ${node}: expected ip link JSON`);
   }
-  return up;
+  if (!Array.isArray(rows)) {
+    throw new Error(`Invalid bridge inventory from ${node}: expected an array`);
+  }
+  return new Set(rows.filter(bridgeIsUp).map(row => row.ifname));
 }
 
 /**
@@ -108,9 +114,8 @@ function bridgeNames(items) {
  * for every caller means the same thing as missing -- do not put a lane there --
  * but reads completely differently in a log line at 2am.
  *
- * CONCURRENTLY, with a per-call timeout, because serially sweeping nine nodes
- * on proxmoxAPI's 30s default would let two wedged nodes eat the whole budget
- * before a single healthy one was asked.
+ * Concurrent SSH probes have individual deadlines so an unreachable node does
+ * not prevent checking the other candidates.
  *
  * @param {string[]} nodes
  * @param {string[]} names   bridge names that must ALL be present
@@ -165,6 +170,8 @@ async function probeNodesForBridges(nodes, names, { perCallMs = BRIDGE_PROBE_MS 
 
 module.exports = {
   BRIDGE_PROBE_MS,
+  PROBE_MODE,
+  bridgeProbeDisabled,
   bridgeIsUp,
   readNodeBridges,
   bridgeNames,

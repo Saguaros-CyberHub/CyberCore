@@ -466,10 +466,8 @@ async function verifyBridgesOnAllNodes({
 
   while (pending.length > 0 && Date.now() < deadline) {
     // The per-node probe moved to utils/node-bridges.js so PLACEMENT can share it.
-    // Same question, one predicate: an interface is present only when Proxmox
-    // reports it active/exists, not merely when it appears in the node's config --
-    // the generated interfaces.d/sdn is written at the START of the reload task,
-    // so the looser check called a node ready while ifreload had not run yet.
+    // Query the kernel over node SSH. Proxmox's network inventory and SDN
+    // active flags describe configuration, not whether the bridge exists yet.
     const probe = await probeNodesForBridges(pending, expectedNames, { perCallMs });
     const readySet = new Set(probe.ready);
 

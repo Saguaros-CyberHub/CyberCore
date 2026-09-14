@@ -9,11 +9,11 @@
 const { proxmoxAPI } = require('./proxmox');
 const { getSchedulingConfig } = require('./site-config');
 const nodeHealth = require('./node-health');
-const { probeNodesForBridges, bridgeNames } = require('./node-bridges');
+const { probeNodesForBridges, bridgeNames, bridgeProbeDisabled } = require('./node-bridges');
 
 // How often keepBridgeReadyNodes re-asks while it waits for a node's SDN reload
 // to land. Five seconds: a reload takes minutes at best, and one poll is a
-// single cheap GET per candidate node.
+// single read-only SSH command per candidate node.
 const BRIDGE_POLL_MS = 5000;
 
 function clamp01(x) {
@@ -155,7 +155,8 @@ function bridgesNotOnAnyNodeError({ names, probe, candidates, waitedMs }) {
   const err = new Error(
     `No schedulable node has SDN bridge(s) ${names.join(', ')} yet ` +
     `(waited ${Math.round(waitedMs / 1000)}s across ${candidates.length} node(s)). ` +
-    `Proxmox is still applying the SDN change on ${describePending(probe)} — ` +
+    `Bridge readiness could not be confirmed on ${describePending(probe)}. ` +
+    `Check SSH access for unreachable nodes and SDN reload results for missing bridges. ` +
     `PUT /cluster/sdn does not create bridges, it queues each node's own ` +
     `"SRV Networking" reload (ifreload -a), and a large zone can take a node ` +
     `minutes to hours. Lanes are placed ONLY on nodes whose bridges are up, so ` +
@@ -198,10 +199,9 @@ function bridgesNotOnAnyNodeError({ names, probe, candidates, waitedMs }) {
  *   - NOTHING IS QUARANTINED. A node without the bridge has done nothing wrong;
  *     it is mid-reload. Marking it would keep it out of the NEXT deploy too, by
  *     which time it is very likely the healthiest node in the cluster.
- *   - NOTHING IS PERSISTED. Readiness only ever improves after an apply, so the
- *     answer is worth exactly as long as it takes to place this batch — and
- *     there is no race in the dangerous direction: a bridge that is up does not
- *     go away while we place a lane on it.
+ *   - NOTHING IS PERSISTED. The answer is a snapshot for this batch. Later
+ *     network changes can still affect a selected node, so guest-start failures
+ *     remain possible.
  *   - IT WAITS, briefly, rather than failing at once. Deploying a minute after
  *     creating an environment is the normal case this exists for, and the first
  *     node usually lands inside the budget.
@@ -233,6 +233,17 @@ async function keepBridgeReadyNodes(rows, {
   const names = bridgeNames(requireBridges);
   if (names.length === 0 || list.length === 0) return list;
 
+  // CYBERCORE_BRIDGE_PROBE=off: the operator has taken responsibility for
+  // placement themselves. Loud, because a lane placed on a node whose reload has
+  // not landed fails three to five minutes later wearing someone else's clothes.
+  if (bridgeProbeDisabled()) {
+    console.warn(
+      `${logTag} CYBERCORE_BRIDGE_PROBE=off — placing without checking that ` +
+      `${names.join(', ')} exist on the target node`
+    );
+    return list;
+  }
+
   const budget = Number.isFinite(Number(waitMs)) ? Math.max(0, Number(waitMs)) : defaultBridgeWaitMs();
   const started = Date.now();
   const deadline = started + budget;
@@ -248,7 +259,7 @@ async function keepBridgeReadyNodes(rows, {
       if (probe.ready.length < candidates.length) {
         console.log(
           `${logTag} Bridge(s) ${names.join(', ')} up on ${probe.ready.join(', ')}; ` +
-          `skipping ${describePending(probe)} — their SDN reload has not landed yet`
+          `skipping ${describePending(probe)} — bridge readiness not confirmed`
         );
       }
       const readySet = new Set(probe.ready);
@@ -264,7 +275,7 @@ async function keepBridgeReadyNodes(rows, {
       const msg =
         `${logTag} No schedulable node has bridge(s) ${names.join(', ')} yet — ` +
         `${describePending(probe)}; waiting up to ${Math.ceil(remaining / 1000)}s more ` +
-        `for a node to finish its SDN reload`;
+        `for bridge readiness`;
       console.warn(msg);
       if (typeof log === 'function') { try { log(msg); } catch (_) { /* a log sink must never fail a deploy */ } }
     }

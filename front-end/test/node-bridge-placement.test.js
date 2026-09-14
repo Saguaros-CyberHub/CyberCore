@@ -102,17 +102,22 @@ stub('proxmox.js', {
   PROXMOX_URL: 'https://stub',
   async proxmoxAPI(method, url) {
     if (/\/cluster\/resources\?type=node$/.test(url)) return CLUSTER;
-    const m = url.match(/\/api2\/json\/nodes\/([^/]+)\/network$/);
-    if (m) {
-      const node = m[1];
-      networkCalls.push(node);
-      if (onNetworkCall) onNetworkCall(node, networkCalls.length);
-      if (downNodes.has(node)) throw new Error(`connect ETIMEDOUT ${node}`);
-      // active: 1 is the evidence bridgeIsUp requires -- a row without it is a
-      // VNet that is in the node's config and not yet in its kernel.
-      return (bridgesByNode[node] || []).map(iface => ({ iface, active: 1 }));
-    }
     throw new Error(`unexpected proxmox call: ${method} ${url}`);
+  },
+});
+
+stub('node-ssh.js', {
+  async nodeExec(node, command) {
+    assert.deepStrictEqual(command, ['ip', '-j', 'link', 'show', 'type', 'bridge']);
+    networkCalls.push(node);
+    if (onNetworkCall) onNetworkCall(node, networkCalls.length);
+    if (downNodes.has(node)) throw new Error(`connect ETIMEDOUT ${node}`);
+    return {
+      stdout: JSON.stringify((bridgesByNode[node] || []).map(ifname => ({
+        ifname, flags: ['BROADCAST', 'MULTICAST', 'UP'], operstate: 'UNKNOWN',
+      }))),
+      stderr: '',
+    };
   },
 });
 
