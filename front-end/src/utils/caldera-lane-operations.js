@@ -12,8 +12,33 @@ const { targetsFor, pawFor, groupFor, laneEligible, eligibleLaneSql, retainedAft
   freshAgent, laneContext, enrichTargets } = require('./caldera-lane-agents');
 const { environmentOf, machineIdentity, createEnvironmentDirectory } = require('./lane-environment');
 const { normalizeAbility } = require('../incident/caldera/adversary');
+const { laneFactsFor } = require('./caldera-lane-facts');
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const MAX_LANES = 100;
+
+/**
+ * How the operation presents itself on the wire and on the host.
+ *
+ * OBFUSCATOR. Caldera encodes each command with the named obfuscator, and the
+ * encoded form is what lands in 4688 and in PowerShell 4104 — so this is the
+ * difference between a student reading the attacker's commands verbatim and
+ * having to decode them, which is what real 4104 evidence looks like.
+ *
+ * The DEFAULT STAYS 'plain-text' on purpose. An obfuscator name Caldera does not
+ * have is a failed createOperation, which fails the whole batch for the class,
+ * and nothing in this repository has ever exercised these names against a live
+ * server. `base64` is offered because it is the one stockpile has shipped
+ * longest. Flip the default once a live launch has confirmed it; the allow-list
+ * is the only thing that needs to change.
+ *
+ * JITTER is min/max seconds BETWEEN LINKS, not the agent beacon. 2/8 fired a
+ * whole intrusion inside a minute, which reads as a script rather than an
+ * intrusion; 4/16 spreads it without making an exercise outlast its class slot.
+ */
+const OBFUSCATORS = new Set(['plain-text', 'base64']);
+const JITTER_PATTERN = /^([0-9]{1,4})\/([0-9]{1,4})$/;
+const DEFAULT_OBFUSCATOR = 'plain-text';
+const DEFAULT_JITTER = '4/16';
 const TERMINAL = new Set(['finished', 'out_of_time', 'cleanup', 'stopped', 'failed']);
 // The ability catalog is per-SERVER state that only changes when a plugin is
 // installed or removed, while this dialog polls every five seconds. One read a
@@ -61,6 +86,26 @@ const cfg = lane => typeof lane?.config === 'string' ? JSON.parse(lane.config) :
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const operationId = (batch, lane) => uuidv5(`operation:${lane}`, batch);
 const sourceId = (batch, lane) => uuidv5(`source:${lane}`, batch);
+
+/**
+ * Validate the launch's tradecraft, or refuse it BEFORE anything is created in
+ * Caldera. A bad value rejected here costs a 400; the same value accepted here
+ * fails at createOperation, which aborts the prepared batch for every lane.
+ */
+function resolveTradecraft(input) {
+  const obfuscator = input.obfuscator === undefined || input.obfuscator === null
+    ? DEFAULT_OBFUSCATOR : String(input.obfuscator);
+  if (!OBFUSCATORS.has(obfuscator)) {
+    throw fail(400, `Choose one of these obfuscators: ${[...OBFUSCATORS].join(', ')}.`);
+  }
+  const jitter = input.jitter === undefined || input.jitter === null
+    ? DEFAULT_JITTER : String(input.jitter);
+  const parts = JITTER_PATTERN.exec(jitter);
+  if (!parts || Number(parts[1]) > Number(parts[2]) || Number(parts[2]) === 0) {
+    throw fail(400, 'Jitter must be "min/max" seconds between steps, with min no greater than max.');
+  }
+  return { obfuscator, jitter };
+}
 const records = lane => Object.values(cfg(lane).caldera_operations || {});
 
 /**
@@ -224,6 +269,9 @@ function createService(deps = {}) {
   // with a cold memo and TTL expiry is testable through the injected now().
   const environments = deps.environments
     || createEnvironmentDirectory({ query, now, deadline: deps.deadline, goad: deps.goad });
+  // Injected the same way every other seam in this file is, so a test can drive
+  // a lane whose lab resolves without standing up the vendored sidecar.
+  const laneFacts = deps.laneFacts || laneFactsFor;
   // The last catalog that answered. Kept across a failed read so a transient
   // Caldera outage degrades the profile card to stale descriptions rather than
   // to no descriptions at all.
@@ -514,23 +562,52 @@ function createService(deps = {}) {
     }
   }
 
-  async function runBatch(selected, courseId, entries, client, adversary) {
+  /**
+   * This lane's seed facts, resolved through the same challenge-key lookup
+   * laneContext uses — the environment directory is keyed by challenge key, not
+   * by lane id, because one spec answers for a whole course.
+   */
+  function factsFor(lane, envs) {
+    const config = cfg(lane);
+    const provisional = environmentOf(lane, config);
+    const described = provisional.challenge_key && envs && typeof envs.get === 'function'
+      ? envs.get(provisional.challenge_key) : null;
+    try { return laneFacts(lane, config, described); }
+    // A seeder that throws must not take the lane's operation with it.
+    catch (_) { return { facts: [], hosts: [], excluded: [], warnings: ['LANE_FACTS_FAILED'] }; }
+  }
+
+  async function runBatch(selected, courseId, entries, client, adversary, tradecraft) {
     const prepared = [];
     let prepareFailed = false;
     const batchId = entries[selected[0].lane_id].batch_id;
     const snapshot = { adversary_id: uuidv5('adversary', batchId), name: `Classroom ${batchId.slice(0, 8)}: ${adversary.name || adversary.adversary_id}`,
       description: 'Snapshot for a CyberCore classroom exercise.', atomic_ordering: [...adversary.atomic_ordering] };
     await client.createAdversary(snapshot);
+    // One directory read for the whole batch. A failure here degrades every lane
+    // to an unseeded source — today's behaviour — and never fails the launch:
+    // seeding is a realism upgrade, not a new precondition for running a class.
+    let envs = new Map();
+    try { envs = await environments.describeEnvironments(selected); } catch (_) { envs = new Map(); }
     await parallel(selected, 4, async lane => {
       const record = entries[lane.lane_id];
       try {
         if (await stoppedOrChanged(lane.lane_id, courseId, record)) throw fail(409, 'Lane changed or batch stopped before preparation.');
-        // A fresh, empty source prevents facts from another class/lane leaking into this operation.
-        const source = { id: sourceId(record.batch_id, lane.lane_id), name: record.name, facts: [], relationships: [], rules: [], adjustments: [] };
+        // The source is still per lane and per batch, so nothing leaks between
+        // classes; what it now carries is THIS lane's own estate, so an ability
+        // parameterised by a remote host has somewhere real to point. Host
+        // identity only — see caldera-lane-facts.js for why no secret goes here.
+        const seeded = factsFor(lane, envs);
+        const source = { id: sourceId(record.batch_id, lane.lane_id), name: record.name,
+          facts: seeded.facts, relationships: [], rules: [], adjustments: [] };
         await client.createSource(source);
+        record.facts_seeded = seeded.facts.length;
+        record.fact_hosts = seeded.hosts.map(host => host.hostname);
+        if (seeded.warnings.length) record.fact_warnings = seeded.warnings;
         const created = await client.createOperation({ id: record.operation_id, name: record.name, group: record.group,
           adversary: { adversary_id: snapshot.adversary_id }, source: { id: source.id },
-          state: 'paused', autonomous: 1, auto_close: true, obfuscator: 'plain-text', jitter: '2/8' });
+          state: 'paused', autonomous: 1, auto_close: true,
+          obfuscator: tradecraft.obfuscator, jitter: tradecraft.jitter });
         if (created?.id !== record.operation_id || created?.group !== record.group || created?.state !== 'paused'
           || created?.adversary?.adversary_id !== snapshot.adversary_id || created?.source?.id !== source.id) {
           throw fail(502, 'Caldera did not confirm the requested paused operation, group, adversary and fact source.');
@@ -583,6 +660,10 @@ function createService(deps = {}) {
     if (!UUID.test(input.request_id) || typeof input.adversary_id !== 'string' || !input.adversary_id.trim() || input.adversary_id.length > 200) {
       throw fail(400, 'Choose an adversary and provide a unique request ID.');
     }
+    // Refused here, before the idempotency check and before anything exists in
+    // Caldera: a bad value that reaches createOperation aborts the prepared
+    // batch for every lane in the class.
+    const tradecraft = resolveTradecraft(input);
     const batch = input.request_id.toLowerCase();
     const fingerprint = crypto.createHash('sha256').update(JSON.stringify([input.adversary_id, [...input.lane_ids].sort()])).digest('hex');
     const existing = selected.map(lane => cfg(lane).caldera_operations?.[batch]);
@@ -618,7 +699,7 @@ function createService(deps = {}) {
         results: selected.map((lane, i) => ({ lane_id: lane.lane_id, ...publicRecord(prior[i]) })) };
       throw fail(409, 'A selected lane changed or this request is already being processed. Refresh status.');
     }
-    schedule(() => runBatch(selected, courseId, entries, client, adversary).catch(async () => {
+    schedule(() => runBatch(selected, courseId, entries, client, adversary, tradecraft).catch(async () => {
       // Never release after an interrupted preparation. Saved operation IDs make
       // uncertain outcomes visible and stoppable after a worker/server failure.
       await Promise.allSettled(selected.map(async lane => {

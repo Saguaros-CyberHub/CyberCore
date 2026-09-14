@@ -47,7 +47,10 @@ test('both installers retain the ingress prefix, explicit identity, certificate 
     assert.match(script, /-group/);
     assert.match(script, /-paw/);
     assert.match(script, /CYBERCORE_CALDERA_STARTED:/);
-    assert.match(script, /CyberCore[\\/]Caldera/);
+    // The install location must NOT name the product or the tool: it appears in
+    // every Sysmon process-create and file event on the lane, and a
+    // self-identifying path ends the exercise with a single filter.
+    assert.match(script, /(?:[/]opt[/]epm|EPM)/);
     assert.doesNotMatch(script, /--insecure|curl\s+-[a-z]*k|SkipCertificateCheck|ServerCertificateValidationCallback|DisableTamperProtection|Exclusion(?:Process|Extension)|Stop-Service|KEY:|api_key|pkill|killall|New-Service|Register-ScheduledTask/i);
   }
   assert.doesNotThrow(() => buildInstallScript({ ...options, serverUrl: 'https://caldera.example:8443/' }));
@@ -77,7 +80,12 @@ for (const download of ['failure', 'html']) {
     t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
     const mockedDownload = download === 'failure' ? 'return 22' : 'printf %s "<html>Login</html>" > "$download"';
     const harness = `curl() { ${mockedDownload}; }\nuname() { printf '%s\\n' x86_64; }\n`;
-    const script = harness + buildInstallScript(options).replace('agent_dir="/opt/CyberCore/Caldera/$group/$paw"', 'agent_dir="$CALDERA_TEST_DIRECTORY"');
+    const script = harness + buildInstallScript(options)
+      .replace('agent_dir="/opt/epm/$paw"', 'agent_dir="$CALDERA_TEST_DIRECTORY"')
+      // The pre-rename directory is rewritten too, so the isolation promise
+      // above still holds: the installer removes it, and it must not resolve to
+      // a real path outside this temporary tree.
+      .replace('legacy_dir="/opt/CyberCore/Caldera/$group/$paw"', 'legacy_dir="$CALDERA_TEST_DIRECTORY/legacy"');
     const result = spawnSync(shell, [], {
       input: script, encoding: 'utf8', timeout: 10000,
       env: { ...process.env, CALDERA_TEST_DIRECTORY: temporary.replace(/\\/g, '/') },
@@ -95,7 +103,7 @@ for (const download of ['failure', 'html']) {
 function runMockWindowsInstall(t, { download = 'binary', existing = false, readError = '', launchError = '', defender = 'off' } = {}) {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'caldera-installer-test-'));
   t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
-  const agentDir = path.join(temporary, 'CyberCore', 'Caldera', group, paw);
+  const agentDir = path.join(temporary, 'EPM', paw);
   if (existing) {
     fs.mkdirSync(agentDir, { recursive: true });
     fs.writeFileSync(path.join(agentDir, 'agent.pid'), '2147483646');
@@ -104,7 +112,7 @@ function runMockWindowsInstall(t, { download = 'binary', existing = false, readE
 $script:mockRealTimeEnabled = $env:CALDERA_TEST_DEFENDER -ne 'off'
 $script:mockDisableRequested = $false
 $script:mockStatusReads = 0
-$script:mockAgentDir = Join-Path $env:ProgramData 'CyberCore\\Caldera\\${group}\\${paw}'
+$script:mockAgentDir = Join-Path $env:ProgramData 'EPM\\${paw}'
 $script:mockPreferences = @{
   DisableRealtimeMonitoring = $env:CALDERA_TEST_DEFENDER -eq 'off'
   DisableBehaviorMonitoring = $env:CALDERA_TEST_DEFENDER -eq 'off'
@@ -340,7 +348,7 @@ test('PowerShell 5.1 executes install flow with the expected detached command', 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, new RegExp('CYBERCORE_CALDERA_STARTED:' + paw));
   const launch = JSON.parse(fs.readFileSync(path.join(result.temporary, 'launch.json'), 'utf8'));
-  assert.equal(launch.file, path.join(result.agentDir, 'mitre-sandcat.exe'));
+  assert.equal(launch.file, path.join(result.agentDir, 'epmagent.exe'));
   assert.deepEqual(launch.arguments, ['-server', serverUrl, '-group', group, '-paw', paw, '-v']);
   assert.equal(fs.readFileSync(path.join(result.agentDir, 'agent.pid'), 'utf8'), '2147483646');
 });

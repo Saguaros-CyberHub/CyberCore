@@ -75,18 +75,45 @@ RUN python /tmp/cybercore-patch-upstream.py && rm /tmp/cybercore-patch-upstream.
 # -----------------------------------------------------------------------------
 # PLUGIN PRUNE — this is a SECURITY control, not a size optimisation.
 # -----------------------------------------------------------------------------
-# Sandcat supplies lane agents. Keep the authoring plugins and remove unrelated
-# reverse shells, external transports, and autonomous plugins. Caddy separates
-# agent contacts from the instructor console; enabling Sandcat does not grant
-# agent tokens access to console/API routes.
+# Sandcat supplies lane agents. Keep the authoring and reporting plugins and
+# remove unrelated reverse shells, external transports and initial-access
+# tooling. Caddy separates agent contacts from the instructor console; enabling
+# Sandcat does not grant agent tokens access to console/API routes.
+#
+# WHAT IS KEPT, AND WHY EACH ONE CLEARS THE BAR
+#   debrief   Reporting only. Server-side rendering of an operation that already
+#             ran; it opens no listener and reaches no agent. For a blue-team
+#             exercise it IS the instructor's answer key — what actually
+#             executed, on which host, in what order.
+#   response  Abilities, executed through the EXISTING Sandcat contact like any
+#             other ability. It adds no channel. This one is a deliberate
+#             departure from "remove autonomous plugins": its value is defensive
+#             (response and containment drills), and the autonomy it can express
+#             is bounded by the same operation the instructor already launches.
+#
+# WHAT STAYS REMOVED, AND WHY
+#   manx / ssl              additional agent channels. HTTP is the only contact
+#                           the Caddy capability gate understands; a second
+#                           transport is a second, ungated way in.
+#   access                  initial-access tooling aimed OUTWARD from the
+#                           server. Nothing in a lane exercise needs it.
+#   human                   deploys a SEPARATE process over its own endpoint,
+#                           which /agent/<token> does not cover. Restoring it is
+#                           a new ingress route and must be reviewed as one.
+#   emu                     wants to fetch the CTID Adversary Emulation Library
+#                           from GitHub AT RUNTIME on first start, plus a second
+#                           download_payloads.sh phase and pyminizip/zlib for the
+#                           encrypted payloads. This image is deliberately
+#                           hermetic and pinned; restoring emu means VENDORING
+#                           those plans at build time against a pinned ref, not
+#                           granting the container runtime egress.
+#   training / gameboard    unrelated to how this deployment is used.
 RUN rm -rf \
       plugins/manx \
       plugins/access \
       plugins/human \
-      plugins/response \
       plugins/training \
       plugins/gameboard \
-      plugins/debrief \
       plugins/emu \
       plugins/ssl \
  && echo "--- plugins surviving the prune ---" && ls -1 plugins

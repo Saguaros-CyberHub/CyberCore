@@ -2,7 +2,8 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { createService, targetsFor, hashToken, pawFor, groupFor, seenAt, JOB_TIMEOUT_MS, QUEUE_TIMEOUT_MS } = require('../src/utils/caldera-lane-agents');
+const { createService, targetsFor, hashToken, pawFor, groupFor, seenAt, JOB_TIMEOUT_MS, QUEUE_TIMEOUT_MS,
+  CHECK_IN_ATTEMPTS } = require('../src/utils/caldera-lane-agents');
 
 const LANE_ID = '11111111-2222-4333-8444-555555555555';
 const COURSE_ID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
@@ -255,8 +256,8 @@ for (const [reason, agentOverride] of [
     await h.start(); await h.run();
     assert.equal(h.job().status, 'failed');
     assert.match(h.job().error, /no fresh Caldera check-in/);
-    assert.equal(h.state.sleepCalls.length, 12);
-    assert.equal(h.state.agentReads, 13);
+    assert.equal(h.state.sleepCalls.length, CHECK_IN_ATTEMPTS);
+    assert.equal(h.state.agentReads, CHECK_IN_ATTEMPTS + 1);
   });
 }
 
@@ -425,8 +426,8 @@ test('an unfinished guest execution with no check-in fails naming both facts and
   assert.match(h.job().error, /last exec-status error/, 'a wedged guest agent must still identify itself');
   assert.doesNotMatch(h.job().error, /^Agent installation failed/);
   assert.equal(JSON.stringify({ job: h.job(), sql: h.state.sql }).includes(h.state.token), false);
-  assert.equal(h.state.agentReads, 13);
-  assert.equal(h.state.sleepCalls.length, 12);
+  assert.equal(h.state.agentReads, CHECK_IN_ATTEMPTS + 1);
+  assert.equal(h.state.sleepCalls.length, CHECK_IN_ATTEMPTS);
 });
 
 for (const outcome of ['completed', 'guest failed', 'no check-in', 'missing startup marker']) {

@@ -122,6 +122,14 @@ plugins:
   - atomic
   - fieldmanual
   - sandcat
+  # Reporting. Renders an operation that already ran, server-side: no listener,
+  # no agent contact. For a blue-team exercise this is the instructor's answer
+  # key — what executed, on which host, in what order.
+  - debrief
+  # Defensive abilities, carried by the EXISTING Sandcat contact like any other
+  # ability. Adds no channel. See the Dockerfile prune block for why this one is
+  # kept while the other autonomous plugins are not.
+  - response
 
 # The default planner ships inside stockpile and is available to operations.
 objects.planners.default: atomic

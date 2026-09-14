@@ -123,7 +123,8 @@ function harness(options = {}) {
       if (state.proxmoxFailure) throw new Error('private proxmox failure');
       return clone(state.resources);
     },
-    schedule: fn => state.scheduled.push(fn) });
+    schedule: fn => state.scheduled.push(fn),
+    ...(options.laneFacts ? { laneFacts: options.laneFacts } : {}) });
   const input = { request_id: BATCH, adversary_id: 'discovery', lane_ids: IDS };
   return { state, service, input, launch: (body = input) => service.launch(clone(lanes), body, { courseId: COURSE, label: 'CYBR400' }),
     run: async () => { while (state.scheduled.length) await state.scheduled.shift()(); },
@@ -153,6 +154,10 @@ test('classroom creates a fixed profile and separate paused lane operations befo
   assert.equal(h.state.snapshots.length, 1);
   assert.deepEqual(h.state.snapshots[0].atomic_ordering, ['one', 'two']);
   assert.equal(new Set(h.state.sources.map(source => source.id)).size, 2);
+  // A lane whose lab does not resolve seeds nothing, which is exactly what this
+  // harness's lanes are. Relationships stay empty on EVERY path: seeding an
+  // isAccessibleFrom relationship is an unhandled IndexError inside Caldera
+  // 5.3.0's link generation, not a skipped ability. See caldera-lane-facts.js.
   assert.ok(h.state.sources.every(source => !source.facts.length && !source.relationships.length));
   assert.deepEqual([...h.state.ops.values()].map(op => op.group).sort(), IDS.map(groupFor).sort());
   assert.ok([...h.state.ops.values()].every(op => op.state === 'running' && op.adversary.adversary_id === h.state.snapshots[0].adversary_id));
@@ -561,4 +566,80 @@ test('an ignored stop or changed group is reported as unknown rather than stoppe
     assert.equal(result.results[0].status, 'unknown');
     if (changedGroup) assert.ok(!h.state.calls.some(row => row[0] === 'stop' && row[1] === operationId(BATCH, IDS[0])));
   }
+});
+
+/**
+ * The seeded source is the whole reason an ability parameterised by a remote
+ * host has anywhere to point. Before this, every classroom operation got
+ * `facts: []` and any such ability was SKIPPED while the operation still
+ * reported success — a silent hole in the exercise.
+ *
+ * The source stays per lane and per batch, so seeding buys targets without
+ * reopening the cross-class leak the empty source was preventing.
+ */
+test('a resolvable lab seeds its own estate into that lane\'s fact source', async () => {
+  const h = harness({
+    laneFacts: (lane, config, described) => ({
+      facts: [{ trait: 'remote.host.name', value: `HOST-${lane.lane_id.slice(0, 4)}`, score: 1 }],
+      hosts: [{ roster_name: 'DC01', hostname: `HOST-${lane.lane_id.slice(0, 4)}`, fqdn: '', ip: null }],
+      excluded: [], warnings: [],
+    }),
+  });
+  await h.launch();
+  await h.run();
+  assert.equal(h.state.sources.length, 2);
+  // Every source carries facts, and no two lanes carry the same ones.
+  assert.ok(h.state.sources.every(source => source.facts.length === 1));
+  assert.equal(new Set(h.state.sources.map(source => source.facts[0].value)).size, 2);
+  // Relationships stay empty even when facts are seeded.
+  assert.ok(h.state.sources.every(source => !source.relationships.length));
+  // The operation still binds to the source it was given.
+  assert.ok([...h.state.ops.values()].every(op => h.state.sources.some(source => source.id === op.source.id)));
+});
+
+/**
+ * Tradecraft is refused BEFORE anything exists in Caldera. The same bad value
+ * accepted here would fail at createOperation, which aborts the prepared batch
+ * for every lane — one instructor typo costing the whole class its exercise.
+ */
+test('an unusable obfuscator or jitter is refused before anything is created', async () => {
+  for (const bad of [{ obfuscator: 'rot13' }, { obfuscator: '' }, { jitter: '9/2' },
+    { jitter: 'fast' }, { jitter: '0/0' }, { jitter: '1/0' }]) {
+    const h = harness();
+    await assert.rejects(() => h.launch({ ...h.input, ...bad }),
+      err => err.status === 400, `${JSON.stringify(bad)} was accepted`);
+    assert.equal(h.state.snapshots.length, 0, `${JSON.stringify(bad)} created an adversary anyway`);
+    assert.equal(h.state.sources.length, 0, `${JSON.stringify(bad)} created a fact source anyway`);
+    assert.equal(h.state.ops.size, 0, `${JSON.stringify(bad)} created an operation anyway`);
+  }
+});
+
+test('the operation carries the chosen tradecraft, and a safe default otherwise', async () => {
+  const fallback = harness();
+  await fallback.launch();
+  await fallback.run();
+  // plain-text is the deliberate default: an obfuscator name Caldera does not
+  // have fails createOperation, and these names have never been exercised
+  // against a live server from this repository.
+  assert.ok([...fallback.state.ops.values()].every(op => op.obfuscator === 'plain-text' && op.jitter === '4/16'));
+
+  const chosen = harness();
+  await chosen.launch({ ...chosen.input, obfuscator: 'base64', jitter: '30/120' });
+  await chosen.run();
+  assert.ok([...chosen.state.ops.values()].every(op => op.obfuscator === 'base64' && op.jitter === '30/120'));
+});
+
+/**
+ * Seeding is a realism upgrade, never a new precondition for running a class. A
+ * seeder that throws must degrade the lane to the unseeded source it would have
+ * had anyway, not fail the launch for a whole section.
+ */
+test('a seeder that throws degrades to an unseeded source and still launches', async () => {
+  const h = harness({ laneFacts: () => { throw new Error('sidecar unreadable'); } });
+  const result = await h.launch();
+  assert.deepEqual(result.results.map(row => row.status), ['preparing', 'preparing']);
+  await h.run();
+  assert.equal(h.state.sources.length, 2);
+  assert.ok(h.state.sources.every(source => !source.facts.length));
+  assert.ok([...h.state.ops.values()].every(op => op.state === 'running'));
 });

@@ -25,13 +25,29 @@ const EXEC_INCOMPLETE_NOTICE = `The install script did not report completion wit
   + 'On Windows a detached agent holds the guest execution output open, so this is expected even when the install '
   + 'succeeded. Waiting for the Caldera check-in instead.';
 // The window in which a Caldera check-in counts as "this machine is here now".
-const AGENT_FRESH_MS = 120000;
+//
+// MIRRORS untrusted_timer IN infrastructure/caldera/conf/agents.yml, and must.
+// Caldera stops trusting an agent whose last_seen is older than untrusted_timer;
+// freshAgent() below requires trusted === true AND last_seen inside this window,
+// and launch() refuses a batch unless every lane has a fresh trusted agent. Set
+// this below the beacon interval and every classroom launch is refused on every
+// lane, naming agents that are actually healthy.
+//
+// test/caldera-beacon-coupling.test.js pins this against the beacon config.
+const AGENT_FRESH_MS = 300000;
 const AGENT_SKEW_MS = 30000;
 // How the post-execution wait for a first check-in is bounded. Both bounds are
 // needed and they guard different things: ATTEMPTS is the "give Sandcat a
 // minute to reach the server" budget this loop has always had, while the
 // deadline below is a hard promise to currentJob() and the atomic claim.
-const CHECK_IN_ATTEMPTS = 12;
+// Sized to outlast ONE full beacon interval. Sandcat registers on start, so the
+// first check-in normally lands in seconds -- but "normally" is not a budget. If
+// that first beacon is missed for any reason the next one is up to sleep_max
+// away, and a window shorter than that reports a healthy agent as a failed
+// install. 24 x 5 s = 120 s covers sleep_max (90 s) with margin, and still fits
+// inside the checkInDeadline below (JOB_TIMEOUT_MS - CHECK_IN_MARGIN_MS = 270 s)
+// so nothing here reaches into the job timeout or the atomic claim.
+const CHECK_IN_ATTEMPTS = 24;
 const CHECK_IN_INTERVAL_MS = 5000;
 // Slack left between the last possible check-in read and job.started_at +
 // JOB_TIMEOUT_MS. It has to cover one Caldera round trip that is already in

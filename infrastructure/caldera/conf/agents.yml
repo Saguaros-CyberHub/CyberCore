@@ -2,10 +2,39 @@
 # choose commands and operations in the Caldera console after the agent appears.
 bootstrap_abilities: []
 deadman_abilities: []
-implant_name: mitre-sandcat
-sleep_min: 5
-sleep_max: 10
-untrusted_timer: 90
+# The on-disk name is chosen by CyberCore's own installer, not by this key; this
+# is what Caldera calls the implant in the deploy commands it generates. Kept in
+# step with caldera-agent-scripts.js so the two never describe different things.
+implant_name: epmagent
+
+# BEACON INTERVAL — a realism setting with a hard dependency chain.
+# ---------------------------------------------------------------------------
+# A 5-10 second beacon is not tradecraft any adversary uses; it is a metronome,
+# and on a lane where Sysmon records every outbound connection it identifies the
+# implant without any analysis at all. 30-90s with jitter is ordinary.
+#
+# THESE VALUES ARE NOT INDEPENDENT. Raising sleep_max above untrusted_timer, or
+# above CyberCore's AGENT_FRESH_MS, does not merely look untidy:
+#
+#   Caldera marks an agent untrusted once last_seen is older than
+#   untrusted_timer. freshAgent() in src/utils/caldera-lane-agents.js requires
+#   trusted === true AND last_seen inside AGENT_FRESH_MS, and launch() refuses
+#   unless EVERY selected lane has a fresh trusted agent.
+#
+# So a sleep_max above either bound means every classroom launch is refused, on
+# every lane, reporting agents that are in fact perfectly healthy.
+#
+# test/caldera-beacon-coupling.test.js pins the relationship across both files.
+# Change these and run it; it will tell you what else has to move.
+sleep_min: 30
+sleep_max: 90
+
+# 3.3x sleep_max, so an agent survives two missed beacons before Caldera stops
+# trusting it. CyberCore's AGENT_FRESH_MS mirrors this exactly: the window in
+# which the console says "this machine is here" is the same window in which
+# Caldera will let it be tasked.
+untrusted_timer: 300
+
 watchdog: 0
 deployments:
   - 2f34977d-9558-4c12-abad-349716777c6b

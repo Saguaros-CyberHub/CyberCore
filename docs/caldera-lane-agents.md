@@ -22,7 +22,7 @@ execution context. It downloads Sandcat directly over HTTPS and starts a named
 background process with local logs beside the binary. On Windows that process is
 started hidden, so there is NO console window to look for on the VM's desktop:
 confirm an agent from the Agent column in the dialog, or from the running
-`mitre-sandcat.exe`, never from something visible on screen. Hunting for a window
+`epmagent.exe`, never from something visible on screen. Hunting for a window
 that was never drawn is how a working agent gets reinstalled. Repeating the
 install restarts only that managed agent. It does not install a startup service; after reboot, use **Install Agent**
 again. Supported guest architectures are amd64 and arm64.
@@ -354,12 +354,38 @@ execution follows agent polling and planner timing; it is not synchronized to
 the millisecond. The existing ELK agents forward the resulting host telemetry to
 each student's SIEM.
 
-Each operation receives a new empty fact source so learned facts and supplied
-targets are not shared across student lanes. Host-local profiles work without
-additional seeding. Run profiles that require credentials or remote-target facts
-through Caldera with a lane-specific source; the classroom launcher currently
-does not seed those facts or copy the shared authoring source. A profile can
-finish with skipped steps if platform, executor or fact requirements are unmet.
+Each operation receives its own fact source, per lane and per batch, so learned
+facts are never shared across student lanes. On a GOAD lane that source is
+seeded with that lane's own estate: for every domain host in the roster, its
+real hostname, its fully qualified name and its address. Host-local profiles
+work without any of this; profiles parameterised by a remote host now bind to
+real machines instead of being skipped.
+
+The seeded names are the hostnames the guests actually boot with, not the
+roster names shown in the topology. CyberCore's GOAD-Light roster reads
+DC01/DC02/SRV02 while the machines are TUC-DC01, TUC-DC02 and TUC-SRV02.
+
+Two things are deliberately absent from the source:
+
+- **No credentials.** A Caldera fact source has no per-object ownership, so
+  every source on the server is readable by every account holding an API key,
+  and CyberCore stores a second copy of every fact alongside the run. Profiles
+  that need a credential still need one supplied in Caldera by hand.
+- **No relationships.** The SMB and WMI lateral-movement abilities do not gate
+  on facts; they gate on an `isAccessibleFrom` relationship, and that
+  relationship has to be *learned* rather than supplied. Put **Remote Host
+  Ping** ahead of those steps in the profile's ability ordering and the seeded
+  hosts give it somewhere to go. A supplied relationship is worse than none:
+  on the shipped Caldera version it faults inside link generation.
+
+The SIEM, the attack box and the lane gateway are never seeded as targets. An
+ability that lands on the SIEM corrupts the evidence the class is graded on
+reading, and it does it silently.
+
+A profile can still finish with skipped steps if platform, executor or fact
+requirements are unmet. Note that Caldera reports a fact requirement as
+fulfilled when the trait *name* matches, so a step that binds is not proof the
+value was right; compare the operation's links against the machines you expect.
 
 The dialog shows per-lane operation IDs, status and errors, and identifies each
 lane the way the lane picker does — student name, then `#<lane number>` and the
@@ -437,6 +463,37 @@ at a management address can still fail even with Internet enabled. Missing
 `internet_enabled` on an older lane is treated as unknown; the connection is
 tested through installation and check-in.
 
+## How often an agent checks in
+
+The agent beacons every 30 to 90 seconds, jittered. That is deliberate: a
+five-second beacon is a metronome on the wire, and on a lane where Sysmon
+records every outbound connection it identifies the agent without any analysis
+at all.
+
+The practical consequence is that **"last check-in" is normally up to 90 seconds
+old, and that is healthy.** An agent is treated as present for five minutes
+after its last beacon, which is the same window Caldera uses before it stops
+trusting the agent and refuses to task it. The two windows are pinned to each
+other by test, because setting them independently is how every launch in a
+course comes to be refused while the agents are in fact fine.
+
+An install still confirms in seconds, because the agent registers as soon as it
+starts rather than waiting out a first sleep.
+
+## Choosing how the attack behaves
+
+**Run Caldera attack** accepts two settings beyond the profile itself:
+
+- **Obfuscator** — how each command is encoded before it runs. `plain-text` is
+  the default and leaves commands readable in the event log, which is the right
+  choice for a first exercise. `base64` is what real 4104 evidence usually looks
+  like and makes students decode before they can read.
+- **Jitter** — `min/max` seconds between steps, defaulting to `4/16`. Widen it
+  to spread an intrusion across a class rather than firing it inside a minute.
+
+Both are validated before anything is created in Caldera, so a bad value costs a
+refusal rather than a half-prepared batch.
+
 ## Status and troubleshooting
 
 - **Download returns 401:** the request may still be reaching the console login
@@ -485,7 +542,7 @@ tested through installation and check-in.
   software) indicate an endpoint security block. On the target VM, review
   **Windows Security > Virus & threat protection > Protection history**, or the
   installed security product's console. Match the detection to the attempted
-  Sandcat download under `%ProgramData%\CyberCore\Caldera\<group>\<agent ID>\`.
+  agent download under `%ProgramData%\EPM\<agent ID>\`.
   Allow the intended agent under the lab's approved endpoint policy, then retry
   **Install Agent** to download it again. For Defender, see Microsoft's
   [Protection History guidance](https://support.microsoft.com/en-us/windows/security/windows-security/protection-history-in-the-windows-security-app).
@@ -545,9 +602,19 @@ tested through installation and check-in.
   and token hashes are stored in the existing lane JSON configuration; no SQL
   migration is required.
 
-Linux files are under `/opt/CyberCore/Caldera/<group>/<agent ID>/`.
-Windows files are under `%ProgramData%\CyberCore\Caldera\<group>\<agent ID>\`.
-The executable is named `mitre-sandcat` or `mitre-sandcat.exe`; logs are beside it.
+Linux files are under `/opt/epm/<agent ID>/`.
+Windows files are under `%ProgramData%\EPM\<agent ID>\`.
+The executable is named `epmagent` or `epmagent.exe`; logs are beside it.
+
+The agent is named and placed so that it does not announce itself. Its path and
+process name appear in every Sysmon process-create and network-connect event on
+the lane, and a name carrying the product or the tool would let a student find
+the whole exercise with one filter instead of by analysis.
+
+An install performed before this rename is stopped and removed automatically by
+the next **Install Agent**. That cleanup matters: two agents sharing one ID would
+both beacon and every ability would execute twice, and nothing in Caldera would
+show why.
 Other endpoint security controls may still prevent the executable from starting
 after Defender real-time protection is turned off.
 
