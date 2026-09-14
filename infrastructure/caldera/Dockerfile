@@ -119,6 +119,46 @@ RUN rm -rf \
  && echo "--- plugins surviving the prune ---" && ls -1 plugins
 
 # -----------------------------------------------------------------------------
+# ATOMIC RED TEAM DATA — vendored here because the runtime cannot fetch it.
+# -----------------------------------------------------------------------------
+# The atomic plugin ships its CODE as a Caldera submodule but NOT its data. On
+# first load it shells out to `git clone` for Red Canary's atomic-red-team into
+# plugins/atomic/data/atomic-red-team. That cannot work in this image, twice
+# over: the runtime stage installs no git (only ca-certificates, tini and
+# golang-go), and the container is deliberately hermetic.
+#
+# The failure is SILENT, which is why it survived so long. The plugin loads, the
+# console lists it, and its ability count simply stays blank forever.
+#
+# So the fetch happens in THIS stage, which already has git, at a PINNED commit.
+# Sparse and blobless: `atomics/` is the only tree the plugin ingests, while the
+# full repository is ~610 MB of which almost none is read.
+#
+# Moving the pin is a deliberate act — it changes which technique tests the
+# class can run. Same rule as CALDERA_VERSION above.
+# The final guard is not ceremony: an empty atomics tree would reproduce the
+# silent-empty-plugin symptom in a new way, and a build that fails here is the
+# only thing that distinguishes "vendored" from "looked vendored".
+ARG ATOMIC_RED_TEAM_REF=388942adbd9641f4dfdcf079d7efe9a75ec0ac43
+RUN set -eu; \
+    test -d plugins/atomic; \
+    mkdir -p plugins/atomic/data/atomic-red-team; \
+    cd plugins/atomic/data/atomic-red-team; \
+    git init -q; \
+    git remote add origin https://github.com/redcanaryco/atomic-red-team.git; \
+    git sparse-checkout init --cone; \
+    git sparse-checkout set atomics; \
+    git fetch -q --depth 1 --filter=blob:none origin "${ATOMIC_RED_TEAM_REF}"; \
+    git checkout -q FETCH_HEAD; \
+    rm -rf .git; \
+    count=$(find atomics -name 'T*.yaml' | wc -l); \
+    if [ "$count" -lt 100 ]; then \
+      echo "atomic-red-team vendored only $count technique files" >&2; \
+      exit 1; \
+    fi; \
+    echo "--- atomic-red-team vendored at ${ATOMIC_RED_TEAM_REF}: $count techniques ---"
+
+# -----------------------------------------------------------------------------
 # CONTACT PRUNE: HTTP is the only agent channel. Websocket remains loopback
 # for Caldera's own event bus. All other listeners/transports remain removed.
 # -----------------------------------------------------------------------------

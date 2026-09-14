@@ -714,7 +714,15 @@ test('central Caldera accepts HTTP agents and keeps every other transport privat
   assert.strictEqual(scalarAt(conf, 'app.contact.websocket', 0), '127.0.0.1:7012');
 
   const ins = dockerInstructions(read(DOCKERFILE));
-  const removals = ins.filter((i) => i.op === 'RUN' && /\brm -rf\b/.test(i.args)).map((i) => i.args).join(' ');
+  // Scoped to what `rm -rf` is actually ARGUMENTS to, not to every RUN that
+  // happens to mention it. A build step that removes something small of its own
+  // (vendored git metadata, a temp file) while also naming a plugin directory
+  // would otherwise read as removing that plugin, and the consistency check
+  // below would fail on a plugin that is present and enabled.
+  const removals = ins
+    .filter((i) => i.op === 'RUN' && /\brm -rf\b/.test(i.args))
+    .flatMap((i) => i.args.split(/\brm -rf\b/).slice(1).map((tail) => tail.split(/&&|;/)[0]))
+    .join(' ');
   assert.ok(!removals.includes('plugins/sandcat'), 'Sandcat must exist to build lane agents');
   assert.ok(removals.includes('plugins/manx'), 'no reverse-shell plugin is required for HTTP lane agents');
   const plugins = sequenceUnder(conf, 'plugins', 0, 'Caldera config');
