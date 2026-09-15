@@ -445,6 +445,26 @@ router.post('/caldera-agents', async (req, res) => {
   } catch (error) { fail(res, error, 'POST /caldera-agents'); }
 });
 
+/**
+ * POST /caldera-agents/cancel — drop installations that have not started.
+ *
+ * Deliberately NOT behind the blue_team feature gate, for the same reason
+ * /caldera-operations/stop is not: stopping work must stay possible on a course
+ * whose tab was switched off mid-batch. Gating it would mean the only way out of
+ * a 180-machine queue is an app restart, which drops the in-memory queue while
+ * leaving every row saying 'queued' — unclaimable until QUEUE_TIMEOUT_MS.
+ */
+router.post('/caldera-agents/cancel', async (req, res) => {
+  try {
+    const ctx = await loadStaffCourse(req, res);
+    if (!ctx) return;
+    const result = await laneAgents.cancelQueued(await courseAgentLanes(ctx.courseId), req.body || {}, { courseId: ctx.courseId });
+    audit.log({ req, action: 'caldera_agent_cancel', target: { type: 'course', id: ctx.courseId },
+      metadata: { lanes: result.lanes, dropped: result.dropped } }).catch(() => {});
+    res.json(result);
+  } catch (error) { fail(res, error, 'POST /caldera-agents/cancel'); }
+});
+
 router.post('/caldera-agents/batch', async (req, res) => {
   try {
     const ctx = await loadStaffCourse(req, res);

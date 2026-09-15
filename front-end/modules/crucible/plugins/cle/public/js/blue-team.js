@@ -2691,6 +2691,7 @@
       const count = jobs.filter(({ job }) => job.status === status).length;
       return `<span class="cal-metric ${count ? tone[status] : 'is-zero'}">${count} ${status}</span>`;
     }).join('');
+    const queuedCount = jobs.filter(({ job }) => job.status === 'queued').length;
     const failures = jobs.filter(({ job }) => job.status === 'failed');
     const reconciled = failures.filter(entry => entry.reconciled).length;
     const broken = failures.length - reconciled;
@@ -2710,7 +2711,12 @@
     // outright, because that assertion is what proves injected markup arriving in
     // a warning was escaped rather than rendered. Every glyph here is an entity.
     classroomSetHtml('classroomCalderaResults', !jobs.length && !state.results.length ? ''
-      : `<h4 class="cal-results-title">Installation progress</h4><div class="cal-metrics">${metrics}</div>${failNote}${errors}`
+      : `<h4 class="cal-results-title">Installation progress</h4><div class="cal-metrics">${metrics}</div>`
+        // Offered only while work is still waiting. A batch whose queue has
+        // drained has nothing left to cancel, and a button that does nothing
+        // reads as broken rather than as finished.
+        + (queuedCount ? `<div class="cal-cancel"><button type="button" class="btn btn-secondary btn-sm" id="classroomCalderaCancelQueued">Cancel ${classroomPlural(queuedCount, 'queued install')}</button><span class="cal-hint">Installs already running are left to finish.</span></div>` : '')
+        + `${failNote}${errors}`
         + ordered.map(({ lane, job, reconciled: ok }) => {
           const hint = job.status === 'failed' ? classroomJobHint(job) : '';
           return `<div class="cal-job is-${ok || job.status === 'completed' ? 'good' : job.status === 'failed' ? 'bad' : 'live'}">
@@ -2723,6 +2729,37 @@
     : job.status === 'completed' ? '<p class="cal-job-msg">No fresh agent check-in has been confirmed yet.</p>' : ''}
       </div>`;
         }).join(''));
+    // Bound after the panel is written, because the panel is replaced wholesale
+    // on every poll and an element captured earlier would be detached.
+    const cancelButton = document.getElementById('classroomCalderaCancelQueued');
+    if (cancelButton) cancelButton.onclick = () => cancelClassroomQueued(state);
+  }
+
+  /**
+   * Cancel installations that have not started.
+   *
+   * The only alternative before this was restarting the app, which drops the
+   * in-memory queue but leaves every row saying 'queued' -- and the claim then
+   * refuses to re-run any of them for four hours. Cancelling writes a terminal
+   * status, so the same machines can be queued again immediately.
+   */
+  async function cancelClassroomQueued(state) {
+    if (state.submitting) return;
+    const queued = (state.payload && state.payload.lanes ? state.payload.lanes : [])
+      .flatMap(lane => classroomJobs(lane)).filter(job => job.status === 'queued').length;
+    if (!queued) return;
+    if (!window.confirm(`Cancel ${queued} queued installation${queued === 1 ? '' : 's'}? Installs already running are left to finish.`)) return;
+    state.submitting = true;
+    renderClassroomCaldera(state);
+    try {
+      await laneCalderaRequest(state, '/caldera-agents/cancel', { method: 'POST', body: {} });
+      await refreshClassroomCaldera(state);
+    } catch (error) {
+      state.error = `Could not cancel the queued installations: ${error.message}`;
+    } finally {
+      state.submitting = false;
+      if (classroomOpen(state)) renderClassroomCaldera(state);
+    }
   }
 
   function renderClassroomInstall(state, lanes) {

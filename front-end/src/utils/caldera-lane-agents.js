@@ -63,6 +63,29 @@ const object = value => typeof value === 'string' ? JSON.parse(value) : (value |
 const hashToken = token => crypto.createHash('sha256').update(token).digest('hex');
 const groupFor = laneId => `lane-${laneId}`;
 const pawFor = (laneId, vmId) => hashToken(`${laneId}:${vmId}`).slice(0, 24);
+// Identity of one unit of queued work, so cancel() can drop it by name.
+const queueKey = (laneId, vmId) => `${laneId}:${vmId}`;
+
+/**
+ * Machines that are infrastructure by NAME, when nothing else can say so.
+ *
+ * The role is the better answer and is tried first, but a GOAD deployer writes
+ * `{vm_id, name, proxmox_name, type, node}` into lane config with no role at
+ * all. So on a GOAD lane the role fallback is empty, and the only other source
+ * is the challenge spec -- which the environment directory is explicitly built
+ * to survive losing, and which fails for EVERY machine in a lane at once when
+ * it does.
+ *
+ * In that window elk and wazuh look like ordinary servers, get auto-selected in
+ * the Machines step, and are swept up by "Only missing agents" -- which installs
+ * an implant onto the SIEM holding the evidence the class is graded on reading.
+ *
+ * EXACT names only, never a substring: a lane may legitimately hold a
+ * `kali-workstation` a student is meant to use, and quietly refusing to target
+ * it would be its own bug. These six are the fixed names the platform itself
+ * assigns.
+ */
+const INFRASTRUCTURE_NAMES = new Set(['elk', 'wazuh', 'sensor', 'kali', 'loggen', 'log-generator']);
 function failure(status, message) { return Object.assign(new Error(message), { status }); }
 
 // Deployment failures retain running guests under 'suspended'. That lifecycle
@@ -341,7 +364,10 @@ function enrichTargets(lane, cfg, envs, { byId = new Map(), agents = [], now = D
       // crucible_challenge read that fails -- the degradation the environment
       // directory is built to survive -- leaves EVERY machine in the lane
       // unmatched at once.
-      infra: !!(machine && machine.infra) || INFRASTRUCTURE_ROLES.has(String(role || '').toLowerCase()),
+      // The name is the LAST resort and the one that covers a GOAD lane, where
+      // the deployer records no role and a failed spec read leaves nothing else.
+      infra: !!(machine && machine.infra) || INFRASTRUCTURE_ROLES.has(String(role || '').toLowerCase())
+        || INFRASTRUCTURE_NAMES.has(String(target.name || '').trim().toLowerCase()),
       power_state: (live && live.status) || 'unknown',
       runnable: eligible && runnableGuest(live),
       agent: publicTargetAgent(agent, at) };
@@ -390,15 +416,31 @@ function createService(deps = {}) {
   // with a cold memo and TTL expiry is testable through the injected now().
   const environments = deps.environments
     || createEnvironmentDirectory({ query, now, deadline: deps.deadline, goad: deps.goad });
+  // Queued work carries its (lane, VM) identity so cancel() can drop it. An
+  // opaque closure could only ever be cancelled by throwing the whole queue
+  // away, which is what a process restart already does badly: the in-memory
+  // pending list vanishes while every row stays 'queued' in the database, and
+  // the claim SQL then refuses to re-run any of them for QUEUE_TIMEOUT_MS.
   const pending = [];
   let active = 0;
-  function enqueue(task) {
-    pending.push(task);
+  function enqueue(key, task) {
+    pending.push({ key, task });
     pump();
+  }
+  /** Drop not-yet-started work. Returns the keys actually removed. */
+  function dropPending(keys) {
+    const wanted = new Set(keys);
+    const dropped = [];
+    for (let i = pending.length - 1; i >= 0; i--) {
+      if (!wanted.has(pending[i].key)) continue;
+      dropped.push(pending[i].key);
+      pending.splice(i, 1);
+    }
+    return dropped;
   }
   function pump() {
     while (active < 4 && pending.length) {
-      const task = pending.shift();
+      const { task } = pending.shift();
       active++;
       const run = async () => { try { await task(); } finally { active--; pump(); } };
       if (deps.schedule) deps.schedule(run); else setImmediate(run);
@@ -557,6 +599,8 @@ function createService(deps = {}) {
       const lane = row.rows[0];
       if (!laneEligible(lane) || object(lane.config).course_id !== courseId
         || jobForVm(lane.config, target.vm_id)?.job_id !== job.job_id
+        // Cancelled after this task was dequeued but before it reached a guest.
+        || jobForVm(lane.config, target.vm_id)?.status === 'cancelled'
         || !targetsFor(lane).some(t => t.vm_id === target.vm_id)) {
         throw failure(409, 'The selected VM is no longer in a running lane.');
       }
@@ -770,7 +814,7 @@ function createService(deps = {}) {
     const task = () => execute(lane.lane_id, object(lane.config).course_id, target, token, config, job).catch(() => {
       console.error('[Caldera agents] Could not save installation status.');
     });
-    enqueue(task);
+    enqueue(queueKey(lane.lane_id, target.vm_id), task);
     return { ...job };
   }
 
@@ -822,7 +866,62 @@ function createService(deps = {}) {
     return { paw: access.paw, group: groupFor(access.lane_id) };
   }
 
-  return { status, start, startBatch, authorize };
+  /**
+   * Cancel installations that have not started yet.
+   *
+   * QUEUED ONLY, deliberately. A running job has already put a script into a
+   * guest; marking its row cancelled would not stop that script, it would only
+   * make the record disagree with the machine. Those are left to finish or to
+   * time out on their own.
+   *
+   * This exists because there was previously no way out of a large batch. The
+   * pending list is in-memory, so the only way to stop one was to restart the
+   * app -- which drops the queue but leaves every row saying 'queued', and the
+   * claim SQL then refuses to re-run any of them until QUEUE_TIMEOUT_MS has
+   * passed. Cancelling properly writes a terminal status, which the same claim
+   * treats as free immediately, so the work can be re-issued at once.
+   *
+   * Both halves are needed and in this order: the database first, so a task
+   * that has already been dequeued still aborts when execute() re-reads the
+   * lane, then the in-memory queue, so nothing new starts.
+   */
+  async function cancelQueued(lanes, input = {}, { courseId } = {}) {
+    const laneIds = Array.isArray(input.lane_ids) && input.lane_ids.length
+      ? input.lane_ids : lanes.map(lane => lane.lane_id);
+    if (!Array.isArray(laneIds) || !laneIds.length || laneIds.length > MAX_BATCH_TARGETS
+      || laneIds.some(id => typeof id !== 'string' || !UUID.test(id))) {
+      throw failure(400, `Select between 1 and ${MAX_BATCH_TARGETS} lanes to cancel.`);
+    }
+    const allowed = new Set(lanes.map(lane => lane.lane_id));
+    if (laneIds.some(id => !allowed.has(id))) throw failure(404, 'A selected lane was not found in this course.');
+    // Collected BEFORE the update, or there is nothing left reading 'queued' to
+    // collect: the statement below is what changes that status.
+    const keys = [];
+    for (const lane of lanes) {
+      if (!laneIds.includes(lane.lane_id)) continue;
+      for (const [vmId, job] of Object.entries(object(lane.config).caldera_agent_jobs || {})) {
+        if (job && job.status === 'queued') keys.push(queueKey(lane.lane_id, vmId));
+      }
+    }
+    const stamp = new Date(now()).toISOString();
+    const result = await query(`UPDATE cybercore_lane SET config = jsonb_set(config, '{caldera_agent_jobs}',
+      COALESCE((SELECT jsonb_object_agg(e.key, CASE WHEN e.value->>'status' = 'queued'
+          THEN e.value || jsonb_build_object('status', 'cancelled', 'finished_at', $3::text,
+            'message', 'Installation cancelled before it started.')
+          ELSE e.value END)
+        FROM jsonb_each(COALESCE(config->'caldera_agent_jobs', '{}'::jsonb)) AS e), '{}'::jsonb)),
+      updated_at = NOW()
+      WHERE lane_id = ANY($1::uuid[])
+        AND config->>'course_id' IS NOT DISTINCT FROM $2::text
+        AND EXISTS (SELECT 1 FROM jsonb_each(COALESCE(config->'caldera_agent_jobs', '{}'::jsonb)) AS e
+                     WHERE e.value->>'status' = 'queued')
+      RETURNING lane_id, (SELECT count(*) FROM jsonb_each(COALESCE(config->'caldera_agent_jobs', '{}'::jsonb)) AS e
+                           WHERE e.value->>'status' = 'cancelled') AS cancelled`,
+    [laneIds, courseId || null, stamp]);
+    return { lanes: result.rows.length, dropped: dropPending(keys).length };
+  }
+
+  return { status, start, startBatch, authorize, cancelQueued };
 }
 
 module.exports = { createService, targetsFor, hashToken, pawFor, groupFor, seenAt, currentJob, JOB_TIMEOUT_MS,

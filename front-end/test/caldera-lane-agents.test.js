@@ -45,6 +45,21 @@ function harness(options = {}) {
   const query = async (sql, args) => {
     state.sql.push({ sql, args: clone(args) });
     if (state.dbFailure) throw new Error('database unavailable');
+    // Cancelling queued work. Modelled before the claim branch below because
+    // it also RETURNs lane_id but is addressed by lane ARRAY, not by $1 alone.
+    if (sql.includes("'cancelled'")) {
+      const [laneIds, courseId, stamp] = args;
+      const lane = state.lane;
+      if (!lane || !laneIds.includes(lane.lane_id) || (lane.config.course_id || null) !== courseId) return { rows: [] };
+      let cancelled = 0;
+      for (const job of Object.values(lane.config.caldera_agent_jobs || {})) {
+        if (job.status !== 'queued') continue;
+        Object.assign(job, { status: 'cancelled', finished_at: stamp, message: 'Installation cancelled before it started.' });
+        cancelled += 1;
+      }
+      if (cancelled && String(lane.config.caldera_agent_job?.status) === 'queued') lane.config.caldera_agent_job.status = 'cancelled';
+      return { rows: cancelled ? [{ lane_id: lane.lane_id, cancelled }] : [] };
+    }
     if (sql.includes('RETURNING lane_id')) {
       assert.match(sql, /WHERE lane_id = \$1 AND /);
       assertLifecycleSql(sql);
@@ -855,13 +870,18 @@ test('a spec outage cannot turn the attack box into an auto-selected target', as
   h.state.resources.push({ vmid: 906, node: 'actual-node', type: 'qemu', status: 'running' });
   const targets = new Map((await h.service.status([h.state.lane])).lanes[0].targets.map(t => [t.name, t]));
   assert.equal(targets.get('Attack box').infra, true);
-  // The residual gap, pinned rather than papered over: the GOAD deployer writes
-  // {vm_id, name, proxmox_name, type, node} and no role at all, so with the spec
-  // unreadable there is nothing left that says elk is the evidence plane. Only a
-  // name heuristic could recover it, and fact-source refuses name heuristics for
-  // exactly the reason they are wrong -- a machine called `elk-training-vm` is
-  // not a SIEM. The instructor sees an unflagged elk during an outage.
-  assert.equal(targets.get('elk').infra, false);
+  // THE GAP THIS USED TO PIN IS CLOSED, by exact name rather than by heuristic.
+  // The GOAD deployer writes {vm_id, name, proxmox_name, type, node} and no role
+  // at all, so with the spec unreadable nothing was left to say elk is the
+  // evidence plane -- and it was auto-selected in the Machines step and swept up
+  // by "Only missing agents", which installs an implant onto the store the class
+  // is graded on reading.
+  //
+  // The objection recorded here was against a name HEURISTIC, and it was right:
+  // `elk-training-vm` is not a SIEM. Exact matching does not carry it. Only the
+  // six fixed names the platform assigns itself are treated this way, and the
+  // test below pins that a merely similar name is still a target.
+  assert.equal(targets.get('elk').infra, true);
   assert.equal(targets.get('elk').role, '', 'nothing in lane config claims a role for it');
 });
 
@@ -1010,4 +1030,68 @@ test('an exec that completes still decides the outcome', async () => {
   assert.equal(h.job().status, 'failed');
   assert.match(h.job().error, /Defender blocked it/);
   assert.deepEqual(h.state.sleepCalls, [], 'a settled exec must cost no poll interval at all');
+});
+
+/**
+ * The name fallback is EXACT, and that boundary is the whole reason it is
+ * defensible.
+ *
+ * A heuristic here would be wrong in the way the earlier comment described: a
+ * machine called `elk-training-vm` is a lab box a student is meant to attack,
+ * and silently refusing to target it would be its own bug. Only the fixed names
+ * the platform assigns itself are treated as infrastructure.
+ */
+test('a machine whose name merely resembles infrastructure is still a target', async () => {
+  const lane = laneFixture();
+  lane.config.vms = [{ vm_id: 901, name: 'elk-training-vm' }, { vm_id: 902, name: 'ELK' }];
+  const h = harness({ state: { lane } });
+  const targets = new Map((await h.service.status([h.state.lane])).lanes[0].targets.map(t => [t.name, t]));
+  assert.equal(targets.get('elk-training-vm').infra, false, 'a similar name must not disqualify a real target');
+  // Case is not significance: the platform's own name, differently cased.
+  assert.equal(targets.get('ELK').infra, true);
+});
+
+/**
+ * Cancelling queued work.
+ *
+ * Before this there was no way out of a large batch. The pending list is
+ * in-memory, so the only way to stop one was to restart the app -- which drops
+ * the queue but leaves every row saying 'queued', and the claim SQL then refuses
+ * to re-run any of them until QUEUE_TIMEOUT_MS. Writing a terminal status is
+ * what makes the work immediately re-issuable.
+ */
+test('cancelling drops queued work and frees the VM to be re-queued at once', async () => {
+  const h = harness();
+  const queued = await h.start({ vm_id: 901, platform: 'windows' });
+  assert.equal(queued.status, 'queued');
+
+  const result = await h.service.cancelQueued([h.state.lane], {}, { courseId: COURSE_ID });
+  assert.equal(result.lanes, 1);
+  // `dropped` is 0 here, and that is the design rather than a miss: pump()
+  // eagerly dequeues up to the concurrency limit the moment work is enqueued,
+  // so the first four tasks of any batch are already scheduled and never sit in
+  // `pending` to be removed. Those are stopped by the status written above,
+  // which execute() re-reads before it touches a guest. Dropping is what saves
+  // the other 176 of a 180-machine batch, which do queue.
+  assert.equal(result.dropped, 0);
+  assert.equal(h.job().status, 'cancelled');
+
+  // The dequeued task, had one already been taken, must abort rather than reach
+  // a guest. Running the queue now must touch nothing.
+  await h.run();
+  assert.equal(h.state.calls.some(c => c[0] === 'windows'), false, 'no script may reach a guest after cancelling');
+
+  // And the VM is immediately claimable again -- the property the four-hour
+  // queue timeout otherwise denies.
+  const again = await h.start({ vm_id: 901, platform: 'windows' });
+  assert.equal(again.status, 'queued');
+});
+
+test('cancelling leaves a running install alone', async () => {
+  const h = harness();
+  await h.start({ vm_id: 901, platform: 'windows' });
+  h.state.lane.config.caldera_agent_jobs['901'].status = 'running';
+  const result = await h.service.cancelQueued([h.state.lane], {}, { courseId: COURSE_ID });
+  assert.equal(result.lanes, 0, 'a running job has already put a script in a guest');
+  assert.equal(h.job().status, 'running');
 });
