@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { createService, targetsFor, hashToken, pawFor, groupFor, seenAt, JOB_TIMEOUT_MS, QUEUE_TIMEOUT_MS,
-  CHECK_IN_ATTEMPTS } = require('../src/utils/caldera-lane-agents');
+  CHECK_IN_ATTEMPTS, CHECK_IN_INTERVAL_MS } = require('../src/utils/caldera-lane-agents');
 
 const LANE_ID = '11111111-2222-4333-8444-555555555555';
 const COURSE_ID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
@@ -967,4 +967,47 @@ test('batch dispatch is limited to four VMs and sibling job completion is preser
   assert.equal(maximum, 4);
   assert.ok(Object.values(h.state.lane.config.caldera_agent_jobs).every(job => job.status === 'completed'));
   assert.equal(h.state.lane.config.caldera_agent_access.tokens.length, 7);
+});
+
+/**
+ * A Windows install completes on the check-in WITHOUT waiting out the guest
+ * execution.
+ *
+ * QGA reports an exec as exited only once both captured output channels close,
+ * and the Windows script launches the agent through Start-Process with output
+ * redirection, so the detached agent holds those pipes for its whole life and
+ * the exec NEVER reports exited. Before the race, every Windows install paid
+ * EXEC_DEADLINE_MS in full: measured on a live cluster at 121 s per batch of
+ * four, of which 120 s was spent waiting for something that had already
+ * happened. A 180-VM class took an hour and three quarters.
+ *
+ * The exec here never settles at all, which is the honest model of that.
+ */
+test('a Windows install finishes on its check-in instead of waiting out the exec', async () => {
+  const h = harness({ result: () => new Promise(() => {}) });
+  await h.start({ vm_id: 901, platform: 'windows' });
+  await h.run();
+  assert.equal(h.job().status, 'completed');
+  assert.equal(h.job().message, 'Agent checked in to Caldera.');
+  // One poll interval, not the 120 s deadline.
+  assert.deepEqual(h.state.sleepCalls, [CHECK_IN_INTERVAL_MS]);
+  // And the superseded token is pruned on this path too, exactly as it is on
+  // the ordinary one -- the retained credential must not outlive its purpose
+  // just because the install finished early.
+  assert.equal(h.state.lane.config.caldera_agent_access.tokens.length, 1);
+});
+
+/**
+ * ...but an exec that CAN finish still wins, because its result is what carries
+ * the startup marker, the exit code and the installation warnings. On Linux the
+ * script redirects to a file rather than an inherited pipe, so the exec really
+ * does complete -- and a check-in that beat it would discard all three.
+ */
+test('an exec that completes still decides the outcome', async () => {
+  const h = harness({ result: () => ({ exited: true, exitcode: 1, stdout: '', stderr: 'Defender blocked it' }) });
+  await h.start({ vm_id: 901, platform: 'windows' });
+  await h.run();
+  assert.equal(h.job().status, 'failed');
+  assert.match(h.job().error, /Defender blocked it/);
+  assert.deepEqual(h.state.sleepCalls, [], 'a settled exec must cost no poll interval at all');
 });

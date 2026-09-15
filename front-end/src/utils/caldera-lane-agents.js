@@ -511,6 +511,45 @@ function createService(deps = {}) {
     } catch (_) { /* a stale credential outlives its usefulness harmlessly */ }
   }
 
+  /**
+   * Watch for this install's first check-in while the guest execution is still
+   * being polled. Resolves with the agent as soon as one appears, or null once
+   * the exec settles and the ordinary path should take over.
+   *
+   * THE EXEC GETS A HEAD START, and that is load-bearing rather than cautious.
+   * On Linux the script redirects the agent's output to a FILE rather than an
+   * inherited pipe, so the exec really does complete in a second or two -- and
+   * its result is what carries the startup marker, the exit code and the
+   * installation warnings. Polling immediately would let a fast check-in beat a
+   * fast exec and quietly discard all three. Sleeping one interval first means
+   * the exec wins whenever it can, and the check-in only wins the case where
+   * the exec never will.
+   *
+   * `agentIsNew` is required, not optional: paw, group and platform are stable
+   * across reinstalls, so a leftover agent from an EARLIER install matches the
+   * same predicate and would report success for an install that never started.
+   */
+  async function watchCheckIn(execState, config, job) {
+    const startedAt = Date.parse(job.started_at);
+    // Yield one turn before spending anything. An exec that has already settled
+    // -- which is the Linux case, and every fast failure on either platform --
+    // then wins without costing a poll interval or a single extra read, so this
+    // path is invisible to everything except the Windows wait it exists for.
+    await new Promise(resolve => setImmediate(resolve));
+    while (!execState.done) {
+      await sleep(CHECK_IN_INTERVAL_MS);
+      if (execState.done) return null;
+      let agents = [];
+      // Bounded by the exec deadline, so a Caldera that is briefly unreachable
+      // costs a retry rather than the install.
+      try { agents = await listAgents(config); } catch (_) { continue; }
+      const agent = agents.find(a => a.paw === job.paw && a.group === job.group
+        && a.platform === job.platform && seenAt(a.last_seen) >= startedAt - 2000);
+      if (agent && agentIsNew(agent, job.prior_agent)) return agent;
+    }
+    return null;
+  }
+
   async function execute(laneId, courseId, target, token, config, job) {
     try {
       // Re-read immediately before dispatch; a lane deleted or moved since the click cannot be used.
@@ -541,7 +580,34 @@ function createService(deps = {}) {
         ? await exec.agentExecArgv(live.node, target.vm_id, argv)
         : await exec.proxmoxFormPOST(`/api2/json/nodes/${live.node}/qemu/${target.vm_id}/agent/exec`, argv.map(arg => ['command', arg]));
       if (!started?.pid) throw failure(502, 'Guest execution did not return a process ID.');
-      const result = await exec.pollExecStatus(live.node, target.vm_id, started.pid, EXEC_DEADLINE_MS);
+      // RACE THE EXEC AGAINST THE CHECK-IN, because on Windows the exec cannot
+      // win. QGA withholds `exited` until both output channels close and the
+      // detached agent holds them for its whole life, so every Windows install
+      // used to pay EXEC_DEADLINE_MS in full -- measured at 121 s per batch of
+      // four, of which 120 s was spent waiting for something that had already
+      // happened. A 180-VM class took an hour and three quarters to install
+      // agents that were each beaconing within seconds.
+      //
+      // The check-in is the honest success signal either way; this just stops
+      // waiting once it arrives. The exec keeps running and is simply no longer
+      // waited on.
+      const execState = { done: false, value: null, error: null };
+      const execPending = exec.pollExecStatus(live.node, target.vm_id, started.pid, EXEC_DEADLINE_MS)
+        .then(value => { execState.done = true; execState.value = value; return value; },
+          error => { execState.done = true; execState.error = error; throw error; });
+      // Abandoned deliberately when the check-in wins; without this the walked
+      // -away-from rejection would surface as an unhandled rejection.
+      execPending.catch(() => {});
+      const early = await watchCheckIn(execState, config, job);
+      if (early) {
+        job.status = 'completed'; job.message = 'Agent checked in to Caldera.';
+        job.agent = publicAgent(early); job.finished_at = new Date(now()).toISOString();
+        await saveJob(laneId, job);
+        await prunePriorTokens(laneId, target.vm_id, hashToken(token));
+        return;
+      }
+      if (execState.error) throw execState.error;
+      const result = execState.value;
       const warnings = installationWarnings(result.stdout, token);
       if (warnings.length) job.warnings = warnings;
       // QGA reports an exec as exited only once BOTH captured output channels
