@@ -56,11 +56,27 @@ test('both installers retain the ingress prefix, explicit identity, certificate 
   assert.doesNotThrow(() => buildInstallScript({ ...options, serverUrl: 'https://caldera.example:8443/' }));
 });
 
-test('Linux detaches all standard streams and verifies the saved process executable before stopping it', () => {
+/**
+ * Stopping the existing agent is keyed on the EXECUTABLE PATH, not on a PID
+ * read back from a file.
+ *
+ * The previous contract verified a saved PID and aborted when it did not match.
+ * That abort is what stranded 72 agents in production: the capability token is
+ * rotated by the atomic claim BEFORE this script runs, so an abort here leaves a
+ * healthy agent beaconing with a credential the gate has already revoked --
+ * alive, mute, and not recoverable by retrying, because every retry rotates
+ * again. Scanning for the binary cannot be defeated by a stale or reused PID,
+ * and it is strictly narrower: it can only ever match our own executable.
+ */
+test('Linux stops the existing agent by executable path, never by a saved PID', () => {
   const script = buildInstallScript(options);
   assert.match(script, /nohup "\$binary"[^\n]+<\/dev\/null[^\n]+2>&1 &/);
-  assert.match(script, /readlink "\/proc\/\$managed_pid\/exe"/);
-  assert.ok(script.indexOf('[ "$managed_exe" = "$binary" ]') < script.indexOf('kill "$managed_pid"'));
+  assert.match(script, /managed_running\(\)/);
+  assert.match(script, /readlink "\$managed_proc\/exe"/);
+  assert.ok(script.includes('= "$binary" ] || continue'),
+    'the scan must compare each candidate against our own binary');
+  assert.ok(!script.includes('The saved PID belongs to another process'),
+    'a stale PID must no longer abort the install');
   assert.match(script, /--max-time 90/);
   assert.match(script, /7f454c46/);
 });
@@ -393,9 +409,19 @@ test('Windows preserves ordinary access-denied errors without labeling them as a
   assert.equal(fs.readdirSync(result.agentDir).some(name => name.endsWith('.download')), false);
 });
 
-test('Windows refuses a stale PID belonging to an unrelated executable', { skip: process.platform !== 'win32' }, t => {
+/**
+ * A stale PID must not block the install, and an unrelated process must still
+ * never be touched. Both halves matter, and they used to be in tension.
+ *
+ * The harness leaves a PID file pointing at an unrelated executable and mocks
+ * Stop-Process to throw, so if the installer went anywhere near that process
+ * this test fails outright. Matching on the binary path satisfies both: the
+ * unrelated process is invisible to the scan, and the install proceeds.
+ */
+test('Windows survives a stale PID and still never stops an unrelated process', { skip: process.platform !== 'win32' }, t => {
   const result = runMockWindowsInstall(t, { existing: true });
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /saved PID belongs to another process/);
-  assert.equal(fs.existsSync(path.join(result.temporary, 'launch.json')), false);
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(fs.existsSync(path.join(result.temporary, 'launch.json')),
+    'a stale PID file must not prevent the agent from being installed');
+  assert.match(result.stdout, /CYBERCORE_CALDERA_STARTED:/);
 });

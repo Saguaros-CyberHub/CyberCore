@@ -97,23 +97,27 @@ curl --fail --silent --show-error --connect-timeout 15 --max-time 90 \\
 magic=$(od -An -tx1 -N4 "$download" | tr -d ' \\n')
 [ "$magic" = '7f454c46' ] || fail 'Caldera did not return a Linux executable'
 chmod 700 "$download"
-if [ -f "$pid_file" ]; then
-  managed_pid=$(cat "$pid_file")
-  case "$managed_pid" in
-    ''|*[!0-9]*) fail 'The managed agent PID file is invalid' ;;
-  esac
-  if kill -0 "$managed_pid" 2>/dev/null; then
-    managed_exe=$(readlink "/proc/$managed_pid/exe") || fail 'Cannot verify the existing managed process'
-    [ "$managed_exe" = "$binary" ] || fail 'The saved PID belongs to another process; refusing to stop it'
-    kill "$managed_pid" || fail 'Cannot stop the existing managed agent'
-    attempt=0
-    while kill -0 "$managed_pid" 2>/dev/null; do
-      attempt=$((attempt + 1))
-      [ "$attempt" -lt 10 ] || fail 'The existing managed agent did not stop'
-      sleep 1
-    done
-  fi
-fi
+# Stopped by EXECUTABLE PATH, not by the saved PID — see the Windows branch for
+# why. A stale or reused PID made the old code either refuse to proceed or
+# report a healthy stop as a failure, and because the capability token is
+# rotated before this script runs, that failure strands a still-running agent
+# with a credential the gate no longer accepts.
+managed_running() {
+  for managed_proc in /proc/[0-9]*; do
+    [ "$(readlink "$managed_proc/exe" 2>/dev/null)" = "$binary" ] || continue
+    printf '%s\\n' "\${managed_proc#/proc/}"
+  done
+}
+for managed_pid in $(managed_running); do
+  kill "$managed_pid" 2>/dev/null || true
+done
+attempt=0
+while [ -n "$(managed_running)" ]; do
+  attempt=$((attempt + 1))
+  [ "$attempt" -lt 15 ] || fail 'The existing managed agent did not stop'
+  sleep 1
+done
+rm -f "$pid_file"
 mv -f "$download" "$binary"
 nohup "$binary" -server "$server" -group "$group" -paw "$paw" -v </dev/null >>"$log_file" 2>&1 &
 managed_pid=$!
@@ -145,7 +149,8 @@ try {
   if (-not $env:ProgramData) { throw 'ProgramData is unavailable' }
   $agentDir = Join-Path $env:ProgramData ('EPM\\' + $paw)
   New-Item -ItemType Directory -Path $agentDir -Force | Out-Null
-  $binary = Join-Path $agentDir 'epmagent.exe'
+  $implantProcessName = 'epmagent'
+  $binary = Join-Path $agentDir ($implantProcessName + '.exe')
   # Where installs before the rename put the agent. Referenced ONLY to stop and
   # remove it: two processes sharing one paw beacon twice and execute every
   # ability twice, and nothing in Caldera would show why.
@@ -272,20 +277,39 @@ try {
   try {
     if ($stream.ReadByte() -ne 77 -or $stream.ReadByte() -ne 90) { throw 'Caldera did not return a Windows executable' }
   } finally { $stream.Dispose() }
-  if (Test-Path -LiteralPath $pidFile) {
-    $pidText = (Get-Content -LiteralPath $pidFile -Raw).Trim()
-    if ($pidText -notmatch '^[0-9]+$') { throw 'The managed agent PID file is invalid' }
-    $managedPid = [int]$pidText
-    $existing = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = ' + $managedPid)
-    if ($existing) {
-      if (-not [string]::Equals($existing.ExecutablePath, $binary, [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'The saved PID belongs to another process; refusing to stop it'
-      }
-      Stop-Process -Id $managedPid -Force -ErrorAction Stop
-      Wait-Process -Id $managedPid -Timeout 10 -ErrorAction SilentlyContinue
-      if (Get-Process -Id $managedPid -ErrorAction SilentlyContinue) { throw 'The existing managed agent did not stop' }
-    }
+  # Stopped by EXECUTABLE PATH, not by the saved PID.
+  #
+  # The PID file is a hint that goes stale: a reboot reuses PIDs, and a
+  # recorded PID that now belongs to something else made the old code throw
+  # "the saved PID belongs to another process" and abort. Worse, the previous
+  # version verified the PID, killed it, then re-checked with Get-Process --
+  # which finds a REUSED PID too, so a healthy stop reported
+  # "The existing managed agent did not stop" and failed the install.
+  #
+  # That failure is not recoverable by retrying, because the capability token
+  # is rotated by the atomic claim BEFORE this script runs: the agent that
+  # would not die keeps beaconing with a credential the gate no longer
+  # accepts, so it is alive, mute, and invisible. 72 agents were stranded
+  # exactly this way.
+  #
+  # Matching on the path is strictly narrower than trusting a PID: it can only
+  # ever stop a process running OUR binary, so the guard the old code was
+  # reaching for is stronger here, not weaker.
+  $managedRunning = { @(Get-Process -Name $implantProcessName -ErrorAction SilentlyContinue |
+    Where-Object { [string]::Equals($_.Path, $binary, [StringComparison]::OrdinalIgnoreCase) }) }
+  $managedFound = & $managedRunning
+  foreach ($managedProcess in $managedFound) {
+    try { Stop-Process -Id $managedProcess.Id -Force -ErrorAction Stop } catch {}
   }
+  if ($managedFound.Count -gt 0) {
+    $managedStopped = $false
+    foreach ($wait in 1..15) {
+      if ((& $managedRunning).Count -eq 0) { $managedStopped = $true; break }
+      Start-Sleep -Seconds 1
+    }
+    if (-not $managedStopped) { throw 'The existing managed agent did not stop' }
+  }
+  Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
   Move-Item -LiteralPath $download -Destination $binary -Force
   $agentArguments = @('-server', $server, '-group', $group, '-paw', $paw, '-v')
   $agentProcess = Start-Process -FilePath $binary -ArgumentList $agentArguments -WorkingDirectory $agentDir -WindowStyle Hidden -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -PassThru

@@ -487,6 +487,30 @@ function createService(deps = {}) {
     [laneId, JSON.stringify(job), job.job_id, String(job.vm_id)]);
   }
 
+  /**
+   * Drop the superseded token for this VM, once the new agent has actually
+   * checked in.
+   *
+   * The claim deliberately keeps the previous token so that a FAILED install
+   * leaves the existing agent working instead of stranding it. That retention
+   * has to end the moment it is no longer needed, or a VM keeps two valid
+   * credentials indefinitely.
+   *
+   * Never allowed to fail the install: by the time this runs the agent is
+   * beaconing and the job is genuinely complete, so a prune error is a stale
+   * credential to clean up later, not a reason to report failure.
+   */
+  async function prunePriorTokens(laneId, vmId, tokenHash) {
+    try {
+      await query(`UPDATE cybercore_lane SET config =
+        jsonb_set(config, '{caldera_agent_access,tokens}',
+          COALESCE((SELECT jsonb_agg(t) FROM jsonb_array_elements(
+            COALESCE(config->'caldera_agent_access'->'tokens', '[]'::jsonb)) t
+            WHERE t->>'vm_id' <> $2::text OR t->>'token_hash' = $3), '[]'::jsonb)), updated_at = NOW()
+        WHERE lane_id = $1`, [laneId, String(vmId), tokenHash]);
+    } catch (_) { /* a stale credential outlives its usefulness harmlessly */ }
+  }
+
   async function execute(laneId, courseId, target, token, config, job) {
     try {
       // Re-read immediately before dispatch; a lane deleted or moved since the click cannot be used.
@@ -572,6 +596,7 @@ function createService(deps = {}) {
           job.status = 'completed'; job.message = 'Agent checked in to Caldera.';
           job.agent = publicAgent(agent); job.finished_at = new Date(now()).toISOString();
           await saveJob(laneId, job);
+          await prunePriorTokens(laneId, target.vm_id, hashToken(token));
           return;
         }
         if (agent) priorAgentSeen = agent;
@@ -642,10 +667,29 @@ function createService(deps = {}) {
     const access = { vm_id: target.vm_id, token_hash: hashToken(token), paw: job.paw, created_at: job.started_at };
     // Atomic claim: concurrent clicks and app workers cannot launch two installers.
     // JSONB updates retain unrelated lane fields and tokens for other VMs.
+    //
+    // THE PREVIOUS TOKEN FOR THIS VM IS KEPT, and that is not untidiness.
+    // This claim commits BEFORE the install script runs, so dropping the old
+    // token here means any failure downstream — the existing agent refusing to
+    // stop, a download error, Defender — leaves a HEALTHY agent still beaconing
+    // with a credential the gate has already revoked. It is then alive, mute and
+    // unrecoverable by retry, because every retry repeats the rotation. That is
+    // how 72 agents were stranded at once.
+    //
+    // Exactly one prior token is retained (the highest ordinal for this vm_id),
+    // so the array cannot grow without bound, and prunePriorTokens() drops it as
+    // soon as the new agent actually checks in. A failed install is therefore
+    // retryable, which is the property that was missing.
     const claimed = await query(`UPDATE cybercore_lane SET config =
       jsonb_set(jsonb_set(config, '{caldera_agent_access}', jsonb_build_object('tokens',
-        COALESCE((SELECT jsonb_agg(t) FROM jsonb_array_elements(COALESCE(config->'caldera_agent_access'->'tokens', '[]'::jsonb)) t
-          WHERE t->>'vm_id' <> $3::text), '[]'::jsonb) || jsonb_build_array($4::jsonb))),
+        COALESCE((SELECT jsonb_agg(t.value ORDER BY t.ord)
+          FROM jsonb_array_elements(COALESCE(config->'caldera_agent_access'->'tokens', '[]'::jsonb))
+               WITH ORDINALITY AS t(value, ord)
+          WHERE t.value->>'vm_id' <> $3::text
+             OR t.ord = (SELECT max(u.ord)
+                  FROM jsonb_array_elements(COALESCE(config->'caldera_agent_access'->'tokens', '[]'::jsonb))
+                       WITH ORDINALITY AS u(value, ord)
+                 WHERE u.value->>'vm_id' = $3::text)), '[]'::jsonb) || jsonb_build_array($4::jsonb))),
         '{caldera_agent_job}', $2::jsonb) || jsonb_build_object('caldera_agent_jobs',
           COALESCE(config->'caldera_agent_jobs', '{}'::jsonb) || jsonb_build_object($3::text, $2::jsonb)), updated_at = NOW()
       WHERE lane_id = $1 AND ${eligibleLaneSql()}
