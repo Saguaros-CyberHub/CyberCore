@@ -164,6 +164,9 @@
       list: 'idle',       // the adversary picker's own load state
       listReason: null,
       items: [],
+      packPending: false,
+      packReport: null,
+      packError: null,
       picked: null,       // an id on this page and nowhere else
       upstream: null
     };
@@ -315,8 +318,32 @@
     var head = '<div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap; margin-bottom:0.5rem;">'
       + '<strong style="font-size:0.9rem;">Adversaries on the authoring console</strong>'
       + '<span style="flex:1;"></span>'
+      + '<button type="button" class="btn btn-secondary" id="blueTeamAdversarySeed"'
+      + (a.packPending ? ' disabled' : '') + '>Update CyberCore profiles</button>'
       + '<button type="button" class="btn btn-secondary" id="blueTeamAdversaryRefresh"'
       + (a.list === 'working' ? ' disabled' : '') + '>&#8635; Refresh</button></div>';
+
+    if (a.packPending) head += '<p>Resolving abilities and updating CyberCore profiles&hellip;</p>';
+    if (a.packError) head += '<p role="alert">' + escHtml(a.packError) + '</p>';
+    if (a.packReport) {
+      var updated = a.packReport.filter(function (p) { return p.created; }).length;
+      head += '<details open><summary>' + updated + ' CyberCore profiles updated; '
+        + (a.packReport.length - updated) + ' skipped</summary>'
+        + '<p>Missing abilities leave previous profiles unchanged. Review skipped or failed profiles before running them.</p>';
+      a.packReport.forEach(function (p) {
+        head += '<p><strong>' + escHtml(p.name) + '</strong>: '
+          + (p.created ? 'updated' : escHtml(p.reason || 'skipped'));
+        if (p.error) head += ' (' + escHtml(p.error.code) + (p.error.status ? ', HTTP ' + escHtml(p.error.status) : '') + ')';
+        if (p.unresolved && p.unresolved.length) {
+          head += '<br>Missing: ' + p.unresolved.map(function (step) {
+            return escHtml(step.technique + (step.name ? ' - ' + step.name : '') + ' (' + step.reason + ')');
+          }).join(', ');
+        }
+        if (p.prerequisites && p.prerequisites.length) head += '<br>' + p.prerequisites.map(escHtml).join(' ');
+        head += '</p>';
+      });
+      head += '</details>';
+    }
 
     if (a.list === 'working') return head + '<p>Loading&hellip;</p>';
     if (a.list === 'unavailable') {
@@ -609,6 +636,9 @@
     var refresh = document.getElementById('blueTeamAdversaryRefresh');
     if (refresh) refresh.addEventListener('click', function () { return loadAdversaries(); });
 
+    var seed = document.getElementById('blueTeamAdversarySeed');
+    if (seed) seed.addEventListener('click', function () { return updateAdversaryPack(); });
+
     var rows = document.querySelectorAll('.blueTeamAdversary');
     Array.prototype.forEach.call(rows, function (row) {
       row.addEventListener('click', function () {
@@ -659,13 +689,39 @@
       });
   }
 
+  function updateAdversaryPack() {
+    if (tier !== 'staff' || !authoring || authoring.packPending) return Promise.resolve();
+    var state = authoring;
+    var courseId = currentCourseId;
+    state.packPending = true;
+    state.packError = null;
+    state.packReport = null;
+    renderShell();
+    return authoringRequest('/authoring/adversary-pack', { method: 'POST', body: {}, courseId: courseId })
+      .then(function (res) {
+        if (authoring !== state || currentCourseId !== courseId) return;
+        state.packReport = res.packs || [];
+        return loadAdversaries();
+      })
+      .catch(function (err) {
+        state.packError = 'Profile update failed: ' + err.message;
+      })
+      .then(function () {
+        state.packPending = false;
+        if (authoring === state && currentCourseId === courseId) renderShell();
+      });
+  }
+
   /** What the authoring console holds. A read; it changes nothing anywhere. */
   function loadAdversaries() {
     if (!authoring) return Promise.resolve();
-    authoring.list = 'working';
+    var state = authoring;
+    var courseId = currentCourseId;
+    state.list = 'working';
     renderShell();
-    return authoringRequest('/authoring/adversaries')
+    return authoringRequest('/authoring/adversaries', { courseId: courseId })
       .then(function (res) {
+        if (authoring !== state || currentCourseId !== courseId) return;
         authoring.upstream = res.upstream || authoring.upstream;
         if (res.ready) {
           authoring.list = 'ready';
@@ -682,10 +738,11 @@
         }
       })
       .catch(function () {
+        if (authoring !== state || currentCourseId !== courseId) return;
         authoring.list = 'unavailable';
         authoring.listReason = 'error';
       })
-      .then(function () { renderShell(); });
+      .then(function () { if (authoring === state && currentCourseId === courseId) renderShell(); });
   }
 
   function renderShell() {

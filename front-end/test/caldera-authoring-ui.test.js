@@ -510,6 +510,64 @@ function withInstance(client, fn) {
   return Promise.resolve(fn()).finally(() => { authoring.resolveTarget = REAL_RESOLVE_TARGET; });
 }
 
+test('managed pack seed previews, updates complete profiles, and preserves incomplete profiles', async () => {
+  resetState();
+  const { cle } = loadRouters();
+  const packModule = require('../src/incident/caldera/adversary-pack');
+  const originalResolve = packModule.resolveAll;
+  const complete = {
+    key: 'test-pack', adversary_id: 'stable-pack', name: 'CyberCore: Test',
+    description: 'Test profile', platform: 'windows', atomic_ordering: ['new-atomic-step'],
+    resolved: [{ technique: 'T1033', ability_id: 'new-atomic-step', name: 'User discovery',
+      tactic: 'discovery', plugin: 'atomic' }], unresolved: [],
+  };
+  const updates = [];
+  const client = {
+    listAbilities: async () => [],
+    upsertAdversary: async (body) => { updates.push(body); return body; },
+  };
+  try {
+    packModule.resolveAll = () => [complete, { ...complete, key: 'missing', adversary_id: 'preserve-me',
+      unresolved: [{ technique: 'T1082', reason: 'no_ability_for_platform' }] }];
+    const preview = await withInstance(client, () => call(cle, 'POST', '/authoring/adversary-pack',
+      { body: { dry_run: true } }));
+    assert.strictEqual(preview.status, 200);
+    assert.strictEqual(preview.body.dry_run, true);
+    assert.strictEqual(preview.body.packs[0].reason, 'preview');
+    assert.strictEqual(preview.body.packs[1].reason, 'incomplete_profile');
+    assert.strictEqual(updates.length, 0);
+    assert.strictEqual(state.audits.length, 0);
+
+    const seeded = await withInstance(client, () => call(cle, 'POST', '/authoring/adversary-pack'));
+    assert.strictEqual(seeded.status, 200);
+    assert.strictEqual(seeded.body.packs[0].created, true);
+    assert.strictEqual(seeded.body.packs[1].created, false);
+    assert.deepStrictEqual(updates.map(p => p.adversary_id), ['stable-pack']);
+    assert.deepStrictEqual(updates[0].atomic_ordering, ['new-atomic-step']);
+    assert.strictEqual(state.audits[0].metadata.created, 1);
+
+    const denied = await withInstance(client, () => call(cle, 'POST', '/authoring/adversary-pack',
+      { user: { role: 'student', userId: STUDENT } }));
+    assert.strictEqual(denied.status, 404);
+    assert.strictEqual(updates.length, 1);
+
+    packModule.resolveAll = () => [complete, { ...complete, key: 'failed', adversary_id: 'failed-pack' }];
+    client.upsertAdversary = async (body) => {
+      if (body.adversary_id === 'failed-pack') throw new CalderaError('unavailable', { code: 'CALDERA_HTTP', status: 503 });
+      updates.push(body);
+      return body;
+    };
+    const partial = await withInstance(client, () => call(cle, 'POST', '/authoring/adversary-pack'));
+    assert.strictEqual(partial.status, 200);
+    assert.strictEqual(partial.body.packs[0].created, true);
+    assert.strictEqual(partial.body.packs[1].reason, 'update_failed');
+    assert.strictEqual(partial.body.packs[1].error.status, 503);
+    assert.strictEqual(state.audits[state.audits.length - 1].metadata.created, 1);
+  } finally {
+    packModule.resolveAll = originalResolve;
+  }
+});
+
 // ---------------------------------------------------------------------------
 // §3 The CiAB console's endpoints
 // ---------------------------------------------------------------------------
@@ -1028,6 +1086,54 @@ test('E9-U7: the CLE twin refuses the link when the refresh did not land', async
   assert.match(html, /CALDERA_AUTHORING_UPSTREAM/);
   assert.ok(!/href="\/caldera/.test(html));
   assert.deepStrictEqual(h.fetches.filter((f) => /adversaries/.test(f.url)), []);
+});
+
+test('staff can update the managed pack and see skipped profiles without launching it', async () => {
+  const h = mountCleConsole({
+    tier: 'staff',
+    fetchAnswers: [
+      [/\/authoring\/fact-source$/, READY_PAYLOAD],
+      [/\/authoring\/adversaries$/, ADVERSARY_PAYLOAD],
+      [/\/authoring\/adversary-pack$/, { packs: [
+        { name: 'CyberCore: Survey', created: true, prerequisites: ['Domain membership'] },
+        { name: '<script>profile</script>', created: false, reason: 'incomplete_profile',
+          unresolved: [{ technique: 'T1082', reason: 'no_matching_ability' }] },
+      ] }],
+    ],
+  });
+  await h.CleBlueTeam.load();
+  await h.dom.document.getElementById('blueTeamAuthorBtn').handlers.click[0]();
+  await h.dom.document.getElementById('blueTeamAdversarySeed').handlers.click[0]();
+  const html = h.dom.document.getElementById('blueTeamContent').innerHTML;
+  assert.match(html, /1 CyberCore profiles updated; 1 skipped/);
+  assert.match(html, /T1082 \(no_matching_ability\)/);
+  assert.match(html, /Domain membership/);
+  assert.match(html, /&lt;script&gt;profile&lt;\/script&gt;/);
+  assert.ok(!html.includes('<script>profile'));
+  assert.strictEqual(h.fetches.filter(f => f.method === 'POST' && /adversary-pack$/.test(f.url)).length, 1);
+  assert.ok(!h.fetches.some(f => /operations/.test(f.url)));
+});
+
+test('an adversary refresh cannot populate a different course after navigation', async () => {
+  let finishRefresh;
+  const lateResponse = new Promise(resolve => { finishRefresh = resolve; });
+  const h = mountCleConsole({ tier: 'staff', fetchAnswers: [
+    [/\/authoring\/fact-source$/, READY_PAYLOAD],
+    [/\/authoring\/adversaries$/, lateResponse],
+  ] });
+  await h.CleBlueTeam.load();
+  const preparing = h.dom.document.getElementById('blueTeamAuthorBtn').handlers.click[0]();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(h.fetches.some(f => /authoring\/adversaries$/.test(f.url)));
+  h.CleBlueTeam.reset();
+  h.context.currentCourseId = 'another-course';
+  await h.CleBlueTeam.load();
+  finishRefresh(ADVERSARY_PAYLOAD);
+  await preparing;
+  const html = h.dom.document.getElementById('blueTeamContent').innerHTML;
+  assert.match(html, /Author attacks/);
+  assert.ok(!html.includes('Zeta invoice fraud'));
+  assert.ok(!html.includes('Adversaries on the authoring console'));
 });
 
 // ---------------------------------------------------------------------------

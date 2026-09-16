@@ -1,0 +1,1440 @@
+{
+  "_provenance": {
+    "description": "Read-only metadata extracted from pinned upstream YAML. Commands intentionally omitted; this is not a live-server fixture. Atomic IDs derived with the pinned importer md5(json.dumps(test)) algorithm.",
+    "atomic_red_team_ref": "388942adbd9641f4dfdcf079d7efe9a75ec0ac43",
+    "atomic_plugin_ref": "b90958810ffae1d328124f9e8af75f524616b27f",
+    "stockpile_ref": "08f37d8c1c5325910176d9fbaf9a83efccafd96c",
+    "caldera_version": "5.3.0"
+  },
+  "abilities": [
+    {
+      "ability_id": "35d92515122effdd73801c6ac3021da7",
+      "name": "Dump LSASS.exe Memory using comsvcs.dll",
+      "technique_id": "T1003.001",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "psh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1003.001/T1003.001.yaml",
+      "atomic_test_guid": "2536dee2-12fb-459a-8c37-971844fa73be",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": true,
+        "cleanup": true
+      }
+    },
+    {
+      "ability_id": "7d8ee68f0e9731db82964f558f614608",
+      "name": "System Network Configuration Discovery on Windows",
+      "technique_id": "T1016",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "cmd"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1016/T1016.yaml",
+      "atomic_test_guid": "970ab6a1-0157-4f3f-9a73-ec4166754b23",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": false,
+        "cleanup": false
+      }
+    },
+    {
+      "ability_id": "d8fedd81fc35099a5a3f1a8f5d2082dd",
+      "name": "Remote System Discovery - net group Domain Computers",
+      "technique_id": "T1018",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "cmd"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1018/T1018.yaml",
+      "atomic_test_guid": "f1bf6c8f-9016-4edf-aff9-80b65f5d711f",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": false,
+        "cleanup": false
+      }
+    },
+    {
+      "ability_id": "fcb5b04ee56a74c73f29b9eecb6d4b17",
+      "name": "Remote System Discovery - nltest",
+      "technique_id": "T1018",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "cmd"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1018/T1018.yaml",
+      "atomic_test_guid": "52ab5108-3f6f-42fb-8ba3-73bc054f22c8",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": false,
+        "cleanup": false
+      }
+    },
+    {
+      "ability_id": "221d4ebcb41e708b6ee90c1c0369a969",
+      "name": "GetCurrent User with PowerShell Script",
+      "technique_id": "T1033",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "psh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1033/T1033.yaml",
+      "atomic_test_guid": "1392bd0f-5d5a-429e-81d9-eb9d4d4d5b3b",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": false,
+        "cleanup": true
+      }
+    },
+    {
+      "ability_id": "1aebbd43152842aca40fef4f930a5d1e",
+      "name": "User Discovery - whoami",
+      "technique_id": "T1033",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "cmd"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1033/T1033.yaml",
+      "atomic_test_guid": "aab580c7-cc30-4a7c-b5a9-46a29066b022",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": false,
+        "cleanup": false
+      }
+    },
+    {
+      "ability_id": "7b32a80a52a587e51945f9bd4bf6264b",
+      "name": "System Network Connections Discovery with PowerShell",
+      "technique_id": "T1049",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "psh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1049/T1049.yaml",
+      "atomic_test_guid": "f069f0f1-baad-4831-aa2b-eddac4baac4a",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": false,
+        "cleanup": false
+      }
+    },
+    {
+      "ability_id": "ba8ddc38c7c6ced12fecc0d695c5e57c",
+      "name": "Powershell Cmdlet Scheduled Task",
+      "technique_id": "T1053.005",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "psh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1053.005/T1053.005.yaml",
+      "atomic_test_guid": "af9fd58f-c4ac-4bf2-a9ba-224b71ff25fd",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": false,
+        "cleanup": true
+      }
+    },
+    {
+      "ability_id": "2e91cc775c1137720e978b906e2396fe",
+      "name": "Scheduled task Local",
+      "technique_id": "T1053.005",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "cmd"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1053.005/T1053.005.yaml",
+      "atomic_test_guid": "42f53695-ad4a-4546-abb6-7d837f644a71",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": false,
+        "cleanup": true
+      }
+    },
+    {
+      "ability_id": "1d48fc4147a7bcd47bdf60db7dde9640",
+      "name": "Process Discovery - Get-Process",
+      "technique_id": "T1057",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "psh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1057/T1057.yaml",
+      "atomic_test_guid": "3b3809b6-a54b-4f5b-8aff-cb51f2e97b34",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": false,
+        "cleanup": false
+      }
+    },
+    {
+      "ability_id": "f8de05d1741dcc468f772ab0ff4dac72",
+      "name": "Process Discovery - tasklist",
+      "technique_id": "T1057",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "cmd"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1057/T1057.yaml",
+      "atomic_test_guid": "c5806a4f-62b8-4900-980b-c7ec004e9908",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": false,
+        "cleanup": false
+      }
+    },
+    {
+      "ability_id": "2f5e819a0fdae54834fa85a0b797d302",
+      "name": "PowerShell Command Execution",
+      "technique_id": "T1059.001",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "cmd"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1059.001/T1059.001.yaml",
+      "atomic_test_guid": "a538de64-1c74-46ed-aa60-b995ed302598",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": false,
+        "cleanup": false
+      }
+    },
+    {
+      "ability_id": "a098a7b460198c82a15f4c7c3355275c",
+      "name": "Basic Permission Groups Discovery Windows (Domain)",
+      "technique_id": "T1069.002",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "cmd"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1069.002/T1069.002.yaml",
+      "atomic_test_guid": "dd66d77d-8998-48c0-8024-df263dc2ce5d",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": false,
+        "cleanup": false
+      }
+    },
+    {
+      "ability_id": "e7d023dfcc77f4b701b6cdce79e9c3c2",
+      "name": "Hostname Discovery (Windows)",
+      "technique_id": "T1082",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "cmd"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1082/T1082.yaml",
+      "atomic_test_guid": "85cfbf23-4a1e-4342-8792-007e004b975f",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": false,
+        "cleanup": false
+      }
+    },
+    {
+      "ability_id": "d7967a23c8c030c698893f242e622be1",
+      "name": "File and Directory Discovery (PowerShell)",
+      "technique_id": "T1083",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "psh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1083/T1083.yaml",
+      "atomic_test_guid": "2158908e-b7ef-4c21-8a83-3ce4dd05a924",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": false,
+        "cleanup": false
+      }
+    },
+    {
+      "ability_id": "6334877e8e3ba48f7835d4856d90a282",
+      "name": "Enumerate all accounts on Windows (Local)",
+      "technique_id": "T1087.001",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "cmd"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1087.001/T1087.001.yaml",
+      "atomic_test_guid": "80887bec-5a9b-4efc-a81d-f83eb2eb32ab",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": false,
+        "cleanup": false
+      }
+    },
+    {
+      "ability_id": "e528524d6a3cddaaddc89fcc719e2a3f",
+      "name": "Enumerate all accounts via PowerShell (Local)",
+      "technique_id": "T1087.001",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "psh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1087.001/T1087.001.yaml",
+      "atomic_test_guid": "ae4b6361-b5f8-46cb-a3f9-9cf108ccfe7b",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": false,
+        "cleanup": false
+      }
+    },
+    {
+      "ability_id": "ee41528024c63881b53302e996a79020",
+      "name": "Enumerate all accounts (Domain)",
+      "technique_id": "T1087.002",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "cmd"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1087.002/T1087.002.yaml",
+      "atomic_test_guid": "6fbc9e68-5ad7-444a-bd11-8bf3136c477e",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": false,
+        "cleanup": false
+      }
+    },
+    {
+      "ability_id": "0bacba34be276136d07781079e912090",
+      "name": "Modify Registry of Current User Profile - cmd",
+      "technique_id": "T1112",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "cmd"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1112/T1112.yaml",
+      "atomic_test_guid": "1324796b-d0f6-455a-b4ae-21ffee6aa6b9",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": false,
+        "cleanup": true
+      }
+    },
+    {
+      "ability_id": "670f7a429a198da72915103c264bded4",
+      "name": "View available share drives",
+      "technique_id": "T1135",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "cmd"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1135/T1135.yaml",
+      "atomic_test_guid": "ab39a04f-0c93-4540-9ff2-83f862c385ae",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": false,
+        "cleanup": false
+      }
+    },
+    {
+      "ability_id": "e922717a38fc8806bc9b56b111b999ff",
+      "name": "Security Software Discovery - powershell",
+      "technique_id": "T1518.001",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "psh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1518.001/T1518.001.yaml",
+      "atomic_test_guid": "7f566051-f033-49fb-89de-b6bacab730f0",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": false,
+        "cleanup": false
+      }
+    },
+    {
+      "ability_id": "1f15ab22c39a9b6bb2bb0d77276dfcb3",
+      "name": "Add Executable Shortcut Link to User Startup Folder",
+      "technique_id": "T1547.001",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "psh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1547.001/T1547.001.yaml",
+      "atomic_test_guid": "24e55612-85f6-4bd6-ae74-a73d02e3441d",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": true,
+        "cleanup": true
+      }
+    },
+    {
+      "ability_id": "aeb4fdbb3453127caaef0ad5c250d838",
+      "name": "Extracting passwords with findstr",
+      "technique_id": "T1552.001",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "psh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1552.001/T1552.001.yaml",
+      "atomic_test_guid": "0e56bf29-ff49-4ea5-9af4-3b81283fd513",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": false,
+        "cleanup": false
+      }
+    },
+    {
+      "ability_id": "6bbb6f8b1db42e2c2c79892e8c31feb3",
+      "name": "Enumerate credentials from Windows Credential Manager using vaultcmd.exe [Windows Credentials]",
+      "technique_id": "T1555",
+      "plugin": "atomic",
+      "tactic": null,
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "psh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/redcanaryco/atomic-red-team/388942adbd9641f4dfdcf079d7efe9a75ec0ac43/atomics/T1555/T1555.yaml",
+      "atomic_test_guid": "36753ded-e5c4-4eb5-bc3c-e8fba236878d",
+      "review": {
+        "dependencies": 0,
+        "external_downloads": false,
+        "elevation_required": false,
+        "cleanup": false
+      }
+    },
+    {
+      "ability_id": "90c2efaa-8205-480d-8bb6-61d90dbaf81b",
+      "name": "Find files",
+      "technique_id": "T1005",
+      "tactic": "collection",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "darwin",
+          "name": "sh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.basic": [
+              {
+                "source": "host.file.path",
+                "edge": "has_extension",
+                "target": "file.sensitive.extension"
+              }
+            ]
+          }
+        },
+        {
+          "platform": "windows",
+          "name": "psh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.basic": [
+              {
+                "source": "host.file.path",
+                "edge": "has_extension",
+                "target": "file.sensitive.extension"
+              }
+            ]
+          }
+        },
+        {
+          "platform": "windows",
+          "name": "pwsh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.basic": [
+              {
+                "source": "host.file.path",
+                "edge": "has_extension",
+                "target": "file.sensitive.extension"
+              }
+            ]
+          }
+        },
+        {
+          "platform": "linux",
+          "name": "sh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.basic": [
+              {
+                "source": "host.file.path",
+                "edge": "has_extension",
+                "target": "file.sensitive.extension"
+              }
+            ]
+          }
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/collection/90c2efaa-8205-480d-8bb6-61d90dbaf81b.yml"
+    },
+    {
+      "ability_id": "e8017c46-acb8-400c-a4b5-b3362b5b5baa",
+      "name": "Network Interface Configuration",
+      "technique_id": "T1016",
+      "tactic": "discovery",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "darwin",
+          "name": "sh"
+        },
+        {
+          "platform": "linux",
+          "name": "sh"
+        },
+        {
+          "platform": "windows",
+          "name": "psh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/discovery/e8017c46-acb8-400c-a4b5-b3362b5b5baa.yml"
+    },
+    {
+      "ability_id": "a0676fe1-cd52-482e-8dde-349b73f9aa69",
+      "name": "Preferred WIFI",
+      "technique_id": "T1016",
+      "tactic": "discovery",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "darwin",
+          "name": "sh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.wifipref": [
+              {
+                "source": "wifi.network.ssid"
+              }
+            ]
+          }
+        },
+        {
+          "platform": "linux",
+          "name": "sh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.wifipref": [
+              {
+                "source": "wifi.network.ssid"
+              }
+            ]
+          }
+        },
+        {
+          "platform": "windows",
+          "name": "psh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.wifipref": [
+              {
+                "source": "wifi.network.ssid"
+              }
+            ]
+          }
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/discovery/a0676fe1-cd52-482e-8dde-349b73f9aa69.yml"
+    },
+    {
+      "ability_id": "921055f4-5970-4707-909e-62f594234d91",
+      "name": "Remote Host Ping",
+      "technique_id": "T1016",
+      "tactic": "discovery",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "psh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.firewallping": [
+              {
+                "source": "remote.host.fqdn",
+                "edge": "isAccessibleFrom"
+              }
+            ]
+          }
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/discovery/921055f4-5970-4707-909e-62f594234d91.yml",
+      "requirements": [
+        {
+          "plugins.stockpile.app.requirements.not_exists": [
+            {
+              "source": "remote.host.fqdn",
+              "edge": "isAccessibleFrom"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "ability_id": "9a30740d-3aa8-4c23-8efa-d51215e8a5b9",
+      "name": "Scan WIFI networks",
+      "technique_id": "T1016",
+      "tactic": "discovery",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "darwin",
+          "name": "sh"
+        },
+        {
+          "platform": "linux",
+          "name": "sh"
+        },
+        {
+          "platform": "windows",
+          "name": "psh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/discovery/9a30740d-3aa8-4c23-8efa-d51215e8a5b9.yml"
+    },
+    {
+      "ability_id": "65048ec1-f7ca-49d3-9410-10813e472b30",
+      "name": "Copy 54ndc47 (SMB)",
+      "technique_id": "T1021.002",
+      "tactic": "lateral-movement",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "psh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.54ndc47_remote_copy": [
+              {
+                "source": "remote.host.fqdn",
+                "edge": "has_54ndc47_copy"
+              }
+            ]
+          }
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/lateral-movement/65048ec1-f7ca-49d3-9410-10813e472b30.yml",
+      "requirements": [
+        {
+          "plugins.stockpile.app.requirements.not_exists": [
+            {
+              "source": "remote.host.fqdn",
+              "edge": "has_54ndc47_copy"
+            }
+          ]
+        },
+        {
+          "plugins.stockpile.app.requirements.basic": [
+            {
+              "source": "remote.host.fqdn",
+              "edge": "has_share"
+            }
+          ]
+        },
+        {
+          "plugins.stockpile.app.requirements.no_backwards_movement": [
+            {
+              "source": "remote.host.fqdn"
+            }
+          ]
+        },
+        {
+          "plugins.stockpile.app.requirements.reachable": [
+            {
+              "source": "remote.host.fqdn",
+              "edge": "isAccessibleFrom"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "ability_id": "aa6ec4dd-db09-4925-b9b9-43adeb154686",
+      "name": "Mount Share",
+      "technique_id": "T1021.002",
+      "tactic": "lateral-movement",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "psh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.share_mounted": [
+              {
+                "source": "remote.host.fqdn",
+                "edge": "has_share"
+              }
+            ]
+          }
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/lateral-movement/aa6ec4dd-db09-4925-b9b9-43adeb154686.yml",
+      "requirements": [
+        {
+          "plugins.stockpile.app.requirements.not_exists": [
+            {
+              "source": "remote.host.fqdn",
+              "edge": "has_share"
+            }
+          ]
+        },
+        {
+          "plugins.stockpile.app.requirements.basic": [
+            {
+              "source": "domain.user.name",
+              "edge": "has_password",
+              "target": "domain.user.password"
+            }
+          ]
+        },
+        {
+          "plugins.stockpile.app.requirements.req_like": [
+            {
+              "source": "remote.host.fqdn",
+              "edge": "has_admin",
+              "target": "domain.user.name"
+            }
+          ]
+        },
+        {
+          "plugins.stockpile.app.requirements.reachable": [
+            {
+              "source": "remote.host.fqdn",
+              "edge": "isAccessibleFrom"
+            }
+          ]
+        },
+        {
+          "plugins.stockpile.app.requirements.no_backwards_movement": [
+            {
+              "source": "remote.host.fqdn"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "ability_id": "bd527b63-9f9e-46e0-9816-b8434d2b8989",
+      "name": "Current User",
+      "technique_id": "T1033",
+      "tactic": "discovery",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "darwin",
+          "name": "sh"
+        },
+        {
+          "platform": "linux",
+          "name": "sh"
+        },
+        {
+          "platform": "windows",
+          "name": "psh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/discovery/bd527b63-9f9e-46e0-9816-b8434d2b8989.yml"
+    },
+    {
+      "ability_id": "c0da588f-79f0-4263-8998-7496b1a40596",
+      "name": "Identify active user",
+      "technique_id": "T1033",
+      "tactic": "discovery",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "darwin",
+          "name": "sh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.basic": [
+              {
+                "source": "host.user.name"
+              },
+              {
+                "source": "domain.user.name"
+              }
+            ]
+          }
+        },
+        {
+          "platform": "linux",
+          "name": "sh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.basic": [
+              {
+                "source": "host.user.name"
+              },
+              {
+                "source": "domain.user.name"
+              }
+            ]
+          }
+        },
+        {
+          "platform": "windows",
+          "name": "psh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.basic": [
+              {
+                "source": "host.user.name"
+              },
+              {
+                "source": "domain.user.name"
+              }
+            ]
+          }
+        },
+        {
+          "platform": "windows",
+          "name": "cmd",
+          "parsers": {
+            "plugins.stockpile.app.parsers.basic": [
+              {
+                "source": "host.user.name"
+              },
+              {
+                "source": "domain.user.name"
+              }
+            ]
+          }
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/discovery/c0da588f-79f0-4263-8998-7496b1a40596.yml"
+    },
+    {
+      "ability_id": "ea713bc4-63f0-491c-9a6f-0b01d560b87e",
+      "name": "Exfil staged directory",
+      "technique_id": "T1041",
+      "tactic": "exfiltration",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "darwin",
+          "name": "sh"
+        },
+        {
+          "platform": "linux",
+          "name": "sh"
+        },
+        {
+          "platform": "windows",
+          "name": "psh"
+        },
+        {
+          "platform": "windows",
+          "name": "pwsh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/exfiltration/ea713bc4-63f0-491c-9a6f-0b01d560b87e.yml",
+      "requirements": [
+        {
+          "plugins.stockpile.app.requirements.paw_provenance": [
+            {
+              "source": "host.dir.compress"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "ability_id": "ece5dde3-d370-4c20-b213-a1f424aa8d03",
+      "name": "Start 54ndc47 (WMI)",
+      "technique_id": "T1047",
+      "tactic": "execution",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "psh"
+        },
+        {
+          "platform": "windows",
+          "name": "cmd"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/execution/ece5dde3-d370-4c20-b213-a1f424aa8d03.yml",
+      "requirements": [
+        {
+          "plugins.stockpile.app.requirements.basic": [
+            {
+              "source": "domain.user.name",
+              "edge": "has_password",
+              "target": "domain.user.password"
+            }
+          ]
+        },
+        {
+          "plugins.stockpile.app.requirements.basic": [
+            {
+              "source": "remote.host.fqdn",
+              "edge": "has_54ndc47_copy"
+            }
+          ]
+        },
+        {
+          "plugins.stockpile.app.requirements.req_like": [
+            {
+              "source": "remote.host.fqdn",
+              "edge": "has_admin",
+              "target": "domain.user.name"
+            }
+          ]
+        },
+        {
+          "plugins.stockpile.app.requirements.no_backwards_movement": [
+            {
+              "source": "remote.host.fqdn"
+            }
+          ]
+        },
+        {
+          "plugins.stockpile.app.requirements.reachable": [
+            {
+              "source": "remote.host.fqdn",
+              "edge": "isAccessibleFrom"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "ability_id": "3b5db901-2cb8-4df7-8043-c4628a6a5d5a",
+      "name": "Find user processes",
+      "technique_id": "T1057",
+      "tactic": "discovery",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "darwin",
+          "name": "sh"
+        },
+        {
+          "platform": "linux",
+          "name": "sh"
+        },
+        {
+          "platform": "windows",
+          "name": "psh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/discovery/3b5db901-2cb8-4df7-8043-c4628a6a5d5a.yml",
+      "requirements": [
+        {
+          "plugins.stockpile.app.requirements.paw_provenance": [
+            {
+              "source": "host.user.name"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "ability_id": "5a39d7ed-45c9-4a79-b581-e5fb99e24f65",
+      "name": "System processes",
+      "technique_id": "T1057",
+      "tactic": "discovery",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "psh"
+        },
+        {
+          "platform": "windows",
+          "name": "cmd"
+        },
+        {
+          "platform": "windows",
+          "name": "donut_amd64"
+        },
+        {
+          "platform": "darwin",
+          "name": "sh"
+        },
+        {
+          "platform": "linux",
+          "name": "sh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/discovery/5a39d7ed-45c9-4a79-b581-e5fb99e24f65.yml"
+    },
+    {
+      "ability_id": "335cea7b-bec0-48c6-adfb-6066070f5f68",
+      "name": "View Processes",
+      "technique_id": "T1057",
+      "tactic": "discovery",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "darwin",
+          "name": "sh"
+        },
+        {
+          "platform": "linux",
+          "name": "sh"
+        },
+        {
+          "platform": "windows",
+          "name": "psh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/discovery/335cea7b-bec0-48c6-adfb-6066070f5f68.yml"
+    },
+    {
+      "ability_id": "0093c0e0-68b6-4cab-b0d4-2b40b3c78f71",
+      "name": "enumerate VMs",
+      "technique_id": "T1057",
+      "tactic": "discovery",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "linux",
+          "name": "sh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.acrn": [
+              {
+                "source": "hypervisor.vm.name"
+              }
+            ]
+          }
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/discovery/0093c0e0-68b6-4cab-b0d4-2b40b3c78f71.yml"
+    },
+    {
+      "ability_id": "6469befa-748a-4b9c-a96d-f191fde47d89",
+      "name": "Create staging directory",
+      "technique_id": "T1074.001",
+      "tactic": "collection",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "darwin",
+          "name": "sh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.basic": [
+              {
+                "source": "host.dir.staged"
+              }
+            ]
+          }
+        },
+        {
+          "platform": "linux",
+          "name": "sh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.basic": [
+              {
+                "source": "host.dir.staged"
+              }
+            ]
+          }
+        },
+        {
+          "platform": "windows",
+          "name": "psh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.basic": [
+              {
+                "source": "host.dir.staged"
+              }
+            ]
+          }
+        },
+        {
+          "platform": "windows",
+          "name": "pwsh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.basic": [
+              {
+                "source": "host.dir.staged"
+              }
+            ]
+          }
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/collection/6469befa-748a-4b9c-a96d-f191fde47d89.yml"
+    },
+    {
+      "ability_id": "4e97e699-93d7-4040-b5a3-2e906a58199e",
+      "name": "Stage sensitive files",
+      "technique_id": "T1074.001",
+      "tactic": "collection",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "darwin",
+          "name": "sh"
+        },
+        {
+          "platform": "linux",
+          "name": "sh"
+        },
+        {
+          "platform": "windows",
+          "name": "psh"
+        },
+        {
+          "platform": "windows",
+          "name": "cmd"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/collection/4e97e699-93d7-4040-b5a3-2e906a58199e.yml",
+      "requirements": [
+        {
+          "plugins.stockpile.app.requirements.paw_provenance": [
+            {
+              "source": "host.file.path"
+            }
+          ]
+        },
+        {
+          "plugins.stockpile.app.requirements.paw_provenance": [
+            {
+              "source": "host.dir.staged"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "ability_id": "30732a56-4a23-4307-9544-09caf2ed29d5",
+      "name": "Find deletable dirs (per user)",
+      "technique_id": "T1082",
+      "tactic": "discovery",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "darwin",
+          "name": "sh"
+        },
+        {
+          "platform": "linux",
+          "name": "sh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/discovery/30732a56-4a23-4307-9544-09caf2ed29d5.yml",
+      "requirements": [
+        {
+          "plugins.stockpile.app.requirements.paw_provenance": [
+            {
+              "source": "host.user.name"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "ability_id": "46098c66-8d9a-4d23-8a95-dd5021c385ae",
+      "name": "Linux Enumeration & Privilege Escalation Discovery Script",
+      "technique_id": "T1082",
+      "tactic": "discovery",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "linux",
+          "name": "sh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/discovery/46098c66-8d9a-4d23-8a95-dd5021c385ae.yml"
+    },
+    {
+      "ability_id": "52177cc1-b9ab-4411-ac21-2eadc4b5d3b8",
+      "name": "List Directory",
+      "technique_id": "T1083",
+      "tactic": "discovery",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "darwin",
+          "name": "sh"
+        },
+        {
+          "platform": "linux",
+          "name": "sh"
+        },
+        {
+          "platform": "windows",
+          "name": "psh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/discovery/52177cc1-b9ab-4411-ac21-2eadc4b5d3b8.yml"
+    },
+    {
+      "ability_id": "a41c2324-8c63-4b15-b3c5-84f920d1f226",
+      "name": "Locate file from printer queue",
+      "technique_id": "T1083",
+      "tactic": "discovery",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "linux",
+          "name": "sh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.basic": [
+              {
+                "source": "host.system.path"
+              }
+            ]
+          }
+        },
+        {
+          "platform": "darwin",
+          "name": "sh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.basic": [
+              {
+                "source": "host.system.path"
+              }
+            ]
+          }
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/discovery/a41c2324-8c63-4b15-b3c5-84f920d1f226.yml"
+    },
+    {
+      "ability_id": "6e1a53c0-7352-4899-be35-fa7f364d5722",
+      "name": "Print Working Directory",
+      "technique_id": "T1083",
+      "tactic": "discovery",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "darwin",
+          "name": "sh"
+        },
+        {
+          "platform": "linux",
+          "name": "sh"
+        },
+        {
+          "platform": "windows",
+          "name": "psh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/discovery/6e1a53c0-7352-4899-be35-fa7f364d5722.yml"
+    },
+    {
+      "ability_id": "c1cd6388-3ced-48c7-a511-0434c6ba8f48",
+      "name": "Find local users",
+      "technique_id": "T1087.001",
+      "tactic": "discovery",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "darwin",
+          "name": "sh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.basic": [
+              {
+                "source": "host.user.name"
+              }
+            ]
+          }
+        },
+        {
+          "platform": "linux",
+          "name": "sh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.basic": [
+              {
+                "source": "host.user.name"
+              }
+            ]
+          }
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/discovery/c1cd6388-3ced-48c7-a511-0434c6ba8f48.yml"
+    },
+    {
+      "ability_id": "3aad5312-d48b-4206-9de4-39866c12e60f",
+      "name": "Credentials in Registry - HKCU",
+      "technique_id": "T1552.002",
+      "tactic": "credential-access",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "psh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/credential-access/3aad5312-d48b-4206-9de4-39866c12e60f.yml"
+    },
+    {
+      "ability_id": "300157e5-f4ad-4569-b533-9d1fa0e74d74",
+      "name": "Compress staged directory",
+      "technique_id": "T1560.001",
+      "tactic": "exfiltration",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "darwin",
+          "name": "sh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.basic": [
+              {
+                "source": "host.dir.compress"
+              }
+            ]
+          }
+        },
+        {
+          "platform": "linux",
+          "name": "sh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.basic": [
+              {
+                "source": "host.dir.compress"
+              }
+            ]
+          }
+        },
+        {
+          "platform": "windows",
+          "name": "psh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.basic": [
+              {
+                "source": "host.dir.compress"
+              }
+            ]
+          }
+        },
+        {
+          "platform": "windows",
+          "name": "pwsh",
+          "parsers": {
+            "plugins.stockpile.app.parsers.basic": [
+              {
+                "source": "host.dir.compress"
+              }
+            ]
+          }
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/exfiltration/300157e5-f4ad-4569-b533-9d1fa0e74d74.yml",
+      "requirements": [
+        {
+          "plugins.stockpile.app.requirements.paw_provenance": [
+            {
+              "source": "host.dir.staged"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "ability_id": "49470433-30ce-4714-a44b-bea9dbbeca9a",
+      "name": "Disable Windows Defender Real-Time Protection",
+      "technique_id": "T1562.001",
+      "tactic": "defense-evasion",
+      "plugin": "stockpile",
+      "executors": [
+        {
+          "platform": "windows",
+          "name": "psh"
+        }
+      ],
+      "source": "https://raw.githubusercontent.com/mitre/stockpile/08f37d8c1c5325910176d9fbaf9a83efccafd96c/data/abilities/defense-evasion/49470433-30ce-4714-a44b-bea9dbbeca9a.yml"
+    }
+  ]
+}

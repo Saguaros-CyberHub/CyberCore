@@ -1,170 +1,186 @@
 'use strict';
 
-/**
- * CyberCore's adversary pack.
- * ============================================================================
- * These profiles are resolved against the live catalog instead of shipped as
- * files, because the atomic plugin derives an ability id from a hash of the
- * Atomic Red Team test object. That id is stable only for a pinned
- * ATOMIC_RED_TEAM_REF, so a hardcoded profile would not break when the pin moved
- * — it would quietly lose that step while still reporting success, and the
- * answer key would still name the technique nobody ran.
- *
- * So the properties worth testing are about RESOLUTION: that it prefers the
- * right ability when several implement a technique, that it never silently drops
- * one, that it is deterministic, and that the one order-dependent profile keeps
- * its order.
- *
- * Run: node --test test/caldera-adversary-pack.test.js
- */
-
 const test = require('node:test');
 const assert = require('node:assert/strict');
-
-const pack = require('../src/incident/caldera/adversary-pack');
-const { PACKS, resolvePack, resolveAll, toWire } = pack;
-
-/** A catalog row shaped the way GET /api/v2/abilities returns them. */
+const fs = require('node:fs');
+const path = require('node:path');
+const { PACKS, resolvePack, resolveAll, toWire } = require('../src/incident/caldera/adversary-pack');
+const fixture = require('./fixtures/caldera-pack-catalog.json');
 const row = (id, technique, opts = {}) => ({
   ability_id: id,
   name: opts.name || id,
   technique_id: technique,
-  tactic: opts.tactic || 'discovery',
-  plugin: opts.plugin || 'stockpile',
+  tactic: 'discovery',
+  plugin: opts.plugin === undefined ? 'stockpile' : opts.plugin,
   executors: (opts.platforms || ['windows']).map((platform) => ({ platform, name: 'psh' })),
 });
-
 const byKey = (key) => PACKS.find((p) => p.key === key);
+const basicPack = (steps, extra = {}) => ({ key: 'test', name: 'Test', description: 'Test profile', platform: 'windows', steps, ...extra });
 
-// ---------------------------------------------------------------------------
-// Resolution
-// ---------------------------------------------------------------------------
-
-test('a technique implemented only by atomic still resolves', () => {
-  const resolved = resolvePack(byKey('credential-harvest'), [
-    row('at-lsass', 'T1003.001', { plugin: 'atomic', name: 'Dump LSASS.exe' }),
-  ]);
-  assert.deepEqual(resolved.atomic_ordering, ['at-lsass']);
-  assert.equal(resolved.resolved[0].plugin, 'atomic');
-});
-
-/**
- * Stockpile's abilities are written for Caldera and usually parse their output
- * into facts; atomic's shell out and return text. When both implement a
- * technique the one that feeds the rest of the operation wins.
- */
-test('stockpile wins a tie, but only a tie', () => {
-  const catalog = [
-    row('at-user', 'T1033', { plugin: 'atomic' }),
-    row('sp-user', 'T1033', { plugin: 'stockpile' }),
+test('curated Atomic selection wins over Stockpile and similarly named tests', () => {
+  const intent = basicPack([{ technique: 'T1059.001', plugin: 'atomic', abilityName: 'PowerShell Command Execution' }]);
+  const abilities = [
+    row('0', 'T1059.001', { name: 'PowerShell Command Execution', plugin: 'stockpile' }),
+    row('1', 'T1059.001', { name: 'PowerShell Command Execution extended', plugin: 'atomic' }),
+    row('2', 'T1059.001', { name: 'PowerShell Command Execution', plugin: null }),
+    row('selected-live-id', 'T1059.001', { name: 'PowerShell Command Execution', plugin: 'atomic' }),
   ];
-  assert.deepEqual(resolvePack(byKey('foothold-survey'), catalog).atomic_ordering, ['sp-user']);
-  // With no stockpile row the atomic one is not merely tolerated, it is chosen.
-  assert.deepEqual(
-    resolvePack(byKey('foothold-survey'), [row('at-user', 'T1033', { plugin: 'atomic' })]).atomic_ordering,
-    ['at-user'],
-  );
+  assert.deepEqual(resolvePack(intent, abilities).atomic_ordering, ['selected-live-id']);
+  assert.deepEqual(resolvePack(intent, [...abilities].reverse()), resolvePack(intent, abilities));
 });
 
-test('an ability for the wrong platform is never chosen', () => {
-  const linux = resolvePack(byKey('linux-survey'), [row('win-only', 'T1033', { platforms: ['windows'] })]);
-  assert.deepEqual(linux.atomic_ordering, []);
-  assert.ok(linux.unresolved.some((u) => u.technique === 'T1033'));
-
-  const both = resolvePack(byKey('linux-survey'), [row('cross', 'T1033', { platforms: ['windows', 'linux'] })]);
-  assert.deepEqual(both.atomic_ordering, ['cross']);
+test('missing exact test is reported rather than replaced by another test of that technique', () => {
+  const intent = basicPack([{ technique: 'T1003.001', plugin: 'atomic', abilityName: 'Dump LSASS.exe Memory using comsvcs.dll' }]);
+  const actual = resolvePack(intent, [row('different', 'T1003.001', { name: 'Dump LSASS.exe Memory using NanoDump', plugin: 'atomic' })]);
+  assert.deepEqual(actual.atomic_ordering, []);
+  assert.deepEqual(actual.unresolved, [{ step: 1, technique: 'T1003.001', plugin: 'atomic', name: 'Dump LSASS.exe Memory using comsvcs.dll', reason: 'no_matching_ability' }]);
 });
 
-/**
- * The same rule adversary.js applies to unmapped steps: an instructor who cannot
- * see what was removed cannot tell a scoping decision from a bug.
- */
-test('every step that cannot be resolved is reported', () => {
-  const resolved = resolvePack(byKey('foothold-survey'), [row('sp-user', 'T1033')]);
-  assert.equal(resolved.resolved.length, 1);
-  assert.equal(resolved.unresolved.length, byKey('foothold-survey').steps.length - 1);
-  for (const miss of resolved.unresolved) assert.ok(miss.technique && miss.reason);
+test('exact name cannot override platform or technique constraints', () => {
+  const intent = basicPack([{ technique: 'T1033', plugin: 'atomic', abilityName: 'User Discovery - whoami' }]);
+  const actual = resolvePack(intent, [
+    row('wrong-platform', 'T1033', { name: 'User Discovery - whoami', plugin: 'atomic', platforms: ['linux'] }),
+    row('wrong-technique', 'T1082', { name: 'User Discovery - whoami', plugin: 'atomic' }),
+  ]);
+  assert.equal(actual.atomic_ordering.length, 0);
+  assert.equal(actual.unresolved.length, 1);
 });
 
-test('one ability is never ordered twice', () => {
-  // A single row claiming two of the pack's techniques would otherwise appear
-  // twice in the ordering and run twice.
-  const shared = { ...row('multi', 'T1033'), technique_id: 'T1033' };
-  const resolved = resolvePack({ key: 'x', name: 'X', description: 'd', platform: 'windows',
-    steps: [{ technique: 'T1033' }, { technique: 'T1033' }] }, [shared]);
-  assert.deepEqual(resolved.atomic_ordering, ['multi']);
-  assert.equal(resolved.unresolved.length, 1);
-  assert.equal(resolved.unresolved[0].reason, 'duplicate_ability');
+test('legacy technique-only packs retain Stockpile preference and cross-platform support', () => {
+  const intent = basicPack([{ technique: 'T1033' }], { platform: 'linux' });
+  const atomic = row('at', 'T1033', { plugin: 'atomic', platforms: ['linux'] });
+  const stockpile = row('sp', 'T1033', { platforms: ['windows', 'linux'] });
+  assert.deepEqual(resolvePack(intent, [atomic, stockpile]).atomic_ordering, ['sp']);
+  assert.deepEqual(resolvePack(intent, [atomic]).atomic_ordering, ['at']);
+  assert.deepEqual(resolvePack(intent, [row('windows', 'T1033')]).atomic_ordering, []);
 });
 
-// ---------------------------------------------------------------------------
-// The order-dependent profile
-// ---------------------------------------------------------------------------
+test('all pinned upstream selectors resolve and every Windows profile deliberately includes Atomic', () => {
+  for (const p of PACKS) {
+    const actual = resolvePack(p, fixture.abilities);
+    assert.deepEqual(actual.unresolved, [], p.key);
+    assert.equal(actual.resolved.length, p.steps.length, p.key);
+    if (p.platform === 'windows') {
+      assert.ok(actual.resolved.some((s) => s.plugin === 'atomic'), p.key);
+      for (const step of p.steps) assert.ok(step.plugin && step.abilityName, p.key);
+    }
+    assert.deepEqual(actual.prerequisites, p.prerequisites);
+  }
+  assert.deepEqual(PACKS.slice(6).map((p) => p.key), ['powershell-foothold', 'domain-mapping', 'scheduled-persistence']);
+});
 
-/**
- * THE ONE THAT BREAKS SILENTLY IF REORDERED.
- *
- * The SMB and WMI lateral abilities gate on an `isAccessibleFrom` RELATIONSHIP,
- * not on facts, and that relationship has to be LEARNED — a source-seeded one
- * faults inside Caldera 5.3.0's link generation rather than being ignored. The
- * remote-host discovery step is what creates it. Move it later in the list and
- * every step after it skips, while the operation still reports success.
- */
-test('the lateral profile discovers remote hosts before it tries to reach one', () => {
-  const steps = byKey('lateral-move').steps.map((s) => s.technique);
-  assert.equal(steps[0], 'T1018', 'remote-host discovery must be the first step of the lateral profile');
-  for (const later of ['T1021.002', 'T1570']) {
-    assert.ok(steps.indexOf(later) > steps.indexOf('T1018'),
-      `${later} must come after T1018 or its isAccessibleFrom relationship is never learned`);
+test('Atomic review metadata is pinned to the vendored data and avoids runtime downloads/installers', () => {
+  const dockerfile = fs.readFileSync(path.join(__dirname, '../../infrastructure/caldera/Dockerfile'), 'utf8');
+  assert.ok(dockerfile.includes(`ARG ATOMIC_RED_TEAM_REF=${fixture._provenance.atomic_red_team_ref}`), 'Review fixture/selectors when updating the ART pin');
+  assert.ok(dockerfile.includes(`ARG CALDERA_VERSION=${fixture._provenance.caldera_version}`), 'Review Stockpile selectors when updating Caldera');
+  for (const ability of fixture.abilities.filter((r) => r.plugin === 'atomic')) {
+    assert.equal(ability.review.dependencies, 0, ability.name);
+    assert.equal(ability.review.external_downloads, false, ability.name);
+    assert.ok(ability.atomic_test_guid && ability.source.includes(fixture._provenance.atomic_red_team_ref));
   }
 });
 
-// ---------------------------------------------------------------------------
-// Determinism and the wire body
-// ---------------------------------------------------------------------------
+const parsers = (ability) => ability.executors.flatMap((ex) => Object.values(ex.parsers || {}).flat());
+const requirements = (ability) => (ability.requirements || []).flatMap((r) => Object.values(r).flat());
 
-test('the same catalog resolves to the same profile every time', () => {
-  const catalog = [row('a', 'T1033'), row('b', 'T1082'), row('c', 'T1016')];
-  const once = JSON.stringify(resolveAll(catalog));
-  assert.equal(once, JSON.stringify(resolveAll(catalog)));
-  // Listing order must not change the outcome either.
-  assert.equal(once, JSON.stringify(resolveAll([...catalog].reverse())));
+test('lateral steps preserve actual learned reachability, mounted-share and transferred-agent relationships', () => {
+  const actual = resolvePack(byKey('lateral-move'), fixture.abilities);
+  const ordered = actual.atomic_ordering.map((id) => fixture.abilities.find((r) => r.ability_id === id));
+  assert.equal(ordered[0].name, 'Remote Host Ping');
+  assert.equal(ordered[0].technique_id, 'T1016', 'T1018 cannot resolve upstream Remote Host Ping');
+  const mountIndex = ordered.findIndex((r) => r.name === 'Mount Share');
+  const copyIndex = ordered.findIndex((r) => r.name === 'Copy 54ndc47 (SMB)');
+  const startIndex = ordered.findIndex((r) => r.name === 'Start 54ndc47 (WMI)');
+  assert.ok(mountIndex > 0 && copyIndex > mountIndex && startIndex > copyIndex);
+  assert.ok(parsers(ordered[0]).some((p) => p.edge === 'isAccessibleFrom'));
+  assert.ok(parsers(ordered[mountIndex]).some((p) => p.edge === 'has_share'));
+  assert.ok(requirements(ordered[copyIndex]).some((p) => p.edge === 'has_share'));
+  assert.ok(parsers(ordered[copyIndex]).some((p) => p.edge === 'has_54ndc47_copy'));
+  assert.ok(requirements(ordered[startIndex]).some((p) => p.edge === 'has_54ndc47_copy'));
+  const withoutPing = fixture.abilities.filter((r) => r.name !== 'Remote Host Ping');
+  const missing = resolvePack(byKey('lateral-move'), withoutPing).unresolved;
+  assert.equal(missing[0].name, 'Remote Host Ping');
+  assert.equal(missing[0].plugin, 'stockpile');
 });
 
-test('profile ids are stable, so re-seeding updates rather than duplicates', () => {
-  const first = resolvePack(byKey('foothold-survey'), []).adversary_id;
-  const second = resolvePack(byKey('foothold-survey'), [row('a', 'T1033')]).adversary_id;
-  assert.equal(first, second, 'the id must not depend on what resolved');
-  assert.match(first, /^[0-9a-f-]{36}$/);
-  // Distinct packs never collide.
-  assert.equal(new Set(PACKS.map((p) => resolvePack(p, []).adversary_id)).size, PACKS.length);
+test('collection creates staging and copies discovered files before compression and upload', () => {
+  const actual = resolvePack(byKey('stage-and-exfil'), fixture.abilities);
+  const ordered = actual.atomic_ordering.map((id) => fixture.abilities.find((r) => r.ability_id === id));
+  assert.deepEqual(ordered.slice(2).map((r) => r.name), [
+    'Find files', 'Create staging directory', 'Stage sensitive files', 'Compress staged directory', 'Exfil staged directory',
+  ]);
+  assert.ok(parsers(ordered[2]).some((p) => p.source === 'host.file.path'));
+  assert.ok(parsers(ordered[3]).some((p) => p.source === 'host.dir.staged'));
+  assert.ok(requirements(ordered[4]).some((p) => p.source === 'host.file.path'));
+  assert.ok(requirements(ordered[4]).some((p) => p.source === 'host.dir.staged'));
+  assert.ok(parsers(ordered[5]).some((p) => p.source === 'host.dir.compress'));
+  assert.ok(requirements(ordered[6]).some((p) => p.source === 'host.dir.compress'));
 });
 
-test('the wire body carries only what Caldera accepts', () => {
-  const wire = toWire(resolvePack(byKey('foothold-survey'), [row('a', 'T1033')]));
-  assert.deepEqual(Object.keys(wire).sort(),
-    ['adversary_id', 'atomic_ordering', 'description', 'name', 'objective', 'tags']);
-  assert.deepEqual(wire.atomic_ordering, ['a']);
-  assert.ok(wire.name.startsWith('CyberCore: '), 'ours must be distinguishable in the picker');
+test('same technique can intentionally run different tests, but one ability is never ordered twice', () => {
+  const repeated = basicPack([{ technique: 'T1033' }, { technique: 'T1033' }]);
+  const actual = resolvePack(repeated, [row('one', 'T1033')]);
+  assert.deepEqual(actual.atomic_ordering, ['one']);
+  assert.equal(actual.unresolved[0].reason, 'duplicate_ability');
+  const domain = resolvePack(byKey('domain-mapping'), fixture.abilities);
+  assert.equal(domain.resolved.filter((r) => r.technique === 'T1018').length, 2);
+  assert.equal(new Set(domain.atomic_ordering).size, domain.atomic_ordering.length);
 });
 
-test('an empty or malformed catalog yields no ordering and never throws', () => {
+test('existing profile identities survive changes in selectors and catalog hashes', () => {
+  const existing = {
+    'foothold-survey': '7047c5e8-51fb-510f-9b99-b04bea6c0cc7',
+    'credential-harvest': 'ab64d7fa-640c-5d92-8268-bc4d7378c356',
+    'lateral-move': '45bf309b-9955-5921-a8c4-1094b35fea69',
+    'tamper-and-persist': '89d1cc56-1dbc-56a2-864a-9be1cdea2006',
+    'stage-and-exfil': '4f596b7a-bbcb-506c-98be-7c6e144e222a',
+    'linux-survey': '3c9a6dda-f57b-54ac-8b64-56a1a733d11a',
+  };
+  const rehashed = fixture.abilities.map((r) => ({ ...r, ability_id: `live-${r.ability_id}` }));
+  for (const [key, id] of Object.entries(existing)) {
+    assert.equal(resolvePack(byKey(key), []).adversary_id, id);
+    assert.equal(resolvePack(byKey(key), rehashed).adversary_id, id);
+  }
+  for (const p of resolveAll(rehashed)) {
+    assert.ok(p.atomic_ordering.every((id) => id.startsWith('live-')), 'IDs come only from the live catalog');
+  }
+});
+
+test('resolution is independent of catalog order and does not mutate input metadata', () => {
+  const original = JSON.stringify(fixture.abilities);
+  assert.deepEqual(resolveAll(fixture.abilities), resolveAll([...fixture.abilities].reverse()));
+  assert.equal(JSON.stringify(fixture.abilities), original);
+  const resolved = resolvePack(byKey('credential-harvest'), fixture.abilities);
+  resolved.prerequisites.push('local edit');
+  assert.ok(!byKey('credential-harvest').prerequisites.includes('local edit'));
+});
+
+test('wire body includes prerequisites but only Caldera-supported fields', () => {
+  const resolved = resolvePack(byKey('scheduled-persistence'), fixture.abilities);
+  const wire = toWire(resolved);
+  assert.deepEqual(Object.keys(wire).sort(), ['adversary_id', 'atomic_ordering', 'description', 'name', 'objective', 'tags']);
+  assert.deepEqual(wire.atomic_ordering, resolved.atomic_ordering);
+  assert.match(wire.description, /Prerequisites: .*Elevated Windows PowerShell/);
+  wire.atomic_ordering.push('local edit');
+  assert.ok(!resolved.atomic_ordering.includes('local edit'));
+});
+
+test('empty or malformed catalogs report every missing step', () => {
   for (const catalog of [[], null, undefined, [null, {}, { ability_id: 'no-technique' }]]) {
-    const all = resolveAll(catalog);
-    assert.equal(all.length, PACKS.length);
-    for (const resolved of all) {
-      assert.deepEqual(resolved.atomic_ordering, []);
-      assert.ok(resolved.unresolved.length);
+    for (const actual of resolveAll(catalog)) {
+      assert.deepEqual(actual.atomic_ordering, []);
+      assert.equal(actual.unresolved.length, byKey(actual.key).steps.length);
+      assert.ok(actual.unresolved.every((s) => s.technique && s.reason && s.step));
     }
   }
 });
 
-test('every declared pack is well formed', () => {
+test('every declared profile has a unique identity, explicit prerequisites and at least four steps', () => {
+  assert.equal(new Set(PACKS.map((p) => p.key)).size, PACKS.length);
+  assert.equal(new Set(resolveAll([]).map((p) => p.adversary_id)).size, PACKS.length);
   for (const p of PACKS) {
-    assert.ok(p.key && p.name && p.description, `${p.key} is missing a field an instructor reads`);
+    assert.ok(p.name && p.description && p.prerequisites.length && p.steps.length >= 4, p.key);
     assert.ok(['windows', 'linux'].includes(p.platform));
-    assert.ok(p.steps.length >= 4, `${p.key} has too few steps to read as an intrusion`);
     for (const step of p.steps) assert.match(step.technique, /^T\d{4}(\.\d{3})?$/);
   }
-  assert.equal(new Set(PACKS.map((p) => p.key)).size, PACKS.length, 'pack keys must be unique');
 });

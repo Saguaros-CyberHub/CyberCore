@@ -93,6 +93,7 @@ const summarisePack = (pack) => ({
   adversary_id: pack.adversary_id,
   name: pack.name,
   platform: pack.platform,
+  prerequisites: pack.prerequisites || [],
   steps: pack.resolved.map((step) => ({ technique: step.technique, ability_id: step.ability_id,
     name: step.name, tactic: step.tactic, plugin: step.plugin })),
   unresolved: pack.unresolved,
@@ -378,9 +379,9 @@ router.get('/authoring/adversaries', async (req, res) => {
  * Atomic Red Team test: a hardcoded id survives only until the pinned ref moves,
  * and then the step vanishes from the profile without anything failing.
  *
- * Idempotent. The profile ids are uuidv5 over the pack key, and createAdversary
- * tolerates the 409, so re-running this after installing a plugin picks up the
- * abilities that plugin added and changes nothing else.
+ * Profile ids are uuidv5 over the pack key. PUT updates those same profiles on
+ * subsequent seeds; POST plus a tolerated 409 would leave their old steps intact.
+ * dry_run resolves the catalog without writing, for inspecting missing abilities.
  */
 router.post('/authoring/adversary-pack', async (req, res) => {
   try {
@@ -393,19 +394,29 @@ router.post('/authoring/adversary-pack', async (req, res) => {
     const abilities = await target.client.listAbilities();
     if (!Array.isArray(abilities)) return res.status(502).json({ error: 'Caldera returned an invalid ability catalog' });
     const packs = adversaryPack.resolveAll(abilities);
+    const dryRun = req.body && req.body.dry_run === true;
     const created = [];
     for (const pack of packs) {
       // A profile with no resolvable step is reported, never created: an empty
       // adversary in the picker is worse than an absent one, because it launches
       // and does nothing.
       if (!pack.atomic_ordering.length) { created.push({ ...summarisePack(pack), created: false, reason: 'no_resolvable_steps' }); continue; }
-      await target.client.createAdversary(adversaryPack.toWire(pack));
-      created.push({ ...summarisePack(pack), created: true });
+      if (pack.unresolved.length) { created.push({ ...summarisePack(pack), created: false, reason: 'incomplete_profile' }); continue; }
+      if (dryRun) { created.push({ ...summarisePack(pack), created: false, reason: 'preview' }); continue; }
+      try {
+        await target.client.upsertAdversary(adversaryPack.toWire(pack));
+        created.push({ ...summarisePack(pack), created: true });
+      } catch (error) {
+        // The earlier PUTs already landed. Keep their results visible and
+        // audited even when a later profile fails; retries address the same ids.
+        created.push({ ...summarisePack(pack), created: false, reason: 'update_failed',
+          error: { code: error.code || 'CALDERA_ERROR', status: error.status || null } });
+      }
     }
-    audit.log({ req, action: 'caldera_adversary_pack_seed', target: { type: 'course', id: ctx.courseId },
+    if (!dryRun) audit.log({ req, action: 'caldera_adversary_pack_seed', target: { type: 'course', id: ctx.courseId },
       metadata: { created: created.filter(row => row.created).length, packs: created.length } }).catch(() => {});
     res.set('Cache-Control', 'no-store');
-    return res.json({ packs: created, catalog_size: abilities.length, upstream: target.upstream });
+    return res.json({ packs: created, catalog_size: abilities.length, upstream: target.upstream, dry_run: dryRun });
   } catch (error) {
     return fail(res, error, 'POST /authoring/adversary-pack');
   }

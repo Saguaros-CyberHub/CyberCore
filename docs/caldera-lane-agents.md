@@ -375,7 +375,7 @@ Two things are deliberately absent from the source:
 - **No relationships.** The SMB and WMI lateral-movement abilities do not gate
   on facts; they gate on an `isAccessibleFrom` relationship, and that
   relationship has to be *learned* rather than supplied. Put **Remote Host
-  Ping** ahead of those steps in the profile's ability ordering and the seeded
+  Ping** (T1016 in the pinned Stockpile catalog) ahead of those steps in the profile's ability ordering and the seeded
   hosts give it somewhere to go. A supplied relationship is worse than none:
   on the shipped Caldera version it faults inside link generation.
 
@@ -395,6 +395,10 @@ operation scheduling on the selected batch, including a batch still preparing.
 Commands already executing in a guest can finish. Use Caldera's operation view
 for individual ability results and compare the operation time window in ELK.
 These classroom operations do not create automatic grading incidents.
+
+For the curated Atomic/Stockpile profiles, the **Update CyberCore profiles**
+control, and a pasteable Kibana SOC workbench for a running ELK lane, see
+[Atomic adversaries and lane ELK setup](caldera-atomic-and-elk.md).
 
 ## Windows installation settings
 

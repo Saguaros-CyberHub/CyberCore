@@ -312,6 +312,18 @@ function createCalderaClient(opts) {
       return call('POST', '/api/v2/adversaries', adversary, 'POST /adversaries', [409]);
     },
 
+    /**
+     * Refresh a managed profile whose stable id survives changes to its steps.
+     * Caldera 5.3 exposes PUT for create-or-update; tolerating POST's 409 would
+     * leave an existing pack at its old ordering while reporting success.
+     */
+    upsertAdversary(adversary) {
+      const id = String(adversary && adversary.adversary_id || '').trim();
+      if (!id) throw new CalderaError('adversary_id is required', { code: 'CALDERA_BAD_ADVERSARY' });
+      return call('PUT', '/api/v2/adversaries/' + encodeURIComponent(id), adversary,
+        'PUT /adversaries/' + id);
+    },
+
     // -----------------------------------------------------------------------
     // AUTHORING READS AND FACT SOURCES — used by the standalone authoring
     // instance, and by nothing that dispatches
