@@ -1145,8 +1145,18 @@
       overflow: hidden;
       transition: border-color 0.15s ease;
     }
+    /* Selected-but-not-done: a light tint only -- NOT the strong blue border,
+       which is reserved for .complete (see below). Closing an option you've
+       only partly filled in should not look identical to finishing it. */
     .option-accordion-item.selected {
+      background: var(--gray-50, #f8fafc);
+    }
+    /* Complete: every deliverable in this option actually has text in it
+       (isComplete in workspace.js, kept live by updateTabProgress() as you
+       type) -- the strong blue border + checkmark. */
+    .option-accordion-item.complete {
       border-color: var(--primary-light);
+      background: var(--bg-card, white);
     }
     .option-accordion-header {
       display: flex;
@@ -1158,7 +1168,7 @@
     .option-accordion-header:hover {
       background: rgba(30, 82, 136, 0.04);
     }
-    .option-accordion-item.selected .option-accordion-header {
+    .option-accordion-item.complete .option-accordion-header {
       background: linear-gradient(135deg, rgba(30, 82, 136, 0.08), rgba(30, 82, 136, 0.03));
     }
     .option-checkbox {
@@ -1202,6 +1212,26 @@
     .option-progress-badge.complete {
       background: #d1fae5;
       color: #065f46;
+    }
+    /* Hidden unless the item is .complete -- see updateTabProgress() in
+       workspace.js, which toggles that class live as the last field fills
+       in (or gets emptied back out), not only on a full re-render. */
+    .option-complete-check {
+      display: none;
+      flex-shrink: 0;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: #10b981;
+      color: white;
+      font-size: 0.7rem;
+      font-weight: 700;
+      align-items: center;
+      justify-content: center;
+      line-height: 1;
+    }
+    .option-accordion-item.complete .option-complete-check {
+      display: flex;
     }
     .option-chevron {
       flex-shrink: 0;
@@ -1471,11 +1501,12 @@
     /* Option accordion — !important needed to override background:white in same style block */
     [data-theme="dark"] .option-accordion-item { background: #111527 !important; border-color: rgba(99,130,255,0.12) !important; }
     [data-theme="dark"] .option-accordion-header:hover { background: rgba(91,140,255,0.06) !important; }
-    [data-theme="dark"] .option-accordion-item.selected { border-color: #5b8cff !important; }
-    [data-theme="dark"] .option-accordion-item.selected .option-accordion-header { background: linear-gradient(135deg, rgba(91,140,255,0.08), rgba(91,140,255,0.04)) !important; }
+    [data-theme="dark"] .option-accordion-item.selected { background: #161b33 !important; }
+    [data-theme="dark"] .option-accordion-item.complete { border-color: #5b8cff !important; background: #111527 !important; }
+    [data-theme="dark"] .option-accordion-item.complete .option-accordion-header { background: linear-gradient(135deg, rgba(91,140,255,0.08), rgba(91,140,255,0.04)) !important; }
     [data-theme="dark"] .option-accordion-body { border-color: rgba(99,130,255,0.1) !important; }
     [data-theme="dark"] .option-name { color: #d8dde8; }
-    [data-theme="dark"] .option-accordion-item.selected .option-name { color: #f0f2fa; }
+    [data-theme="dark"] .option-accordion-item.complete .option-name { color: #f0f2fa; }
     [data-theme="dark"] .option-description-inline { color: #8890b0; }
     [data-theme="dark"] .option-progress-badge { background: rgba(91,140,255,0.08); color: #8890b0; }
     [data-theme="dark"] .option-progress-badge.partial { background: rgba(91,140,255,0.15); color: #7ba6ff; }

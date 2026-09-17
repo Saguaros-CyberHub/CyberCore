@@ -527,8 +527,12 @@ function renderOptionSelector(partNumber) {
       </div>
     ` : '';
 
+    // The strong blue+checkmark treatment means "actually done," not just
+    // "selected" -- a selected-but-empty (or partial) option gets the plain
+    // 'selected' tint instead, so closing it doesn't look identical to
+    // finishing it. isComplete already requires every deliverable filled.
     return `
-      <div class="option-accordion-item ${isSel ? 'selected' : ''} ${isExpanded ? 'expanded' : ''}" data-option-key="${opt.key}">
+      <div class="option-accordion-item ${isSel ? 'selected' : ''} ${isComplete ? 'complete' : ''} ${isExpanded ? 'expanded' : ''}" data-option-key="${opt.key}">
         <div class="option-accordion-header" onclick="onOptionHeaderClick(${partNumber}, '${opt.key}')">
           <input type="checkbox" ${isSel ? 'checked' : ''}
                  onclick="event.stopPropagation(); toggleOption(${partNumber}, '${opt.key}')"
@@ -537,6 +541,7 @@ function renderOptionSelector(partNumber) {
             <span class="option-name">${opt.name}</span>
             <span class="option-description-inline">${opt.description}</span>
           </div>
+          <span class="option-complete-check" title="All deliverables filled in">&#10003;</span>
           <span class="option-progress-badge ${badgeClass}">${filledCount}/${total}</span>
           ${isSel ? `<span class="option-chevron">${isExpanded ? '&#9662;' : '&#9656;'}</span>` : ''}
         </div>
@@ -638,6 +643,10 @@ function updateTabProgress(partNumber, optionKey) {
       badge.textContent = `${filled}/${total}`;
       badge.className = `option-progress-badge ${badgeClass}`;
     }
+    // The blue+checkmark "done" look tracks actual completion, not just
+    // selection -- update it live as the last field gets filled in (or
+    // emptied back out), not only on the next full re-render.
+    item.classList.toggle('complete', isComplete);
   }
 }
 
