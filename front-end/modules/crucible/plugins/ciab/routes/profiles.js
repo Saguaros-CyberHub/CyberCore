@@ -14,6 +14,7 @@ const crypto = require('crypto');
 const { pool } = require('../utils/db');
 const { authenticateToken, requireRole } = require('../../../../../src/middleware/auth');
 const { SCAN_DOC_CSS } = require('../ai/scan-documents');
+const { TOTAL_PARTS } = require('../utils/part-definitions');
 
 function escHtml(s) {
   return String(s == null ? '' : s)
@@ -132,9 +133,9 @@ router.get('/stats', authenticateToken, async (req, res) => {
 router.get('/stats/summary', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
-    
+
     const result = await pool.query(`
-      SELECT 
+      SELECT
         COUNT(*) as total_profiles,
         COUNT(*) FILTER (WHERE difficulty = 'beginner') as beginner_count,
         COUNT(*) FILTER (WHERE difficulty = 'intermediate') as intermediate_count,
@@ -146,12 +147,31 @@ router.get('/stats/summary', authenticateToken, async (req, res) => {
       FROM profiles
       WHERE user_id = $1
     `, [userId]);
-    
+
+    // A profile counts as a completed assessment once every one of its
+    // TOTAL_PARTS parts has been submitted (reviewed counts too -- grading
+    // doesn't un-complete it). A part the student never touched has no row
+    // at all in assessment_progress (see routes/progress.js), so requiring
+    // the submitted/reviewed COUNT to equal TOTAL_PARTS also implicitly
+    // requires all TOTAL_PARTS parts to exist, not just be submitted.
+    const completedResult = await pool.query(`
+      SELECT COUNT(*) as completed_count FROM (
+        SELECT profile_id
+        FROM assessment_progress
+        WHERE user_id = $1
+        GROUP BY profile_id
+        HAVING COUNT(*) FILTER (WHERE status IN ('submitted', 'reviewed')) = $2
+      ) completed_profiles
+    `, [userId, TOTAL_PARTS]);
+
     res.json({
       success: true,
-      stats: toCamelCase(result.rows[0])
+      stats: {
+        ...toCamelCase(result.rows[0]),
+        completedAssessments: parseInt(completedResult.rows[0].completed_count, 10) || 0
+      }
     });
-    
+
   } catch (error) {
     console.error('Error fetching profile stats:', error);
     res.status(500).json({ error: 'Failed to fetch stats', details: error.message });

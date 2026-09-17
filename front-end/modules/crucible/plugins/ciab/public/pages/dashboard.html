@@ -10,6 +10,13 @@
   <link rel="stylesheet" href="/css/main.css">
   <link rel="stylesheet" href="/css/layout.css">
   <style>
+    /* layout.css makes .main-header position:sticky (every page in the
+       platform uses that header, so it isn't changed there) -- overridden to
+       static HERE ONLY so this page stops pinning a bar at the top while
+       scrolling. Loaded after layout.css, so this wins on equal specificity
+       without touching any other page. */
+    .main-header { position: static; }
+
     /* Thinking indicator styles */
     .chat-message.thinking { color: #888; }
     .thinking-dots { display: inline-flex; align-items: center; gap: 4px; }
@@ -25,24 +32,6 @@
       0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
       30% { transform: translateY(-8px); opacity: 1; }
     }
-
-    /* 8-Part Progress Tracker */
-    .progress-tracker {
-      display: flex; gap: 4px; margin: 20px 0;
-      background: var(--gray-50, #f8fafc); padding: 15px; border-radius: 12px;
-    }
-    .progress-step {
-      flex: 1; text-align: center; padding: 10px 5px;
-      background: var(--gray-200, #e2e8f0); border-radius: 8px;
-      font-size: 0.75em; cursor: pointer;
-      transition: all 0.2s;
-    }
-    .progress-step:hover { transform: translateY(-2px); }
-    .progress-step.completed { background: #c6f6d5; color: #276749; }
-    .progress-step.current { background: rgba(30, 82, 136, 0.12); color: var(--primary); border: 2px solid var(--primary-light); }
-    .progress-step.locked { background: #edf2f7; color: #a0aec0; }
-    .progress-step .step-num { font-weight: 700; font-size: 1.2em; }
-    .progress-step .step-name { font-size: 0.85em; margin-top: 4px; }
 
     /* Profile Card Enhanced */
     .profile-card {
@@ -67,24 +56,6 @@
     }
     .quick-stat-value { font-size: 2em; font-weight: 700; color: var(--primary); }
     .quick-stat-label { font-size: 0.85em; color: var(--text-muted, #64748b); margin-top: 5px; }
-
-    /* Activity Feed */
-    .activity-feed { max-height: 300px; overflow-y: auto; }
-    .activity-item {
-      display: flex; gap: 12px; padding: 12px 0;
-      border-bottom: 1px solid #e2e8f0;
-    }
-    .activity-icon {
-      width: 36px; height: 36px; border-radius: 50%;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 1.2em; flex-shrink: 0;
-    }
-    .activity-icon.generate { background: #c6f6d5; }
-    .activity-icon.view { background: rgba(30, 82, 136, 0.12); }
-    .activity-icon.complete { background: #faf089; }
-    .activity-content { flex: 1; }
-    .activity-title { font-weight: 500; color: var(--primary); }
-    .activity-time { font-size: 0.8em; color: #a0aec0; }
 
     /* Modal Styles */
     .modal-overlay {
@@ -213,9 +184,6 @@
     [data-theme="dark"] .activity-section,
     [data-theme="dark"] .sidebar-section,
     [data-theme="dark"] .quick-actions { background: #111527; border-color: rgba(99,130,255,0.1); }
-    [data-theme="dark"] .activity-item { border-color: rgba(99,130,255,0.06); }
-    [data-theme="dark"] .activity-text { color: #b8c0d8; }
-    [data-theme="dark"] .activity-time { color: #5c6fa0; }
     [data-theme="dark"] .action-link { color: #8890b0; border-color: rgba(99,130,255,0.06); }
     [data-theme="dark"] .action-link:hover { color: #7ba6ff; background: rgba(91,140,255,0.06); }
     [data-theme="dark"] .section-header-text { color: #f0f2fa; }
@@ -250,9 +218,6 @@
         <div class="header-left">
           <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
         </div>
-        <div class="header-right">
-          <button class="header-btn" onclick="loadDashboard()" title="Refresh">🔄</button>
-        </div>
       </header>
 
       <div class="page-content">
@@ -274,119 +239,15 @@
             <div class="quick-stat-value" id="statCompleted">0</div>
             <div class="quick-stat-label">Completed Assessments</div>
           </div>
-          <div class="quick-stat">
-            <div class="quick-stat-value" id="statInProgress">0</div>
-            <div class="quick-stat-label">In Progress</div>
-          </div>
-          <div class="quick-stat">
-            <div class="quick-stat-value" id="statHours">0</div>
-            <div class="quick-stat-label">Hours Practiced</div>
-          </div>
         </div>
 
-        <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 20px;">
-          <!-- Left Column -->
-          <div>
-            <!-- Current Assessment Progress -->
-            <div class="card" id="currentAssessmentCard" style="display: none;">
-              <div class="card-header">
-                <span class="card-title">📊 Current Assessment</span>
-                <span class="badge badge-primary" id="currentProfileName">-</span>
-              </div>
-              <div class="card-body">
-                <div class="progress-tracker" id="progressTracker">
-                  <div class="progress-step completed" data-part="1">
-                    <div class="step-num">1</div>
-                    <div class="step-name">Orientation</div>
-                  </div>
-                  <div class="progress-step completed" data-part="2">
-                    <div class="step-num">2</div>
-                    <div class="step-name">Scoping</div>
-                  </div>
-                  <div class="progress-step current" data-part="3">
-                    <div class="step-num">3</div>
-                    <div class="step-name">Threats</div>
-                  </div>
-                  <div class="progress-step locked" data-part="4">
-                    <div class="step-num">4</div>
-                    <div class="step-name">Vulns</div>
-                  </div>
-                  <div class="progress-step locked" data-part="5">
-                    <div class="step-num">5</div>
-                    <div class="step-name">Risk</div>
-                  </div>
-                  <div class="progress-step locked" data-part="6">
-                    <div class="step-num">6</div>
-                    <div class="step-name">Controls</div>
-                  </div>
-                  <div class="progress-step locked" data-part="7">
-                    <div class="step-num">7</div>
-                    <div class="step-name">Report</div>
-                  </div>
-                  <div class="progress-step locked" data-part="8">
-                    <div class="step-num">8</div>
-                    <div class="step-name">Reflect</div>
-                  </div>
-                </div>
-                <div style="display: flex; gap: 10px; margin-top: 15px;">
-                  <button class="btn btn-primary" onclick="continueAssessment()">Continue Assessment →</button>
-                  <button class="btn btn-outline" onclick="viewProfile(currentProfileId)">View Profile</button>
-                </div>
-              </div>
-            </div>
-
-            <!-- Recent Profiles -->
-            <div class="card">
-              <div class="card-header">
-                <span class="card-title">Your Profiles</span>
-              </div>
-              <div class="card-body" id="recentProfilesContainer">
-                <p class="text-muted text-center">Loading...</p>
-              </div>
-            </div>
+        <!-- Your Profiles -->
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">Your Profiles</span>
           </div>
-
-          <!-- Right Column -->
-          <div>
-            <!-- Activity Feed -->
-            <div class="card">
-              <div class="card-header">
-                <span class="card-title">Recent Activity</span>
-              </div>
-              <div class="card-body">
-                <div class="activity-feed" id="activityFeed">
-                  <div class="activity-item">
-                    <div class="activity-icon generate">⚡</div>
-                    <div class="activity-content">
-                      <div class="activity-title">Generated new profile</div>
-                      <div class="activity-time">2 hours ago</div>
-                    </div>
-                  </div>
-                  <div class="activity-item">
-                    <div class="activity-icon complete">✅</div>
-                    <div class="activity-content">
-                      <div class="activity-title">Completed Part 2: Scoping</div>
-                      <div class="activity-time">Yesterday</div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <!-- Quick Actions -->
-            <div class="card">
-              <div class="card-header">
-                <span class="card-title">Quick Actions</span>
-              </div>
-              <div class="card-body">
-                <button class="btn btn-outline btn-block" style="margin-bottom: 10px;" onclick="showInterviewSimulator()">
-                  🎤 Practice Interviews
-                </button>
-                <a href="/ciab/generator" class="btn btn-outline btn-block">
-                  ⚡ Generate Profile
-                </a>
-              </div>
-            </div>
+          <div class="card-body" id="recentProfilesContainer">
+            <p class="text-muted text-center">Loading...</p>
           </div>
         </div>
       </div>
@@ -572,18 +433,15 @@
 		// Safely update stat elements
 		const statTotalEl = document.getElementById('statTotal');
 		const statCompletedEl = document.getElementById('statCompleted');
-		const statInProgressEl = document.getElementById('statInProgress');
-		const statHoursEl = document.getElementById('statHours');
-		
-		// Use camelCase properties from backend
+
+		// Use camelCase properties from backend. completedAssessments is real --
+		// every part of that profile has been submitted (see
+		// routes/profiles.js:/stats/summary) -- not derived from difficulty.
 		const total = stats.totalProfiles || 0;
-		const advanced = stats.advancedCount || 0;
-		const completed = advanced; // Assume advanced = completed
-		
+		const completed = stats.completedAssessments || 0;
+
 		if (statTotalEl) statTotalEl.textContent = total;
 		if (statCompletedEl) statCompletedEl.textContent = completed;
-		if (statInProgressEl) statInProgressEl.textContent = total - completed;
-		if (statHoursEl) statHoursEl.textContent = total * 8;
 
 		// Load recent profiles
 		const profilesResponse = await API.profiles.recent(15);
@@ -858,12 +716,6 @@
       } finally {
         isInterviewProcessing = false;
         messages.scrollTop = messages.scrollHeight;
-      }
-    }
-
-    function continueAssessment() {
-      if (currentProfileId) {
-        window.location.href = `/ciab/workspace?profile=${currentProfileId}`;
       }
     }
 
