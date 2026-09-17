@@ -507,6 +507,13 @@ function renderOptionSelector(partNumber) {
     const isComplete = filledCount === total && total > 0;
     const badgeClass = isComplete ? 'complete' : filledCount > 0 ? 'partial' : '';
 
+    // Grey by default. Blue means "open right now" and wins over everything
+    // else -- even a fully-filled-in option stays blue while expanded, only
+    // switching to green once closed. Green means "closed and complete."
+    // Never driven by the checkbox's own checked attribute (that only
+    // tracks selection, which is a separate thing from this).
+    const statusClass = isExpanded ? 'status-active' : (isComplete ? 'status-complete' : '');
+
     const body = isExpanded ? `
       <div class="option-accordion-body">
         ${opt.deliverables.map((del, i) => {
@@ -527,12 +534,8 @@ function renderOptionSelector(partNumber) {
       </div>
     ` : '';
 
-    // The strong blue+checkmark treatment means "actually done," not just
-    // "selected" -- a selected-but-empty (or partial) option gets the plain
-    // 'selected' tint instead, so closing it doesn't look identical to
-    // finishing it. isComplete already requires every deliverable filled.
     return `
-      <div class="option-accordion-item ${isSel ? 'selected' : ''} ${isComplete ? 'complete' : ''} ${isExpanded ? 'expanded' : ''}" data-option-key="${opt.key}">
+      <div class="option-accordion-item ${statusClass} ${isExpanded ? 'expanded' : ''}" data-option-key="${opt.key}">
         <div class="option-accordion-header" onclick="onOptionHeaderClick(${partNumber}, '${opt.key}')">
           <input type="checkbox" ${isSel ? 'checked' : ''}
                  onclick="event.stopPropagation(); toggleOption(${partNumber}, '${opt.key}')"
@@ -541,7 +544,6 @@ function renderOptionSelector(partNumber) {
             <span class="option-name">${opt.name}</span>
             <span class="option-description-inline">${opt.description}</span>
           </div>
-          <span class="option-complete-check" title="All deliverables filled in">&#10003;</span>
           <span class="option-progress-badge ${badgeClass}">${filledCount}/${total}</span>
           ${isSel ? `<span class="option-chevron">${isExpanded ? '&#9662;' : '&#9656;'}</span>` : ''}
         </div>
@@ -643,10 +645,13 @@ function updateTabProgress(partNumber, optionKey) {
       badge.textContent = `${filled}/${total}`;
       badge.className = `option-progress-badge ${badgeClass}`;
     }
-    // The blue+checkmark "done" look tracks actual completion, not just
-    // selection -- update it live as the last field gets filled in (or
-    // emptied back out), not only on the next full re-render.
-    item.classList.toggle('complete', isComplete);
+    // Deliberately NOT touching status-active/status-complete here. This
+    // only runs while the option is open (you can only type into a
+    // deliverable-editor that's currently expanded), and blue must hold for
+    // the entire time it's open, even the instant the last field fills in --
+    // it only switches to green once closed, which already forces a full
+    // re-render (toggleOptionExpanded -> renderPartContent) that recomputes
+    // it correctly. Flipping it here would turn it green while still open.
   }
 }
 

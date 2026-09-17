@@ -1145,18 +1145,21 @@
       overflow: hidden;
       transition: border-color 0.15s ease;
     }
-    /* Selected-but-not-done: a light tint only -- NOT the strong blue border,
-       which is reserved for .complete (see below). Closing an option you've
-       only partly filled in should not look identical to finishing it. */
-    .option-accordion-item.selected {
-      background: var(--gray-50, #f8fafc);
-    }
-    /* Complete: every deliverable in this option actually has text in it
-       (isComplete in workspace.js, kept live by updateTabProgress() as you
-       type) -- the strong blue border + checkmark. */
-    .option-accordion-item.complete {
+    /* Grey by default -- covers BOTH "never touched" and "picked it, closed
+       it, haven't typed anything." Nothing here keys off whether the option
+       is selected; only whether it's open right now (status-active) or
+       closed-and-complete (status-complete). See workspace.js's statusClass. */
+    .option-accordion-item.status-active {
       border-color: var(--primary-light);
-      background: var(--bg-card, white);
+    }
+    .option-accordion-item.status-active .option-accordion-header {
+      background: linear-gradient(135deg, rgba(30, 82, 136, 0.08), rgba(30, 82, 136, 0.03));
+    }
+    .option-accordion-item.status-complete {
+      border-color: #10b981;
+    }
+    .option-accordion-item.status-complete .option-accordion-header {
+      background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), rgba(16, 185, 129, 0.03));
     }
     .option-accordion-header {
       display: flex;
@@ -1168,15 +1171,44 @@
     .option-accordion-header:hover {
       background: rgba(30, 82, 136, 0.04);
     }
-    .option-accordion-item.complete .option-accordion-header {
-      background: linear-gradient(135deg, rgba(30, 82, 136, 0.08), rgba(30, 82, 136, 0.03));
-    }
+    /* Custom-drawn, NOT the native checked look -- appearance:none strips the
+       browser's own blue-when-checked rendering, since this has to track
+       status-active/status-complete on the parent item instead of the
+       checkbox's own checked attribute (which only reflects selection, a
+       separate thing from "is this open" or "is this done"). */
     .option-checkbox {
-      width: 20px;
-      height: 20px;
-      accent-color: var(--primary-light);
+      appearance: none;
+      -webkit-appearance: none;
+      width: 18px;
+      height: 18px;
+      border: 2px solid var(--gray-300, #cbd5e1);
+      border-radius: 5px;
+      background: transparent;
       flex-shrink: 0;
       cursor: pointer;
+      margin: 0;
+      position: relative;
+      transition: all 0.15s ease;
+    }
+    .option-accordion-item.status-active .option-checkbox {
+      border-color: var(--primary-light);
+      background: var(--primary-light);
+    }
+    .option-accordion-item.status-complete .option-checkbox {
+      border-color: #10b981;
+      background: #10b981;
+    }
+    .option-accordion-item.status-active .option-checkbox::after,
+    .option-accordion-item.status-complete .option-checkbox::after {
+      content: '\2713';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: white;
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1;
     }
     .option-header-text {
       flex: 1;
@@ -1212,26 +1244,6 @@
     .option-progress-badge.complete {
       background: #d1fae5;
       color: #065f46;
-    }
-    /* Hidden unless the item is .complete -- see updateTabProgress() in
-       workspace.js, which toggles that class live as the last field fills
-       in (or gets emptied back out), not only on a full re-render. */
-    .option-complete-check {
-      display: none;
-      flex-shrink: 0;
-      width: 20px;
-      height: 20px;
-      border-radius: 50%;
-      background: #10b981;
-      color: white;
-      font-size: 0.7rem;
-      font-weight: 700;
-      align-items: center;
-      justify-content: center;
-      line-height: 1;
-    }
-    .option-accordion-item.complete .option-complete-check {
-      display: flex;
     }
     .option-chevron {
       flex-shrink: 0;
@@ -1501,12 +1513,15 @@
     /* Option accordion — !important needed to override background:white in same style block */
     [data-theme="dark"] .option-accordion-item { background: #111527 !important; border-color: rgba(99,130,255,0.12) !important; }
     [data-theme="dark"] .option-accordion-header:hover { background: rgba(91,140,255,0.06) !important; }
-    [data-theme="dark"] .option-accordion-item.selected { background: #161b33 !important; }
-    [data-theme="dark"] .option-accordion-item.complete { border-color: #5b8cff !important; background: #111527 !important; }
-    [data-theme="dark"] .option-accordion-item.complete .option-accordion-header { background: linear-gradient(135deg, rgba(91,140,255,0.08), rgba(91,140,255,0.04)) !important; }
+    [data-theme="dark"] .option-checkbox { border-color: #3a4258; background: transparent; }
+    [data-theme="dark"] .option-accordion-item.status-active { border-color: #5b8cff !important; }
+    [data-theme="dark"] .option-accordion-item.status-active .option-accordion-header { background: linear-gradient(135deg, rgba(91,140,255,0.08), rgba(91,140,255,0.04)) !important; }
+    [data-theme="dark"] .option-accordion-item.status-complete { border-color: #00e68a !important; }
+    [data-theme="dark"] .option-accordion-item.status-complete .option-accordion-header { background: linear-gradient(135deg, rgba(0,230,138,0.08), rgba(0,230,138,0.03)) !important; }
     [data-theme="dark"] .option-accordion-body { border-color: rgba(99,130,255,0.1) !important; }
     [data-theme="dark"] .option-name { color: #d8dde8; }
-    [data-theme="dark"] .option-accordion-item.complete .option-name { color: #f0f2fa; }
+    [data-theme="dark"] .option-accordion-item.status-active .option-name,
+    [data-theme="dark"] .option-accordion-item.status-complete .option-name { color: #f0f2fa; }
     [data-theme="dark"] .option-description-inline { color: #8890b0; }
     [data-theme="dark"] .option-progress-badge { background: rgba(91,140,255,0.08); color: #8890b0; }
     [data-theme="dark"] .option-progress-badge.partial { background: rgba(91,140,255,0.15); color: #7ba6ff; }
