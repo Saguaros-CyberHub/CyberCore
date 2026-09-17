@@ -199,8 +199,11 @@ const PART_OPTIONS = {
 // Track selected options per part (loaded from progress.output_option)
 let selectedOptions = {};
 
-// Track which tab is active in the deliverable tab bar, per part
-let activeDeliverableTabs = {};
+// Track which SELECTED options are currently expanded (accordion-style, one
+// list instead of a separate checkbox grid + a separate tab bar elsewhere on
+// the page -- see renderOptionSelector()). View-state only, not persisted;
+// newly selecting an option auto-expands it (see toggleOption()).
+let expandedOptions = {};
 
 // ============================================================================
 // INITIALIZATION
@@ -474,12 +477,73 @@ async function switchPart(partNumber) {
 // In-memory deliverable content: { [partNumber]: { [optionKey]: [html, html, ...], general_notes: html } }
 let deliverableContent = {};
 
+/**
+ * Output options as one accordion list, not a checkbox grid followed by a
+ * SEPARATE tab bar + panel elsewhere on the page (the old renderOptionSelector
+ * + renderDeliverableWorkAreas pair). Selecting an option expands its
+ * deliverables directly beneath that same row -- one click, one place on the
+ * page -- matching the CIS RAM control/safeguard list in Risk Assessment.
+ * Multiple selected options can be expanded at once (not mutually exclusive
+ * like a tab bar): a student comparing two deliverable sets shouldn't have to
+ * close one to see the other.
+ */
 function renderOptionSelector(partNumber) {
   const partOpts = PART_OPTIONS[partNumber];
   if (!partOpts) return '';
 
   const selected = selectedOptions[partNumber] || [];
   const selCount = selected.length;
+  const expanded = expandedOptions[partNumber] || [];
+  const savedContent = deliverableContent[partNumber] || {};
+
+  const optionsHtml = partOpts.options.map(opt => {
+    const isSel = selected.includes(opt.key);
+    const isExpanded = isSel && expanded.includes(opt.key);
+    const optContent = savedContent[opt.key] || [];
+    const filledCount = opt.deliverables.filter((_, i) =>
+      (optContent[i] || '').replace(/<[^>]*>/g, '').trim().length > 0
+    ).length;
+    const total = opt.deliverables.length;
+    const isComplete = filledCount === total && total > 0;
+    const badgeClass = isComplete ? 'complete' : filledCount > 0 ? 'partial' : '';
+
+    const body = isExpanded ? `
+      <div class="option-accordion-body">
+        ${opt.deliverables.map((del, i) => {
+          const val = optContent[i] || '';
+          const hasContent = val.replace(/<[^>]*>/g, '').trim().length > 0;
+          return `
+            <div class="deliverable-item">
+              <div class="deliverable-label">
+                <span class="deliverable-number ${hasContent ? 'has-content' : ''}">${i + 1}</span>
+                <span class="deliverable-label-text">${del}</span>
+              </div>
+              <div class="deliverable-editor" contenteditable="true"
+                   data-option="${opt.key}" data-del-index="${i}"
+                   data-placeholder="Write your response for this deliverable...">${val}</div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    ` : '';
+
+    return `
+      <div class="option-accordion-item ${isSel ? 'selected' : ''} ${isExpanded ? 'expanded' : ''}" data-option-key="${opt.key}">
+        <div class="option-accordion-header" onclick="onOptionHeaderClick(${partNumber}, '${opt.key}')">
+          <input type="checkbox" ${isSel ? 'checked' : ''}
+                 onclick="event.stopPropagation(); toggleOption(${partNumber}, '${opt.key}')"
+                 class="option-checkbox">
+          <div class="option-header-text">
+            <span class="option-name">${opt.name}</span>
+            <span class="option-description-inline">${opt.description}</span>
+          </div>
+          <span class="option-progress-badge ${badgeClass}">${filledCount}/${total}</span>
+          ${isSel ? `<span class="option-chevron">${isExpanded ? '&#9662;' : '&#9656;'}</span>` : ''}
+        </div>
+        ${body}
+      </div>
+    `;
+  }).join('');
 
   return `
     <div class="part-activities">
@@ -496,101 +560,40 @@ function renderOptionSelector(partNumber) {
       </div>
       <div class="section-body">
         <p style="color:var(--text-muted, #64748b); font-size:0.88rem; margin-bottom:1rem;">${partOpts.instructions}</p>
-        <div class="options-grid">
-          ${partOpts.options.map(opt => {
-            const isSel = selected.includes(opt.key);
-            return `
-              <div class="option-card ${isSel ? 'selected' : ''}"
-                   onclick="toggleOption(${partNumber}, '${opt.key}')" data-option-key="${opt.key}">
-                <div class="option-card-header">
-                  <input type="checkbox" ${isSel ? 'checked' : ''}
-                         onclick="event.stopPropagation(); toggleOption(${partNumber}, '${opt.key}')"
-                         class="option-checkbox">
-                  <span class="option-name">${opt.name}</span>
-                </div>
-                <p class="option-description">${opt.description}</p>
-                <span class="option-deliverable-count">${opt.deliverables.length} deliverable${opt.deliverables.length !== 1 ? 's' : ''}</span>
-              </div>
-            `;
-          }).join('')}
+        <div class="options-accordion">
+          ${optionsHtml}
         </div>
       </div>
     </div>
   `;
 }
 
-function renderDeliverableWorkAreas(partNumber) {
-  const partOpts = PART_OPTIONS[partNumber];
+/** Header row click: select+expand if not yet selected, otherwise just toggle expand. */
+function onOptionHeaderClick(partNumber, optionKey) {
   const selected = selectedOptions[partNumber] || [];
-  if (!partOpts || selected.length === 0) {
-    return `
-      <div class="no-options-state">
-        <div class="no-options-icon">&#9998;</div>
-        <h4>Select an output option above to begin</h4>
-        <p>Choose one or more output options and your deliverable work areas will appear here.</p>
-      </div>
-    `;
+  if (!selected.includes(optionKey)) {
+    toggleOption(partNumber, optionKey);
+  } else {
+    toggleOptionExpanded(partNumber, optionKey);
+  }
+}
+
+/** Expand/collapse one already-selected option in place, without changing selection. */
+function toggleOptionExpanded(partNumber, optionKey) {
+  if (!expandedOptions[partNumber]) expandedOptions[partNumber] = [];
+  const idx = expandedOptions[partNumber].indexOf(optionKey);
+  if (idx >= 0) {
+    expandedOptions[partNumber].splice(idx, 1);
+  } else {
+    expandedOptions[partNumber].push(optionKey);
   }
 
-  // Ensure the active tab is valid for this part
-  if (!activeDeliverableTabs[partNumber] || !selected.includes(activeDeliverableTabs[partNumber])) {
-    activeDeliverableTabs[partNumber] = selected[0];
-  }
-  const activeKey = activeDeliverableTabs[partNumber];
-  const savedContent = deliverableContent[partNumber] || {};
-
-  // Build tab buttons
-  const tabs = selected.map(optKey => {
-    const opt = partOpts.options.find(o => o.key === optKey);
-    if (!opt) return '';
-    const optContent = savedContent[optKey] || [];
-    const filledCount = opt.deliverables.filter((_, i) =>
-      (optContent[i] || '').replace(/<[^>]*>/g, '').trim().length > 0
-    ).length;
-    const total = opt.deliverables.length;
-    const isActive = optKey === activeKey;
-    const isComplete = filledCount === total && total > 0;
-    const badgeClass = isComplete ? 'complete' : filledCount > 0 ? 'partial' : '';
-    return `
-      <button class="deliverable-tab${isActive ? ' active' : ''}"
-              onclick="switchDeliverableTab(${partNumber}, '${optKey}')"
-              data-option-key="${optKey}"
-              title="${opt.name}">
-        <span class="tab-label">${opt.name}</span>
-        <span class="tab-badge ${badgeClass}">${filledCount}/${total}</span>
-      </button>
-    `;
-  }).join('');
-
-  // Build the active tab's deliverable panel
-  const activeOpt = partOpts.options.find(o => o.key === activeKey);
-  const activeContent = savedContent[activeKey] || [];
-  const panel = activeOpt ? activeOpt.deliverables.map((del, i) => {
-    const val = activeContent[i] || '';
-    const hasContent = val.replace(/<[^>]*>/g, '').trim().length > 0;
-    return `
-      <div class="deliverable-item">
-        <div class="deliverable-label">
-          <span class="deliverable-number ${hasContent ? 'has-content' : ''}">${i + 1}</span>
-          <span class="deliverable-label-text">${del}</span>
-        </div>
-        <div class="deliverable-editor" contenteditable="true"
-             data-option="${activeKey}" data-del-index="${i}"
-             data-placeholder="Write your response for this deliverable...">${val}</div>
-      </div>
-    `;
-  }).join('') : '';
-
-  return `
-    <div class="deliverable-tabs-container" id="deliverableWorkAreas-${partNumber}">
-      <div class="deliverable-tab-bar" role="tablist">
-        ${tabs}
-      </div>
-      <div class="deliverable-tab-panel">
-        ${panel}
-      </div>
-    </div>
-  `;
+  collectDeliverableContentFromDOM(partNumber);
+  const part = PARTS.find(p => p.number === partNumber);
+  const progress = currentProgress.find(p => p.part_number === partNumber) || {
+    part_number: partNumber, status: 'not_started', content: null, evidence_files: []
+  };
+  renderPartContent(part, progress);
 }
 
 function renderGeneralNotes(partNumber) {
@@ -615,16 +618,6 @@ function toggleWorkArea(headerEl) {
   headerEl.closest('.work-area').classList.toggle('collapsed');
 }
 
-function switchDeliverableTab(partNumber, optionKey) {
-  collectDeliverableContentFromDOM(partNumber);
-  activeDeliverableTabs[partNumber] = optionKey;
-  const container = document.getElementById(`deliverableWorkAreas-${partNumber}`);
-  if (container) {
-    container.outerHTML = renderDeliverableWorkAreas(partNumber);
-    initializeDeliverableEditors();
-  }
-}
-
 function updateTabProgress(partNumber, optionKey) {
   const partOpts = PART_OPTIONS[partNumber];
   if (!partOpts) return;
@@ -638,24 +631,33 @@ function updateTabProgress(partNumber, optionKey) {
   const isComplete = filled === total && total > 0;
   const badgeClass = isComplete ? 'complete' : filled > 0 ? 'partial' : '';
 
-  const tab = document.querySelector(`.deliverable-tab[data-option-key="${optionKey}"]`);
-  if (tab) {
-    const badge = tab.querySelector('.tab-badge');
+  const item = document.querySelector(`.option-accordion-item[data-option-key="${optionKey}"]`);
+  if (item) {
+    const badge = item.querySelector('.option-progress-badge');
     if (badge) {
       badge.textContent = `${filled}/${total}`;
-      badge.className = `tab-badge ${badgeClass}`;
+      badge.className = `option-progress-badge ${badgeClass}`;
     }
   }
 }
 
 function toggleOption(partNumber, optionKey) {
   if (!selectedOptions[partNumber]) selectedOptions[partNumber] = [];
+  if (!expandedOptions[partNumber]) expandedOptions[partNumber] = [];
 
   const idx = selectedOptions[partNumber].indexOf(optionKey);
   if (idx >= 0) {
+    // Deselecting: nothing left to show, so collapse it too.
     selectedOptions[partNumber].splice(idx, 1);
+    const eIdx = expandedOptions[partNumber].indexOf(optionKey);
+    if (eIdx >= 0) expandedOptions[partNumber].splice(eIdx, 1);
   } else {
+    // Newly selecting: auto-expand, so one click both picks it and reveals
+    // its deliverable fields right there -- no second step anywhere else.
     selectedOptions[partNumber].push(optionKey);
+    if (!expandedOptions[partNumber].includes(optionKey)) {
+      expandedOptions[partNumber].push(optionKey);
+    }
   }
 
   // Collect current editor content before re-render so we don't lose it
@@ -798,7 +800,6 @@ function renderDefaultPart(part, progress) {
 function renderNarrativePart(part, progress) {
   return `
     ${renderOptionSelector(part.number)}
-    ${renderDeliverableWorkAreas(part.number)}
     ${renderGeneralNotes(part.number)}
     ${renderEvidenceSection(progress.evidence_files)}
     ${renderFeedbackSection(progress)}
@@ -840,7 +841,6 @@ function renderHybridPart(part, progress) {
     </div>
 
     ${renderOptionSelector(part.number)}
-    ${renderDeliverableWorkAreas(part.number)}
     ${renderGeneralNotes(part.number)}
     ${renderEvidenceSection(progress.evidence_files)}
     ${renderFeedbackSection(progress)}
@@ -878,7 +878,6 @@ function renderThreatIdentification(data, progress) {
       </div>
     </div>
 
-    ${renderDeliverableWorkAreas(3)}
     ${renderGeneralNotes(3)}
     ${renderEvidenceSection(progress.evidence_files)}
     ${renderFeedbackSection(progress)}
@@ -938,7 +937,6 @@ function renderVulnerabilityIdentification(data, progress) {
       </div>
     </div>
 
-    ${renderDeliverableWorkAreas(4)}
     ${renderGeneralNotes(4)}
     ${renderEvidenceSection(progress.evidence_files)}
     ${renderFeedbackSection(progress)}
@@ -998,7 +996,6 @@ function renderRiskAnalysis(data, progress) {
       </div>
     </div>
 
-    ${renderDeliverableWorkAreas(5)}
     ${renderGeneralNotes(5)}
     ${renderEvidenceSection(progress.evidence_files)}
     ${renderFeedbackSection(progress)}
@@ -1060,7 +1057,6 @@ function renderControlRecommendations(data, progress) {
       </div>
     </div>
 
-    ${renderDeliverableWorkAreas(6)}
     ${renderGeneralNotes(6)}
     ${renderEvidenceSection(progress.evidence_files)}
     ${renderFeedbackSection(progress)}
@@ -2201,4 +2197,5 @@ window.saveControl = saveControl;
 // Options & Work Areas
 window.toggleOption = toggleOption;
 window.toggleWorkArea = toggleWorkArea;
-window.switchDeliverableTab = switchDeliverableTab;
+window.onOptionHeaderClick = onOptionHeaderClick;
+window.toggleOptionExpanded = toggleOptionExpanded;

@@ -1128,46 +1128,52 @@
     }
 
     /* Option Selector */
-    .options-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-      gap: 0.75rem;
+    /* Output options as one accordion list -- select a row and its
+       deliverables expand directly beneath it, in place, instead of a
+       separate checkbox grid followed by a separate tab bar elsewhere on
+       the page. Matches the CIS RAM control/safeguard list in Risk
+       Assessment. */
+    .options-accordion {
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
     }
-    @media (max-width: 720px) {
-      .options-grid { grid-template-columns: 1fr; }
-    }
-
-    .option-card {
+    .option-accordion-item {
       border: 2px solid var(--gray-200);
       border-radius: 12px;
-      padding: 1rem 1.25rem;
-      cursor: pointer;
-      transition: all 0.15s ease;
       background: var(--bg-card, white);
-      position: relative;
+      overflow: hidden;
+      transition: border-color 0.15s ease;
     }
-    .option-card:hover {
+    .option-accordion-item.selected {
       border-color: var(--primary-light);
-      box-shadow: 0 2px 8px rgba(30, 82, 136, 0.08);
-      transform: translateY(-1px);
     }
-    .option-card.selected {
-      border-color: var(--primary-light);
-      background: linear-gradient(135deg, rgba(30, 82, 136, 0.10), rgba(30, 82, 136, 0.04));
-      box-shadow: 0 0 0 1px var(--primary-light), 0 2px 12px rgba(30, 82, 136, 0.12);
-    }
-    .option-card-header {
+    .option-accordion-header {
       display: flex;
-      align-items: flex-start;
+      align-items: center;
       gap: 0.75rem;
+      padding: 0.85rem 1.1rem;
+      cursor: pointer;
+    }
+    .option-accordion-header:hover {
+      background: rgba(30, 82, 136, 0.04);
+    }
+    .option-accordion-item.selected .option-accordion-header {
+      background: linear-gradient(135deg, rgba(30, 82, 136, 0.08), rgba(30, 82, 136, 0.03));
     }
     .option-checkbox {
-      margin-top: 2px;
       width: 20px;
       height: 20px;
       accent-color: var(--primary-light);
       flex-shrink: 0;
       cursor: pointer;
+    }
+    .option-header-text {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.15rem;
     }
     .option-name {
       font-weight: 600;
@@ -1175,24 +1181,39 @@
       color: var(--text-primary, #1e293b);
       line-height: 1.35;
     }
-    .option-description {
-      font-size: 0.82rem;
+    .option-description-inline {
+      font-size: 0.8rem;
       color: var(--text-muted, #64748b);
-      margin: 0.4rem 0 0 2.25rem;
-      line-height: 1.5;
+      line-height: 1.4;
     }
-    .option-card .option-deliverable-count {
-      display: inline-block;
-      margin: 0.5rem 0 0 2.25rem;
+    .option-progress-badge {
+      flex-shrink: 0;
       font-size: 0.75rem;
+      font-weight: 600;
       color: var(--text-muted, #6b7280);
       background: var(--gray-100, #f1f5f9);
-      padding: 0.15rem 0.5rem;
+      padding: 0.2rem 0.55rem;
       border-radius: 8px;
     }
-    .option-card.selected .option-deliverable-count {
+    .option-progress-badge.partial {
       background: rgba(30, 82, 136, 0.12);
       color: var(--primary);
+    }
+    .option-progress-badge.complete {
+      background: #d1fae5;
+      color: #065f46;
+    }
+    .option-chevron {
+      flex-shrink: 0;
+      color: var(--text-muted, #94a3b8);
+      font-size: 0.75rem;
+    }
+    .option-accordion-body {
+      padding: 0 1.1rem 1rem;
+      border-top: 1px solid var(--gray-200);
+    }
+    .option-accordion-body .deliverable-item:first-child {
+      padding-top: 1rem;
     }
 
     .option-count-badge {
@@ -1387,32 +1408,6 @@
       font-size: 0.95rem;
     }
 
-    /* No options selected state */
-    .no-options-state {
-      text-align: center;
-      padding: 2.5rem 1.5rem;
-      background: var(--gray-50, #f8fafc);
-      border: 2px dashed #cbd5e1;
-      border-radius: 12px;
-    }
-    .no-options-icon {
-      font-size: 2.5rem;
-      margin-bottom: 0.75rem;
-      opacity: 0.5;
-    }
-    .no-options-state h4 {
-      color: var(--text-secondary, #475569);
-      margin: 0 0 0.5rem;
-      font-size: 1rem;
-    }
-    .no-options-state p {
-      color: var(--text-muted, #94a3b8);
-      font-size: 0.88rem;
-      margin: 0;
-      max-width: 400px;
-      margin-inline: auto;
-    }
-
     /* Submit deliverables in modal */
     .submit-deliverables-list {
       max-height: 200px;
@@ -1447,89 +1442,6 @@
       color: #92400e;
     }
 
-    /* ============================================================================
-       DELIVERABLE TABS
-       ============================================================================ */
-    .deliverable-tabs-container {
-      background: var(--bg-card, white);
-      border: 1px solid var(--gray-200);
-      border-radius: 12px;
-      overflow: hidden;
-      margin-bottom: 1rem;
-    }
-
-    .deliverable-tab-bar {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.25rem;
-      padding: 0.625rem 1rem;
-      background: linear-gradient(135deg, #f8fafc, #f1f5f9);
-      border-bottom: 1px solid var(--gray-200);
-    }
-
-    .deliverable-tab {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.5rem 0.875rem;
-      background: transparent;
-      border: 1.5px solid transparent;
-      border-radius: 8px;
-      cursor: pointer;
-      font-size: 0.82rem;
-      font-weight: 500;
-      color: var(--text-muted, #64748b);
-      white-space: nowrap;
-      transition: all 0.15s ease;
-      font-family: inherit;
-      flex-shrink: 0;
-    }
-    .deliverable-tab:hover {
-      color: var(--text-primary, #1e293b);
-      background: rgba(255, 255, 255, 0.8);
-      border-color: var(--gray-200);
-    }
-    .deliverable-tab.active {
-      color: #1e40af;
-      background: white;
-      border-color: #bfdbfe;
-      font-weight: 600;
-      box-shadow: 0 1px 4px rgba(59, 130, 246, 0.12);
-    }
-
-    .tab-label {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      max-width: 180px;
-    }
-
-    .tab-badge {
-      font-size: 0.7rem;
-      padding: 0.1rem 0.45rem;
-      border-radius: 10px;
-      background: var(--gray-200, #e2e8f0);
-      color: var(--text-muted, #64748b);
-      font-weight: 700;
-      flex-shrink: 0;
-      min-width: 28px;
-      text-align: center;
-    }
-    .tab-badge.partial {
-      background: #dbeafe;
-      color: #1d4ed8;
-    }
-    .tab-badge.complete {
-      background: #d1fae5;
-      color: #065f46;
-    }
-
-    .deliverable-tab-panel {
-      background: var(--bg-card, white);
-    }
-    .deliverable-tab-panel .deliverable-item:last-child {
-      border-bottom: none;
-    }
-
     /* ================================================================
        DARK MODE OVERRIDES
        ================================================================ */
@@ -1556,15 +1468,19 @@
     [data-theme="dark"] .section-subtitle,
     [data-theme="dark"] .section-description { color: #8890b0; }
 
-    /* Option cards — !important needed to override background:white in same style block */
-    [data-theme="dark"] .option-card { background: #111527 !important; border-color: rgba(99,130,255,0.12) !important; }
-    [data-theme="dark"] .option-card:hover { background: #161b33 !important; border-color: rgba(91,140,255,0.25) !important; box-shadow: 0 0 12px rgba(91,140,255,0.08); }
-    [data-theme="dark"] .option-card.selected { background: linear-gradient(135deg, rgba(91,140,255,0.08), rgba(91,140,255,0.04)) !important; border-color: #5b8cff !important; box-shadow: 0 0 0 1px #5b8cff, 0 0 15px rgba(91,140,255,0.12); }
+    /* Option accordion — !important needed to override background:white in same style block */
+    [data-theme="dark"] .option-accordion-item { background: #111527 !important; border-color: rgba(99,130,255,0.12) !important; }
+    [data-theme="dark"] .option-accordion-header:hover { background: rgba(91,140,255,0.06) !important; }
+    [data-theme="dark"] .option-accordion-item.selected { border-color: #5b8cff !important; }
+    [data-theme="dark"] .option-accordion-item.selected .option-accordion-header { background: linear-gradient(135deg, rgba(91,140,255,0.08), rgba(91,140,255,0.04)) !important; }
+    [data-theme="dark"] .option-accordion-body { border-color: rgba(99,130,255,0.1) !important; }
     [data-theme="dark"] .option-name { color: #d8dde8; }
-    [data-theme="dark"] .option-card.selected .option-name { color: #f0f2fa; }
-    [data-theme="dark"] .option-description { color: #8890b0; }
-    [data-theme="dark"] .option-deliverable-count { background: rgba(91,140,255,0.08); color: #8890b0; }
-    [data-theme="dark"] .option-card.selected .option-deliverable-count { background: rgba(91,140,255,0.15); color: #7ba6ff; }
+    [data-theme="dark"] .option-accordion-item.selected .option-name { color: #f0f2fa; }
+    [data-theme="dark"] .option-description-inline { color: #8890b0; }
+    [data-theme="dark"] .option-progress-badge { background: rgba(91,140,255,0.08); color: #8890b0; }
+    [data-theme="dark"] .option-progress-badge.partial { background: rgba(91,140,255,0.15); color: #7ba6ff; }
+    [data-theme="dark"] .option-progress-badge.complete { background: rgba(0,230,138,0.12); color: #00e68a; }
+    [data-theme="dark"] .option-chevron { color: #5c6585; }
 
     /* Work areas — !important to override background:white */
     [data-theme="dark"] .work-area { background: #111527 !important; border-color: rgba(99,130,255,0.1) !important; }
@@ -1576,16 +1492,6 @@
     [data-theme="dark"] .deliverable-progress { color: #8890b0; }
     [data-theme="dark"] .progress-bar-mini { background: rgba(91,140,255,0.1); }
 
-    /* Deliverable tabs */
-    [data-theme="dark"] .deliverable-tabs-container { background: #111527 !important; border-color: rgba(99,130,255,0.1) !important; }
-    [data-theme="dark"] .deliverable-tab-bar { background: linear-gradient(135deg, #0e1222, #111527) !important; border-color: rgba(99,130,255,0.08) !important; }
-    [data-theme="dark"] .deliverable-tab { color: #8890b0; }
-    [data-theme="dark"] .deliverable-tab:hover { background: rgba(91,140,255,0.06) !important; border-color: rgba(99,130,255,0.15) !important; color: #d8dde8; }
-    [data-theme="dark"] .deliverable-tab.active { background: rgba(91,140,255,0.08) !important; border-color: rgba(91,140,255,0.25) !important; color: #7ba6ff; box-shadow: 0 1px 4px rgba(91,140,255,0.1); }
-    [data-theme="dark"] .tab-badge { background: rgba(91,140,255,0.1); color: #8890b0; }
-    [data-theme="dark"] .tab-badge.partial { background: rgba(91,140,255,0.15); color: #7ba6ff; }
-    [data-theme="dark"] .tab-badge.complete { background: rgba(0,230,138,0.12); color: #00e68a; }
-    [data-theme="dark"] .deliverable-tab-panel { background: #111527 !important; }
 
     /* Deliverable editors */
     [data-theme="dark"] .deliverable-editor,
