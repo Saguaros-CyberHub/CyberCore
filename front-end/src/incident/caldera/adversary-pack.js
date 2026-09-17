@@ -269,7 +269,8 @@ function toWire(resolvedPack) {
     name: resolvedPack.name,
     description: resolvedPack.description + (prerequisites.length ? ` Prerequisites: ${prerequisites.join(' ')}` : ''),
     atomic_ordering: [...resolvedPack.atomic_ordering],
-    objective: null,
+    // Caldera 5.3's optional String field rejects null. Omitting it lets the
+    // server assign its default objective on both create and replace.
     tags: ['cybercore'],
   };
 }

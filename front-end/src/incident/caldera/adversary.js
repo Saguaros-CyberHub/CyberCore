@@ -635,7 +635,8 @@ function buildAdversary({ scenario, atomicOrdering, options }) {
       + `${atomicOrdering.length} ability/abilities. `
       + 'Narrative and detection guidance are held in the answer key, not here.',
     atomic_ordering: atomicOrdering.slice(),
-    objective: null,
+    // The optional objective is a non-nullable String in Caldera 5.3. Omit it
+    // so the server supplies its default instead of rejecting the POST.
     tags: ['cybercore'],
   };
 }

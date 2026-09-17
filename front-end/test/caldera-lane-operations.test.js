@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { createService, operationId } = require('../src/utils/caldera-lane-operations');
 const { pawFor, groupFor } = require('../src/utils/caldera-lane-agents');
-const { createCalderaClient } = require('../src/incident/caldera/client');
+const { createCalderaClient, CalderaError } = require('../src/incident/caldera/client');
 const COURSE = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const IDS = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'];
 const BATCH = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
@@ -74,7 +74,7 @@ function harness(options = {}) {
   };
   const client = {
     listAgents: async () => { state.calls.push('agents'); return clone(state.agents); },
-    listAdversaries: async () => [
+    listAdversaries: async () => options.adversaries ? options.adversaries(state) : [
       { adversary_id: 'discovery', name: 'Discovery', description: 'Two steps', atomic_ordering: ['one', 'two'] },
       // Referenced ability the catalog cannot describe, plus a non-string entry
       // some Caldera releases put in atomic_ordering.
@@ -198,6 +198,49 @@ test('adversary profiles carry ordered ability ids, a deterministic summary and 
   assert.ok(![...one.description].some(ch => ch.codePointAt(0) < 32), 'control characters are replaced, not deleted');
   assert.equal(status.abilities.two.description, null, 'a whitespace-only description is null, not an empty string');
   assert.equal(status.abilities_error, undefined);
+});
+
+test('profile read failures explain the cause without exposing upstream details and recover on refresh', async t => {
+  const cases = [
+    ['CALDERA_TIMEOUT', null, /server timed out/],
+    ['CALDERA_UNREACHABLE', null, /could not connect/],
+    ['CALDERA_UNAUTHORIZED', 401, /rejected the API credentials/],
+    ['CALDERA_UNAUTHORIZED', 403, /rejected the API credentials/],
+    ['CALDERA_BAD_RESPONSE', 200, /unexpected profile response/],
+    ['CALDERA_HTTP', 503, /HTTP 503/],
+    ['CALDERA_ERROR', null, /Check the Caldera container health/],
+  ];
+  for (const [code, status, expected] of cases) {
+    await t.test(`${code} ${status || ''}`, async () => {
+      let failing = true;
+      const h = harness({ adversaries: () => {
+        if (failing) throw new CalderaError('private key:secret upstream body', { code, status });
+        return [{ adversary_id: 'recovered', name: 'Recovered', atomic_ordering: ['one'] }];
+      } });
+      const failed = await h.status();
+      assert.deepEqual(failed.adversaries, []);
+      assert.match(failed.adversaries_error, expected);
+      assert.equal(failed.configuration_error, failed.adversaries_error, 'existing clients still block launch');
+      assert.equal(failed.agents_error, undefined, 'a profile failure does not invalidate a successful agent read');
+      assert.equal(failed.lanes[0].agents.length, 1);
+      assert.doesNotMatch(JSON.stringify(failed), /private|secret|upstream body/);
+      failing = false;
+      const recovered = await h.status();
+      assert.equal(recovered.adversaries[0].adversary_id, 'recovered');
+      assert.equal(recovered.adversaries_error, undefined);
+      assert.equal(recovered.configuration_error, undefined);
+    });
+  }
+});
+
+test('a valid empty profile catalog differs from an invalid API response', async () => {
+  const empty = await harness({ adversaries: () => [] }).status();
+  assert.deepEqual(empty.adversaries, []);
+  assert.equal(empty.adversaries_error, undefined);
+  assert.equal(empty.configuration_error, undefined);
+  const invalid = await harness({ adversaries: () => ({ error: 'private body' }) }).status();
+  assert.match(invalid.adversaries_error, /unexpected profile response/);
+  assert.doesNotMatch(JSON.stringify(invalid), /private body/);
 });
 
 test('ability detail ships for the selected profile only, and never for the whole stockpile', async () => {

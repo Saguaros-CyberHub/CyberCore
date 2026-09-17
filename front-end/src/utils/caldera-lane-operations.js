@@ -93,6 +93,26 @@ const fail = (status, message) => Object.assign(new Error(message), { status });
 const operationId = (batch, lane) => uuidv5(`operation:${lane}`, batch);
 const sourceId = (batch, lane) => uuidv5(`source:${lane}`, batch);
 
+// Keep upstream bodies, URLs and credentials out of this browser-facing error.
+// Only the client's structured failure category and HTTP status are public.
+function profileReadError(error) {
+  let detail;
+  if (error?.code === 'CALDERA_TIMEOUT') {
+    detail = 'The Caldera server timed out. Check its container health and logs, then refresh status.';
+  } else if (error?.code === 'CALDERA_UNREACHABLE') {
+    detail = 'CyberCore could not connect to Caldera. Check its container health and network connection.';
+  } else if (error?.code === 'CALDERA_UNAUTHORIZED' || [401, 403].includes(error?.status)) {
+    detail = 'Caldera rejected the API credentials. Check that CyberCore and Caldera use the same API key.';
+  } else if (error?.code === 'CALDERA_BAD_RESPONSE') {
+    detail = 'Caldera returned an unexpected profile response. Check its API and container logs.';
+  } else if (Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599) {
+    detail = `Caldera returned HTTP ${error.status}. Check its container logs, then refresh status.`;
+  } else {
+    detail = 'Check the Caldera container health and logs, then refresh status.';
+  }
+  return `Could not read Caldera adversary profiles. ${detail}`;
+}
+
 /**
  * Validate the launch's tradecraft, or refuse it BEFORE anything is created in
  * Caldera. A bad value rejected here costs a 400; the same value accepted here
@@ -501,7 +521,8 @@ function createService(deps = {}) {
       ? adversaryId : null;
     let client;
     try { client = clientFor(); } catch (error) {
-      return { ...response, lanes: project(await described, null), configuration_error: error.message };
+      return { ...response, lanes: project(await described, null), configuration_error: error.message,
+        adversaries_error: error.message, agents_error: 'Caldera agent status is unavailable until the server is configured.' };
     }
     const [envs, inv, adversaries, operations, abilities] = await Promise.allSettled([
       described, inventory(client), client.listAdversaries(), client.listOperations(), abilityCatalog(client)]);
@@ -528,7 +549,13 @@ function createService(deps = {}) {
             description: adv.description || '', ability_count: adv.atomic_ordering.length,
             ability_ids: abilityIds, summary: summarizeAbilities(abilityIds, catalog) };
         }).sort((a, b) => a.name.localeCompare(b.name));
-    } else response.configuration_error = 'Could not read Caldera adversary profiles.';
+    } else {
+      response.adversaries_error = profileReadError(adversaries.status === 'rejected'
+        ? adversaries.reason : { code: 'CALDERA_BAD_RESPONSE' });
+      // Existing clients use this field to prevent a launch with an unreadable
+      // catalog; adversaries_error distinguishes that failure from an empty one.
+      response.configuration_error = response.adversaries_error;
+    }
     // Only the abilities the SELECTED profile runs. Projecting every profile's
     // steps put 160 KB of catalog on a five-second no-store poll for a course
     // with 28 authored profiles — a payload that grew with every profile an

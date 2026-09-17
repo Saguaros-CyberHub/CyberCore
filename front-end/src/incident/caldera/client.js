@@ -133,23 +133,25 @@ function redact(text, secret) {
  * undici surfaces an aborted body read as an AbortError, and both mean the same
  * thing — no answer inside the budget.
  *
- * THIS IS THE ONE FUNCTION IN THE WHOLE ADAPTER THAT NO TEST COVERS, and that is
- * deliberate: covering it needs either a live server or a mocked global, and the
- * entire point of the seam is that nothing else needs either.
+ * Local HTTP-server tests cover socket and body failures without a Caldera
+ * deployment or a global fetch mock.
  *
  * @param {{method:string,url:string,headers:object,body:?string,timeoutMs:number,operation:string}} req
  * @returns {Promise<{status:number, ok:boolean, text:string}>}
  */
 async function defaultTransport(req) {
   const budget = Number(req.timeoutMs) > 0 ? Number(req.timeoutMs) : DEFAULT_TIMEOUT_MS;
-  let resp;
   try {
-    resp = await fetch(req.url, {
+    const resp = await fetch(req.url, {
       method: req.method,
       headers: req.headers,
       body: req.body == null ? undefined : req.body,
       signal: AbortSignal.timeout(budget),
     });
+    // Keep the body read inside the same catch: a timeout after headers is
+    // still CALDERA_TIMEOUT, not an unclassified AbortError in the caller.
+    const text = resp.status === 204 ? '' : await resp.text();
+    return { status: resp.status, ok: resp.ok, text };
   } catch (err) {
     if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
       throw new CalderaError(
@@ -164,10 +166,6 @@ async function defaultTransport(req) {
       { code: 'CALDERA_UNREACHABLE', operation: req.operation, cause: err }
     );
   }
-  // The signal stays armed across the body read deliberately, same as
-  // guacFetchText: a server that stalls AFTER headers hangs .text() identically.
-  const text = resp.status === 204 ? '' : await resp.text();
-  return { status: resp.status, ok: resp.ok, text };
 }
 
 /** Trim a trailing slash so path joining never produces '//api/v2/...'. */

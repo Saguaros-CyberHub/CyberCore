@@ -158,7 +158,7 @@ test('resolution is independent of catalog order and does not mutate input metad
 test('wire body includes prerequisites but only Caldera-supported fields', () => {
   const resolved = resolvePack(byKey('scheduled-persistence'), fixture.abilities);
   const wire = toWire(resolved);
-  assert.deepEqual(Object.keys(wire).sort(), ['adversary_id', 'atomic_ordering', 'description', 'name', 'objective', 'tags']);
+  assert.deepEqual(Object.keys(wire).sort(), ['adversary_id', 'atomic_ordering', 'description', 'name', 'tags']);
   assert.deepEqual(wire.atomic_ordering, resolved.atomic_ordering);
   assert.match(wire.description, /Prerequisites: .*Elevated Windows PowerShell/);
   wire.atomic_ordering.push('local edit');
