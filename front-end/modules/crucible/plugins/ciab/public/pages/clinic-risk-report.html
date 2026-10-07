@@ -1,0 +1,971 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Risk Assessment Report</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<!-- Use the locally bundled ECharts (same file the dashboard uses) so the
+     report works on networks where jsdelivr / public CDNs are blocked. -->
+<script src="/ciab/vendor/echarts.min.js"></script>
+<style>
+  /* ─── Base ─────────────────────────────────────────────────────────── */
+  * { box-sizing: border-box; }
+  :root {
+    --primary:    #0c234b;
+    --primary-d:  #001c48;
+    --text:       #1e293b;
+    --text-mute:  #64748b;
+    --border:     #e2e8f0;
+    --bg:         #f8fafc;
+    --crit:       #dc2626;
+    --high:       #ea580c;
+    --med:        #d97706;
+    --low:        #0891b2;
+    --ok:         #16a34a;
+    --warn-bg:    #fef3c7;
+  }
+  html, body {
+    margin: 0; padding: 0;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    color: var(--text);
+    background: #f1f5f9;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ─── Print-only toolbar ──────────────────────────────────────────── */
+  .toolbar {
+    position: sticky; top: 0; z-index: 100;
+    background: white;
+    border-bottom: 1px solid var(--border);
+    padding: 10px 20px;
+    display: flex; align-items: center; gap: 12px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  }
+  .toolbar h1 { font-size: 0.9rem; margin: 0; color: var(--text-mute); font-weight: 600; }
+  .toolbar h1 strong { color: var(--text); }
+  .toolbar .spacer { flex: 1; }
+  .toolbar button {
+    background: var(--primary); color: white; border: 0;
+    padding: 8px 14px; border-radius: 6px; font-weight: 600;
+    font-family: inherit; font-size: 0.85rem; cursor: pointer;
+  }
+  .toolbar button.secondary { background: white; color: var(--text); border: 1px solid var(--border); }
+  .toolbar button:hover { opacity: 0.9; }
+  .toolbar .hint { font-size: 0.75rem; color: var(--text-mute); margin-left: 8px; }
+
+  /* ─── Page container ──────────────────────────────────────────────── */
+  .report {
+    max-width: 8.5in;
+    margin: 24px auto;
+    background: white;
+    box-shadow: 0 4px 20px rgba(15,23,42,0.08);
+  }
+
+  /* ─── Cover ────────────────────────────────────────────────────────── */
+  .cover {
+    background: linear-gradient(180deg, var(--primary-d) 0%, var(--primary) 70%, #1e5288 100%);
+    color: white;
+    padding: 70px 50px 40px 50px;
+    position: relative;
+    min-height: 6.5in;
+    display: flex; flex-direction: column;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  .cover .eyebrow {
+    font-size: 0.7rem; font-weight: 700; letter-spacing: 0.25em;
+    color: #cbd5e1; margin-bottom: 16px;
+  }
+  .cover h1 {
+    font-size: 2.5rem; font-weight: 800; margin: 0 0 18px 0;
+    line-height: 1.1; color: white;
+  }
+  .cover .company { font-size: 1.5rem; font-weight: 600; color: #e2e8f0; margin-bottom: 10px; }
+  .cover .date    { font-size: 0.95rem; color: #bfdbfe; font-style: italic; }
+  .cover .prepared { font-size: 0.9rem; color: #cbd5e1; margin-top: 8px; }
+  .cover .training-badge {
+    position: absolute; top: 24px; right: 30px;
+    background: #facc15; color: #1e1e1e;
+    padding: 5px 12px; border-radius: 4px;
+    font-size: 0.7rem; font-weight: 700; letter-spacing: 0.1em;
+  }
+  .cover-meta {
+    margin-top: auto;
+    padding-top: 22px;
+    border-top: 1px solid rgba(255,255,255,0.25);
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px 28px;
+  }
+  .cover-meta .item { }
+  .cover-meta .label {
+    font-size: 0.65rem; font-weight: 700; letter-spacing: 0.15em;
+    color: rgba(226,232,240,0.65); text-transform: uppercase;
+  }
+  .cover-meta .value { font-size: 0.95rem; color: white; margin-top: 4px; }
+  .cover-confidential {
+    margin-top: 26px; padding-top: 14px;
+    border-top: 1px solid rgba(255,255,255,0.18);
+    font-size: 0.72rem; color: #94a3b8; line-height: 1.55;
+  }
+
+  /* ─── Sections ─────────────────────────────────────────────────────── */
+  section {
+    padding: 36px 50px;
+    border-top: 1px solid var(--border);
+  }
+  .section-header {
+    display: flex; align-items: flex-start; gap: 10px;
+    margin-bottom: 24px; padding-bottom: 12px;
+    border-bottom: 2px solid var(--primary);
+  }
+  .section-header .stripe {
+    width: 4px; height: 36px; background: var(--primary); border-radius: 2px;
+    margin-top: 4px;
+  }
+  .section-header .titles { flex: 1; }
+  .section-header .kicker {
+    font-size: 0.65rem; font-weight: 700; letter-spacing: 0.18em;
+    color: var(--primary); text-transform: uppercase;
+  }
+  .section-header h2 {
+    font-size: 1.5rem; font-weight: 700; margin: 4px 0 0 0;
+    color: var(--primary-d);
+  }
+  section h3 {
+    font-size: 1rem; font-weight: 700; color: var(--primary-d);
+    margin: 24px 0 12px 0;
+  }
+
+  /* ─── KPI tiles ────────────────────────────────────────────────────── */
+  .kpi-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
+    margin-bottom: 18px;
+  }
+  .kpi-tile {
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 14px 16px; position: relative; overflow: hidden;
+    background: white;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  .kpi-tile::before {
+    content: ''; position: absolute; left: 0; top: 0; bottom: 0;
+    width: 4px; background: var(--accent, var(--primary));
+  }
+  .kpi-tile .label {
+    font-size: 0.65rem; font-weight: 700; letter-spacing: 0.12em;
+    color: var(--text-mute); text-transform: uppercase;
+  }
+  .kpi-tile .value {
+    font-size: 1.8rem; font-weight: 800; color: var(--text);
+    margin: 6px 0 4px 0; line-height: 1;
+  }
+  .kpi-tile .sub { font-size: 0.75rem; color: var(--text-mute); }
+
+  /* ─── Callout boxes ────────────────────────────────────────────────── */
+  .callout {
+    margin: 18px 0; padding: 14px 18px;
+    border-radius: 6px; border-left: 4px solid var(--accent, var(--primary));
+    background: rgba(12, 35, 75, 0.06);
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  .callout.warn   { border-left-color: var(--med);  background: rgba(217, 119, 6, 0.08); }
+  .callout.danger { border-left-color: var(--crit); background: rgba(220, 38, 38, 0.06); }
+  .callout.ok     { border-left-color: var(--ok);   background: rgba(22, 163, 74, 0.06); }
+  .callout .title {
+    font-size: 0.7rem; font-weight: 700; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--accent, var(--primary)); margin-bottom: 6px;
+  }
+  .callout.warn .title   { color: var(--med); }
+  .callout.danger .title { color: var(--crit); }
+  .callout.ok .title     { color: var(--ok); }
+  .callout .body { font-size: 0.9rem; color: var(--text); }
+
+  /* ─── Key/value table (engagement scope) ──────────────────────────── */
+  table.kv {
+    width: 100%; border-collapse: collapse; font-size: 0.9rem;
+  }
+  table.kv tr:nth-child(even) { background: var(--bg); }
+  table.kv td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  table.kv td:first-child { color: var(--text-mute); font-weight: 600; width: 35%; }
+
+  /* ─── Findings table ──────────────────────────────────────────────── */
+  table.findings {
+    width: 100%; border-collapse: collapse; font-size: 0.85rem;
+    margin-top: 8px;
+  }
+  table.findings thead {
+    background: var(--primary-d); color: white;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  table.findings th {
+    padding: 10px 8px; text-align: left;
+    font-size: 0.7rem; letter-spacing: 0.08em; font-weight: 700;
+  }
+  table.findings tbody td {
+    padding: 10px 8px; border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  table.findings tbody tr {
+    border-left: 3px solid transparent;
+  }
+  table.findings tbody tr.sev-crit { border-left-color: var(--crit); }
+  table.findings tbody tr.sev-high { border-left-color: var(--high); }
+  table.findings tbody tr.sev-med  { border-left-color: var(--med); }
+  table.findings tbody tr.sev-low  { border-left-color: var(--low); }
+  table.findings tbody tr:nth-child(even) td { background: var(--bg); }
+  table.findings .code  { font-weight: 700; white-space: nowrap; }
+  table.findings .title { font-weight: 500; }
+  table.findings .cat   { color: var(--text-mute); font-size: 0.8rem; }
+  table.findings .num   { text-align: center; }
+
+  .badge {
+    display: inline-block;
+    padding: 3px 8px; border-radius: 3px;
+    font-size: 0.65rem; font-weight: 700; letter-spacing: 0.05em;
+    color: white;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  .badge.crit { background: var(--crit); }
+  .badge.high { background: var(--high); }
+  .badge.med  { background: var(--med); }
+  .badge.low  { background: var(--low); }
+
+  .legend {
+    display: flex; gap: 18px; margin-top: 10px;
+    font-size: 0.75rem; color: var(--text-mute);
+  }
+  .legend .item { display: flex; align-items: center; gap: 6px; }
+  .legend .swatch { width: 10px; height: 10px; border-radius: 2px; }
+  .legend .swatch.crit { background: var(--crit); }
+  .legend .swatch.high { background: var(--high); }
+  .legend .swatch.med  { background: var(--med); }
+  .legend .swatch.low  { background: var(--low); }
+
+  /* ─── Critical risk cards ──────────────────────────────────────────── */
+  .crit-cards { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+  .crit-card {
+    border-left: 4px solid var(--crit);
+    background: rgba(220, 38, 38, 0.04);
+    padding: 10px 14px;
+    border-radius: 0 4px 4px 0;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  .crit-card .meta {
+    font-size: 0.7rem; font-weight: 700; letter-spacing: 0.08em;
+    color: var(--crit); text-transform: uppercase;
+  }
+  .crit-card .title { font-weight: 600; margin: 4px 0; }
+  .crit-card .sub   { font-size: 0.75rem; color: var(--text-mute); }
+
+  /* ─── Charts ───────────────────────────────────────────────────────── */
+  .chart {
+    width: 100%; height: 360px;
+    margin: 10px 0 20px 0;
+  }
+  .chart.small { height: 240px; }
+
+  /* ─── Deloitte exec summary blocks ─────────────────────────────────── */
+  .exec-block { margin-bottom: 14px; padding: 10px 14px; border-left: 3px solid var(--border); background: #fbfcfd; border-radius: 0 4px 4px 0; break-inside: avoid; }
+  .exec-block .exec-label { font-size: 0.65rem; font-weight: 800; letter-spacing: 0.18em; color: var(--primary); margin-bottom: 4px; }
+
+  /* ─── Asset register table ────────────────────────────────────────── */
+  table.asset-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-top: 8px; }
+  table.asset-table thead { background: var(--primary-d); color: white; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  table.asset-table th { padding: 8px 6px; text-align: left; font-size: 0.7rem; letter-spacing: 0.08em; font-weight: 700; }
+  table.asset-table th.num { text-align: center; }
+  table.asset-table tbody td { padding: 8px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  table.asset-table tbody td.num { text-align: center; font-variant-numeric: tabular-nums; }
+  table.asset-table tbody tr:nth-child(even) td { background: var(--bg); }
+  table.asset-table tbody tr.tier-1 { border-left: 3px solid var(--crit); }
+  table.asset-table tbody tr.tier-2 { border-left: 3px solid var(--med); }
+  table.asset-table tbody tr.tier-3 { border-left: 3px solid var(--low); }
+  table.asset-table .dc-restricted   { color: var(--crit); font-weight: 700; }
+  table.asset-table .dc-confidential { color: var(--med); font-weight: 600; }
+  table.asset-table .dc-internal     { color: var(--text-mute); }
+  table.asset-table .dc-public       { color: var(--ok); }
+
+  /* ─── Insurance readiness ─────────────────────────────────────────── */
+  table.insurance-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 10px; }
+  table.insurance-table th { padding: 8px 10px; text-align: left; background: var(--bg); font-size: 0.7rem; letter-spacing: 0.08em; color: var(--text-mute); font-weight: 700; border-bottom: 1px solid var(--border); }
+  table.insurance-table th.num { text-align: right; }
+  table.insurance-table td { padding: 7px 10px; border-bottom: 1px solid var(--border); }
+  table.insurance-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  table.insurance-table .status-yes     { color: var(--ok);   font-weight: 700; }
+  table.insurance-table .status-partial { color: var(--med);  font-weight: 700; }
+  table.insurance-table .status-no      { color: var(--crit); font-weight: 700; }
+
+  /* ─── Snapshot delta cards ────────────────────────────────────────── */
+  .delta-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 12px 0; }
+  .delta-tile { border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; background: white; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  .delta-tile .label { font-size: 0.7rem; color: var(--text-mute); font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; }
+  .delta-tile .now   { font-size: 1.5rem; font-weight: 800; color: var(--text); margin: 4px 0 2px; }
+  .delta-tile .change { font-size: 0.85rem; font-weight: 600; }
+  .delta-tile .change.up   { color: var(--crit); }      /* more = worse for findings */
+  .delta-tile .change.down { color: var(--ok); }         /* fewer = better */
+  .delta-tile.coverage .change.up   { color: var(--ok); }   /* more coverage = better */
+  .delta-tile.coverage .change.down { color: var(--crit); }
+  .delta-tile .prior { font-size: 0.7rem; color: var(--text-mute); margin-top: 4px; }
+
+  /* ─── Heat map pair (inherent + residual side by side) ─────────────── */
+  .heatmap-pair {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+    margin: 8px 0;
+  }
+  .heatmap-col .chart { height: 300px; margin: 0; }
+  .heatmap-title {
+    font-size: 0.75rem; font-weight: 700; letter-spacing: 0.12em;
+    text-transform: uppercase; margin: 0 0 6px 0;
+    padding: 6px 10px; border-radius: 4px;
+    color: white;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  .heatmap-title.inherent { background: var(--crit); }
+  .heatmap-title.residual { background: var(--ok); }
+
+  /* ─── CIS RAM register ─────────────────────────────────────────────── */
+  .ram-control { margin-bottom: 24px; break-inside: avoid; }
+  .ram-control h4 {
+    font-size: 0.9rem; font-weight: 700; color: white;
+    background: var(--primary-d);
+    padding: 8px 12px; margin: 0 0 0 0;
+    border-radius: 4px 4px 0 0;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  .ram-control h4 .count {
+    font-weight: 400; font-size: 0.8rem; color: #cbd5e1;
+    margin-left: 8px;
+  }
+  table.ram {
+    width: 100%; border-collapse: collapse; font-size: 0.8rem;
+    border: 1px solid var(--border); border-top: 0;
+  }
+  table.ram th, table.ram td {
+    padding: 6px 10px; text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  table.ram th { background: var(--bg); font-size: 0.7rem; color: var(--text-mute); font-weight: 600; }
+  table.ram .num { text-align: center; font-variant-numeric: tabular-nums; }
+  table.ram .ok  { color: var(--ok); font-weight: 700; }
+  table.ram .no  { color: var(--crit); font-weight: 700; }
+
+  /* ─── Treatment plan cards ─────────────────────────────────────────── */
+  .treatment-card {
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 14px 18px; margin-bottom: 10px;
+    break-inside: avoid;
+  }
+  .treatment-card .head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .treatment-card .ttl  { font-weight: 700; color: var(--primary-d); }
+  .treatment-card .ttl .num { color: var(--primary); font-weight: 800; margin-right: 6px; }
+  .treatment-card .meta { font-size: 0.75rem; color: var(--text-mute); }
+  .treatment-card .body { margin-top: 8px; font-size: 0.85rem; color: var(--text); }
+
+  /* ─── Detailed findings cards ──────────────────────────────────────── */
+  .finding-card {
+    border-left: 4px solid var(--primary);
+    padding: 14px 18px; margin-bottom: 16px;
+    background: white;
+    break-inside: avoid;
+    border-bottom: 1px solid var(--border);
+  }
+  .finding-card.sev-crit { border-left-color: var(--crit); }
+  .finding-card.sev-high { border-left-color: var(--high); }
+  .finding-card.sev-med  { border-left-color: var(--med); }
+  .finding-card.sev-low  { border-left-color: var(--low); }
+  .finding-card .head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+  .finding-card .ttl { font-weight: 700; color: var(--primary-d); font-size: 1rem; }
+  .finding-card .ttl .num { color: var(--primary); font-weight: 800; margin-right: 6px; }
+  .finding-card .meta-row { font-size: 0.78rem; color: var(--text-mute); margin-bottom: 12px; }
+  .finding-card .field-label {
+    font-size: 0.7rem; font-weight: 700; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--text-mute); margin: 10px 0 4px 0;
+  }
+  .finding-card .field-body { font-size: 0.88rem; color: var(--text); }
+  .finding-card .refs { margin-top: 10px; font-size: 0.75rem; color: var(--text-mute); font-style: italic; }
+
+  /* ─── Recommendation lists ─────────────────────────────────────────── */
+  .rec-list { margin: 6px 0 18px 0; padding-left: 22px; }
+  .rec-list li { margin-bottom: 8px; font-size: 0.9rem; }
+  .rec-list.quick li::marker { color: var(--ok); font-weight: 700; }
+  .rec-list.strategic li::marker { color: var(--primary); font-weight: 700; }
+
+  /* ─── Bullet list ──────────────────────────────────────────────────── */
+  .bullet-list { margin: 4px 0 12px 0; padding-left: 22px; }
+  .bullet-list li { margin-bottom: 6px; font-size: 0.88rem; }
+  .bullet-list.danger li::marker { color: var(--crit); }
+
+  /* ─── CSF function table ───────────────────────────────────────────── */
+  .csf-fn-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+    margin-top: 12px;
+  }
+  .csf-fn-tile {
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 10px 14px;
+    background: white;
+  }
+  .csf-fn-tile .name { font-size: 0.75rem; color: var(--text-mute); font-weight: 600; }
+  .csf-fn-tile .score { font-size: 1.4rem; font-weight: 800; color: var(--text); margin-top: 2px; }
+  .csf-fn-tile.weak { border-left: 3px solid var(--crit); }
+  .csf-fn-tile.strong { border-left: 3px solid var(--ok); }
+
+  /* ─── Table of contents ────────────────────────────────────────────── */
+  .toc-list { list-style: none; margin: 0; padding: 0; }
+  .toc-list li { border-bottom: 1px solid var(--border); }
+  .toc-list li a {
+    display: flex; align-items: baseline; gap: 14px;
+    padding: 10px 2px; color: var(--text); text-decoration: none;
+    font-size: 0.95rem; font-weight: 500;
+  }
+  .toc-list li a:hover { color: var(--primary); }
+  .toc-list .toc-num {
+    min-width: 2em; color: var(--primary); font-weight: 800;
+    font-variant-numeric: tabular-nums;
+  }
+  .toc-list li.toc-group {
+    padding: 20px 2px 6px;
+    font-size: 0.65rem; font-weight: 700; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--text-mute);
+  }
+
+  /* ─── Sign-off block (consultancy approval) ────────────────────────── */
+  .signoff { margin-top: 30px; break-inside: avoid; }
+  .signoff-grid {
+    display: grid; grid-template-columns: 2fr 2fr 1.2fr; gap: 30px;
+    margin-top: 36px;
+  }
+  .signoff-field .rule { height: 28px; border-bottom: 1px solid var(--text); }
+  .signoff-field .label {
+    margin-top: 7px;
+    font-size: 0.62rem; font-weight: 700; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--text-mute);
+  }
+  .signoff-field .name { margin-top: 2px; font-size: 0.8rem; color: var(--text); }
+
+  /* ─── Running print footer — hidden on screen, fixed in print ─────── */
+  .print-footer { display: none; }
+
+  /* ─── Loading / error states ───────────────────────────────────────── */
+  .loading { padding: 60px; text-align: center; color: var(--text-mute); }
+  .error   { padding: 40px; text-align: center; color: var(--crit); }
+
+  /* ──────────────────────────────────────────────────────────────────── */
+  /* PRINT STYLES — when user picks "Save as PDF"                       */
+  /* ──────────────────────────────────────────────────────────────────── */
+  @media print {
+    /* Letter, ~0.6in sides, larger bottom margin to clear the running footer */
+    @page {
+      size: letter;
+      margin: 0.6in 0.6in 0.85in 0.6in;
+    }
+    html { font-size: 10.5pt; }                 /* rem-based type scales with this */
+    html, body { background: white !important; }
+    body { line-height: 1.45; }
+    .toolbar, .no-print, .loading { display: none !important; }
+    .report {
+      box-shadow: none !important;
+      margin: 0 !important;
+      max-width: 100% !important;
+      /* Keeps the last page's content clear of the fixed footer. Chromium
+         cannot pad every page via CSS; the footer's solid white background
+         masks the rare mid-page collision instead. */
+      padding-bottom: 0.45in;
+    }
+
+    /* Running footer — Chromium repeats position:fixed elements on every
+       printed page. Real page numbers are NOT possible in Chromium print
+       CSS (no @page margin boxes / counter(page)) — intentionally omitted. */
+    .print-footer {
+      display: flex; position: fixed; left: 0; right: 0; bottom: 0;
+      z-index: 10;
+      justify-content: space-between; align-items: baseline; gap: 12pt;
+      padding: 4pt 2pt 0 2pt;
+      background: white;
+      border-top: 1px solid var(--border);
+      font-size: 7.5pt; letter-spacing: 0.06em; color: var(--text-mute);
+      print-color-adjust: exact !important;
+      -webkit-print-color-adjust: exact !important;
+    }
+
+    /* Cover fills page 1 exactly and paints OVER the fixed footer
+       (z-index 20 > footer's 10), so the cover stays artifact-free.
+       9.54in ≈ letter 11in − 0.6in top − 0.85in bottom margins. */
+    .cover {
+      z-index: 20;
+      height: 9.54in;
+      min-height: 0;
+      overflow: hidden;
+      padding: 0.55in 0.55in 0.4in 0.55in;
+      break-after: page;
+    }
+    .cover h1 { font-size: 26pt; }
+    .cover .company { font-size: 15pt; }
+
+    /* TOC sits alone on page 2 */
+    section.toc { break-after: page; }
+
+    section { padding: 14pt 0; border-top: 0; }
+    .section-header { margin-bottom: 12pt; break-inside: avoid; break-after: avoid; }
+    .section-header h2 { font-size: 16pt; }
+    .section-header .kicker { font-size: 7.5pt; }
+    section h3 { font-size: 11.5pt; break-after: avoid; }
+
+    /* Major chapter starts only — short sub-sections (asset register,
+       insurance, snapshot, treatment plan) flow naturally to avoid
+       half-empty pages; break-inside rules below keep their blocks whole. */
+    section.exec-dashboard,
+    section.heatmap,
+    section.findings-table,
+    section.ig1,
+    section.csf,
+    section.recommendations,
+    section.ram-register,
+    section.detailed-findings,
+    section.methodology {
+      break-before: page;
+    }
+
+    /* Page-break discipline */
+    thead { display: table-header-group; }     /* repeat headers on long tables */
+    tr { break-inside: avoid; }
+    .kpi-tile, .callout, .crit-card, .finding-card, .treatment-card,
+    .delta-tile, .csf-fn-tile, .exec-block, .signoff,
+    .rec-list li, .bullet-list li,
+    .chart, .heatmap-pair { break-inside: avoid !important; }
+    .ram-control { break-inside: auto; }       /* groups can exceed a page */
+    .ram-control h4 { break-after: avoid; }
+
+    /* Color fidelity */
+    .kpi-tile, .callout, .crit-card, .finding-card, .treatment-card,
+    .ram-control, table.findings thead, table.asset-table thead,
+    .badge, .heatmap-title, .cover, .delta-tile {
+      print-color-adjust: exact !important;
+      -webkit-print-color-adjust: exact !important;
+    }
+
+    /* Charts: fixed pixel widths matching the 7.3in (≈700px) printable
+       area. clinic-risk-report.js resizes the ECharts instances to these
+       exact numbers in onbeforeprint, so nothing is clipped or scaled. */
+    .chart { width: 700px !important; height: 300px !important; margin-left: auto; margin-right: auto; }
+    .chart.small { height: 220px !important; }
+    .heatmap-pair { grid-template-columns: 346px 346px; gap: 8px; }
+    .heatmap-col .chart { width: 346px !important; height: 240px !important; margin: 0; }
+
+    a { color: inherit; text-decoration: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Sticky on-screen toolbar (hidden in print) -->
+<div class="toolbar no-print">
+  <h1>Risk Assessment Report — <strong id="hdrCompany">Loading…</strong></h1>
+  <span class="spacer"></span>
+  <span class="hint" id="printHint">Print → destination "Save as PDF" · turn off "Headers and footers" under More settings</span>
+  <button onclick="window.printReport ? window.printReport() : window.print()" title="Open browser print dialog — pick 'Save as PDF' as the destination">🖨️ Print to PDF</button>
+  <button class="secondary" onclick="window.history.back()">← Back</button>
+</div>
+
+<div class="report">
+
+  <!-- ─── COVER ─────────────────────────────────────────────────────── -->
+  <div class="cover">
+    <div class="training-badge" id="trainingBadge" style="display:none">TRAINING SAMPLE</div>
+    <div class="eyebrow">CONFIDENTIAL · RISK ADVISORY</div>
+    <h1>Cybersecurity Risk Assessment</h1>
+    <div class="company" id="coverCompany">—</div>
+    <div class="date" id="coverDate">—</div>
+    <div class="prepared" id="coverPreparedBy">—</div>
+    <div class="cover-meta" id="coverMeta">
+      <!-- populated by JS -->
+    </div>
+    <div class="cover-confidential">
+      CONFIDENTIALITY NOTICE — This document contains sensitive security findings and is prepared
+      exclusively for <span id="confCompany">the client organization</span>. It may not be copied,
+      forwarded, or disclosed to any third party without prior written authorization.
+    </div>
+  </div>
+
+  <!-- ─── TABLE OF CONTENTS (entries rendered by JS; absent sections omitted) ── -->
+  <section class="toc" id="tocSection" style="display:none">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Cybersecurity Risk Assessment</div>
+        <h2>Contents</h2>
+      </div>
+    </div>
+    <ol class="toc-list" id="tocList"></ol>
+  </section>
+
+  <!-- ─── EXECUTIVE DASHBOARD ──────────────────────────────────────── -->
+  <section class="exec-dashboard">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Section 1</div>
+        <h2>Executive Dashboard</h2>
+      </div>
+    </div>
+    <div class="kpi-grid" id="kpiGrid"></div>
+    <div id="postureCallout"></div>
+
+    <!-- Deloitte / CISO-board 4-section exec summary structure -->
+    <h3>Executive Summary</h3>
+    <div id="execDeloitte">
+      <div id="execCurrentPosture" class="exec-block">
+        <div class="exec-label">CURRENT POSTURE</div>
+        <div class="field-body" id="execCurrentPostureBody"></div>
+      </div>
+      <div id="execTopRisks" class="exec-block">
+        <div class="exec-label">TOP RISKS</div>
+        <div class="field-body" id="execTopRisksBody"></div>
+      </div>
+      <div id="execProgress" class="exec-block">
+        <div class="exec-label">PROGRESS</div>
+        <div class="field-body" id="execProgressBody"></div>
+      </div>
+      <div id="execDecisionsNeeded" class="exec-block">
+        <div class="exec-label">DECISIONS NEEDED</div>
+        <div class="field-body" id="execDecisionsNeededBody"></div>
+      </div>
+    </div>
+    <!-- Fallback: legacy single-block exec summary if Deloitte fields empty -->
+    <div id="execSummary" class="field-body" style="display:none"></div>
+
+    <h3>Engagement Scope</h3>
+    <table class="kv" id="scopeTable"></table>
+
+    <!-- Consultancy-style approval block -->
+    <div class="signoff">
+      <h3>Approval &amp; Sign-off</h3>
+      <div class="signoff-grid">
+        <div class="signoff-field">
+          <div class="rule"></div>
+          <div class="label">Prepared by</div>
+          <div class="name" id="signoffPreparedBy">&nbsp;</div>
+        </div>
+        <div class="signoff-field">
+          <div class="rule"></div>
+          <div class="label">Reviewed by</div>
+          <div class="name">&nbsp;</div>
+        </div>
+        <div class="signoff-field">
+          <div class="rule"></div>
+          <div class="label">Date</div>
+          <div class="name" id="signoffDate">&nbsp;</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── ASSET REGISTER (Tier 1) ──────────────────────────────────── -->
+  <section class="asset-register" id="assetRegisterSection" style="display:none">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Section 2 · OCTAVE Allegro-Style</div>
+        <h2>Asset Register</h2>
+      </div>
+    </div>
+    <p style="font-size:0.85rem;color:var(--text-mute);margin-top:0;">
+      Every risk traces back to one or more assets. Each entry below records owner, data classification, and the C/I/A impact band that drives the risk calculation. Tier-1 (crown jewel) assets are flagged for board attention.
+    </p>
+    <table class="asset-table">
+      <thead>
+        <tr>
+          <th>NAME</th><th>TYPE</th><th>OWNER</th>
+          <th class="num">CRIT</th>
+          <th class="num">C</th><th class="num">I</th><th class="num">A</th>
+          <th>DATA CLASS</th>
+        </tr>
+      </thead>
+      <tbody id="assetTableBody"></tbody>
+    </table>
+  </section>
+
+  <!-- ─── CYBER-INSURANCE READINESS (Tier 2) ──────────────────────── -->
+  <section class="insurance-readiness" id="insuranceSection" style="display:none">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Section 3 · Underwriting Posture</div>
+        <h2>Cyber-Insurance Readiness</h2>
+      </div>
+    </div>
+    <p style="font-size:0.85rem;color:var(--text-mute);margin-top:0;">
+      Mirrors the questionnaire major cyber-insurance carriers (Coalition, At-Bay, Cowbell, Resilience) use during underwriting. Score below 65 typically triggers a sub-standard / restricted coverage offer or outright declination.
+    </p>
+    <div class="kpi-grid" style="grid-template-columns: 1fr 1fr;">
+      <div class="kpi-tile" style="--accent:#0c234b; grid-column: span 1;">
+        <div class="label">Readiness Score</div>
+        <div class="value" id="insuranceScoreValue">—</div>
+        <div class="sub" id="insuranceScoreSub">of 100 possible points</div>
+      </div>
+      <div class="kpi-tile" id="insuranceTierTile" style="--accent:#dc2626; grid-column: span 1;">
+        <div class="label">Underwriter Tier</div>
+        <div class="value" id="insuranceTierValue">—</div>
+        <div class="sub" id="insuranceTierSub">— sub-standard market</div>
+      </div>
+    </div>
+    <h3>Control Scorecard</h3>
+    <table class="insurance-table">
+      <thead><tr><th>CONTROL</th><th>STATUS</th><th class="num">POINTS</th></tr></thead>
+      <tbody id="insuranceTableBody"></tbody>
+    </table>
+  </section>
+
+  <!-- ─── SNAPSHOT / DELTA COMPARISON (Tier 2) ────────────────────── -->
+  <section class="snapshot-delta" id="snapshotSection" style="display:none">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Section 4 · Engagement Progress</div>
+        <h2>Snapshot Comparison — Current vs Prior Assessment</h2>
+      </div>
+    </div>
+    <p style="font-size:0.85rem;color:var(--text-mute);margin-top:0;">
+      A risk assessment is recurring, not one-and-done. This section measures progress against the prior snapshot — the visual proof that the work is moving the needle.
+    </p>
+    <div id="snapshotDelta"></div>
+  </section>
+
+  <!-- ─── HEAT MAP ─────────────────────────────────────────────────── -->
+  <section class="heatmap">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Section 5 · Inherent vs Residual</div>
+        <h2>Risk Heat Map</h2>
+      </div>
+    </div>
+    <p style="font-size:0.85rem;color:var(--text-mute);margin-top:0;margin-bottom:14px;">
+      Two views of the same risk register. <strong>Inherent</strong> is the current exposure with controls as they exist today. <strong>Residual</strong> is the projected exposure after the recommended treatments (see the Recommendations section) are implemented. Risks should visually migrate from the upper-right (red) toward the lower-left (blue).
+    </p>
+    <div class="heatmap-pair">
+      <div class="heatmap-col">
+        <h4 class="heatmap-title inherent">Inherent Risk — Today</h4>
+        <div id="chartHeatmap" class="chart"></div>
+      </div>
+      <div class="heatmap-col">
+        <h4 class="heatmap-title residual">Residual Risk — After Treatment</h4>
+        <div id="chartHeatmapResidual" class="chart"></div>
+      </div>
+    </div>
+    <div id="residualSummary" class="callout ok" style="display:none"></div>
+    <h3>Top risks demanding attention</h3>
+    <div id="critCards" class="crit-cards"></div>
+  </section>
+
+  <!-- ─── FINDINGS TABLE ──────────────────────────────────────────── -->
+  <section class="findings-table">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Section 6</div>
+        <h2>Findings — Sorted by Inherent Risk</h2>
+      </div>
+    </div>
+    <table class="findings">
+      <thead>
+        <tr>
+          <th>CODE</th>
+          <th>FINDING</th>
+          <th>CATEGORY</th>
+          <th class="num">L</th>
+          <th class="num">I</th>
+          <th class="num">RISK</th>
+          <th>SEVERITY</th>
+          <th>STATUS</th>
+        </tr>
+      </thead>
+      <tbody id="findingsBody"></tbody>
+    </table>
+    <div class="legend">
+      <span><strong>SEVERITY:</strong></span>
+      <span class="item"><span class="swatch crit"></span> CRITICAL</span>
+      <span class="item"><span class="swatch high"></span> HIGH</span>
+      <span class="item"><span class="swatch med"></span> MEDIUM</span>
+      <span class="item"><span class="swatch low"></span> LOW</span>
+    </div>
+  </section>
+
+  <!-- ─── CIS IG1 COMPLIANCE ──────────────────────────────────────── -->
+  <section class="ig1">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Section 7 · CIS v8 Implementation Group 1</div>
+        <h2>CIS Controls IG1 Compliance</h2>
+      </div>
+    </div>
+    <div class="kpi-grid" id="ig1KpiGrid"></div>
+    <div id="chartCis" class="chart small"></div>
+    <div id="ig1Posture"></div>
+    <h3>Top unmet safeguards</h3>
+    <ul class="bullet-list danger" id="topUnmet"></ul>
+  </section>
+
+  <!-- ─── NIST CSF MATURITY ───────────────────────────────────────── -->
+  <section class="csf">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Section 8 · Functional Posture</div>
+        <h2>NIST CSF 2.0 Maturity</h2>
+      </div>
+    </div>
+    <div id="chartRadar" class="chart"></div>
+    <div id="chartCsf" class="chart small"></div>
+    <h3>Function scores</h3>
+    <div class="csf-fn-grid" id="csfGrid"></div>
+    <div id="csfWeakCallout"></div>
+  </section>
+
+  <!-- ─── RECOMMENDATIONS ──────────────────────────────────────────── -->
+  <section class="recommendations">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Section 9 · Prioritized Action Plan</div>
+        <h2>Recommendations</h2>
+      </div>
+    </div>
+    <div class="callout ok">
+      <div class="title">Quick Wins — Implement within 30 days</div>
+      <div class="body">High-impact controls that require minimal capital outlay or vendor procurement. The IT lead can typically own these within their existing licensing.</div>
+    </div>
+    <ol class="rec-list quick" id="quickWins"></ol>
+    <div class="callout">
+      <div class="title">Strategic Initiatives — 90 days to 6 months</div>
+      <div class="body">Larger lifts that require budget approval, vendor selection, or cross-team coordination. Stage these into the next quarterly planning cycle.</div>
+    </div>
+    <ol class="rec-list strategic" id="strategic"></ol>
+  </section>
+
+  <!-- ─── CIS RAM REGISTER ────────────────────────────────────────── -->
+  <section class="ram-register" id="ramRegisterSection" style="display:none">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Appendix A · CIS RAM v2.1 Workbook</div>
+        <h2>Risk Register — All IG1 Safeguards</h2>
+      </div>
+    </div>
+    <p style="font-size:0.85rem; color:var(--text-mute); margin-top:0">
+      Each safeguard is scored Mission Impact × Obligations Impact × Likelihood
+      (1–3 each). Inherent risk = likelihood × max(mission, obligations).
+      "Reasonable" treatments bring residual risk to the acceptable risk
+      threshold (currently <strong id="ramAcceptable">6</strong>) or below.
+    </p>
+    <div id="ramRegister"></div>
+  </section>
+
+  <!-- ─── CIS RAM TREATMENT PLAN ──────────────────────────────────── -->
+  <section class="ram-treatment" id="ramTreatmentSection" style="display:none">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Appendix B · Treatment Plan</div>
+        <h2>Treatment Plan — Items Requiring Attention</h2>
+      </div>
+    </div>
+    <p style="font-size:0.85rem; color:var(--text-mute); margin-top:0">
+      <span id="ramTreatmentCount">—</span> items require attention — sorted by descending inherent risk.
+    </p>
+    <div id="ramTreatment"></div>
+  </section>
+
+  <!-- ─── DETAILED FINDINGS ────────────────────────────────────────── -->
+  <section class="detailed-findings">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Appendix C</div>
+        <h2>Detailed Findings</h2>
+      </div>
+    </div>
+    <div id="detailedFindings"></div>
+  </section>
+
+  <!-- ─── METHODOLOGY ──────────────────────────────────────────────── -->
+  <section class="methodology">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Appendix D · How This Report Was Built</div>
+        <h2>Methodology</h2>
+      </div>
+    </div>
+    <p style="font-size:0.9rem">
+      This assessment combines (1) an intake questionnaire completed by the assessor —
+      covering organizational profile, network topology, endpoint security, account
+      management, and data protection — and (2) a baseline against the CIS Controls v8
+      Implementation Group 1 (IG1) and NIST Cybersecurity Framework 2.0. Findings are
+      scored on a 1–5 likelihood × 1–5 impact scale (CIS RAM v2.1 style) producing a
+      1–25 inherent-risk score normalized to a 0–9 severity band.
+    </p>
+    <p style="font-size:0.9rem">
+      CSF maturity scores are computed by mapping each IG1 safeguard's response
+      (yes / partial / no) to one or more CSF functions via the IG1↔CSF crosswalk,
+      then averaging per function and normalizing to a 0–5 maturity scale. The
+      Compliance Posture archetype is derived from the response pattern and indicates
+      where the organization has invested compared to similar peers. Insurance
+      readiness scoring mirrors the 12-control underwriting questionnaire used by
+      major carriers (Coalition, At-Bay, Cowbell, Resilience).
+    </p>
+    <p style="font-size:0.9rem">
+      <strong>Threat source taxonomy</strong> (NIST SP 800-30 Rev 1 §3.2): each
+      finding is categorized as <em>Adversarial</em> (human attacker), <em>Accidental</em>
+      (mistake or misconfiguration), <em>Structural</em> (gap in design or process),
+      or <em>Environmental</em> (natural / physical event). This taxonomy aligns with
+      what students will encounter on Security+, CRISC, CISA, and CISSP exams.
+    </p>
+    <p style="font-size:0.9rem">
+      <strong>CSF Implementation Tiers</strong> (NIST CSF 2.0 §3.2): Tier 1 Partial,
+      Tier 2 Risk Informed, Tier 3 Repeatable, Tier 4 Adaptive. Our 0–5 maturity
+      score maps approximately as: 0–1.5 = Tier 1, 1.5–3 = Tier 2, 3–4 = Tier 3,
+      4–5 = Tier 4.
+    </p>
+    <p style="font-size:0.9rem">
+      <strong>5-point qualitative scale equivalents</strong> (NIST SP 800-30 Rev 1 Tables G-2 and H-3):
+      1 = Very Low, 2 = Low, 3 = Moderate, 4 = High, 5 = Very High. These map
+      directly to the numeric likelihood and impact scales used throughout this
+      report.
+    </p>
+    <ul class="bullet-list">
+      <li>CIS Controls v8 (IG1) — Center for Internet Security, <em>cisecurity.org/controls/v8</em></li>
+      <li>CIS Risk Assessment Method (RAM) v2.1 — Mission Impact × Obligations Impact × Likelihood (Expectancy)</li>
+      <li>NIST Cybersecurity Framework 2.0 — six functions: Govern, Identify, Protect, Detect, Respond, Recover</li>
+      <li>NIST SP 800-30 Rev 1 — Guide for Conducting Risk Assessments (threat source taxonomy, qualitative scales)</li>
+      <li>NIST SP 800-171 / CMMC — POA&amp;M (Plan of Action and Milestones) format used in <em>POA&amp;M CSV</em> export</li>
+      <li>OCTAVE Allegro (Carnegie Mellon SEI) — asset-centric risk methodology underlying the Asset Register</li>
+      <li>FAIR (Factor Analysis of Information Risk) — Open Group standard, optional quantification basis</li>
+      <li>Verizon Data Breach Investigations Report (DBIR) — empirical basis for SMB threat-scenario library</li>
+    </ul>
+  </section>
+
+</div>
+
+<!-- Running footer — position:fixed repeats on every printed page in
+     Chromium; hidden on screen. The full-page cover paints over it on
+     page 1 (higher z-index), keeping the cover artifact-free. -->
+<div class="print-footer" aria-hidden="true">
+  <span>CONFIDENTIAL — Prepared for <span id="footerCompany">—</span></span>
+  <span id="footerDate">—</span>
+</div>
+
+<div id="loadingOverlay" class="loading">Loading report…</div>
+
+<script src="/js/app.js"></script>
+<script src="/ciab/js/clinic-risk-report.js"></script>
+</body>
+</html>

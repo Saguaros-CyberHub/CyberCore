@@ -1,0 +1,57 @@
+<?php
+require_once __DIR__ . '/../includes/layout.php';   // pulls auth.php -> db.php
+require_once __DIR__ . '/../includes/auth.php';
+start_session_once();
+
+$error = null;
+$me    = current_researcher();
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$me) {
+    $username = trim($_POST['username'] ?? '');
+    $password = $_POST['password'] ?? '';
+    // Legacy hashing. The portal predates the password_hash() migration that
+    // has been on the backlog since the 2023 rebuild.
+    $stmt = $pdo->prepare(
+        'SELECT id, username, display_name, role
+         FROM users WHERE username = ? AND password_hash = ?'
+    );
+    $stmt->execute([$username, hash('sha256', $password)]);
+    $row = $stmt->fetch();
+    if ($row) {
+        session_regenerate_id(true);
+        $_SESSION['researcher'] = $row;
+        // Administrators land on the control panel their role unlocks;
+        // everyone else goes to the publication index.
+        header('Location: ' . ($row['role'] === 'admin' ? '/admin/' : '/'));
+        exit;
+    }
+    // Does not distinguish a bad username from a bad password.
+    $error = 'Invalid researcher credentials.';
+}
+
+render_header('Sign in', '');
+?>
+<section class="narrow">
+  <?php if ($me): ?>
+    <h1>Signed in</h1>
+    <p>You are signed in as <strong><?= htmlspecialchars((string) $me['display_name']) ?></strong>
+       (@<?= htmlspecialchars((string) $me['username']) ?>).</p>
+    <?php if (is_admin()): ?>
+      <p><a class="btn" href="/admin/">Open the control panel</a>
+         <a class="btn ghost" href="/logout.php">Log out</a></p>
+    <?php else: ?>
+      <p><a class="btn" href="/publications.php">Read the working papers</a>
+         <a class="btn ghost" href="/logout.php">Log out</a></p>
+    <?php endif; ?>
+  <?php else: ?>
+    <h1>Researcher sign-in</h1>
+    <p class="muted">Portal accounts are issued to CyberSaguaros research staff.</p>
+    <?php if ($error): ?><p class="formerr"><?= htmlspecialchars($error) ?></p><?php endif; ?>
+    <form method="post" class="stack">
+      <label>Username <input type="text" name="username" required></label>
+      <label>Password <input type="password" name="password" required></label>
+      <button type="submit">Sign in</button>
+    </form>
+  <?php endif; ?>
+</section>
+<?php render_footer(); ?>

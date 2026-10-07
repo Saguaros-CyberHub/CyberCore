@@ -1,0 +1,10 @@
+{#
+  cc_web — the complete listen set.
+  MANAGED BY ANSIBLE. This file REPLACES Debian's stock ports.conf; see the
+  first task in tasks/vhosts.yml for why appending to it instead is a start-time
+  "Address already in use" failure rather than an extra line.
+#}
+# THIS FILE IS MANAGED BY THE cc_web ANSIBLE ROLE. DO NOT EDIT ON THE HOST.
+{% for port in cc_web_ports %}
+Listen {{ port }}
+{% endfor %}

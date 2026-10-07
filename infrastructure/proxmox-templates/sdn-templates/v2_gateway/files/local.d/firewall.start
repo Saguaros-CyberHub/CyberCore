@@ -1,0 +1,54 @@
+#!/bin/sh
+# /etc/local.d/firewall.start (v2)
+# ---------------------------------------------------------------
+# Installed by the v2 bake, replacing the v1 file of the same name.
+# The v1 original is preserved at firewall.start.v1.bak.
+#
+# WHAT THE V1 VERSION DID, AND WHY IT HAD TO GO
+#
+#   iptables -t nat -F PREROUTING
+#
+# local.d hooks run in glob order, so this ran AFTER
+# 00-cybercore-firstboot.start and flushed the deterministic
+# wan0:3389 -> <lane>.50 DNAT that firstboot had just installed. It
+# also wiped the LANE-CONSOLE DNATs the deploy path adds, since those
+# are restored from /etc/iptables/rules-save earlier in boot. Net
+# effect: a rebooted gateway came back with a healthy FORWARD chain
+# and an EMPTY nat table, so RDP was addressed to the gateway itself
+# and died in INPUT.
+#
+# It then backgrounded a loop that slept 60s, port-scanned every
+# address in the dnsmasq lease table, and DNAT'd wan0:3389 to the
+# first host that answered on 3389. That made sense when a lane held
+# exactly one attack box. In a v2 lane it is a race: the winner can be
+# any Windows workstation or GOAD domain controller that happens to
+# reply first, and the result differs between boots.
+#
+# Both responsibilities now belong to 00-cybercore-firstboot.start,
+# which derives the console target from lan0's actual address instead
+# of discovering it.
+#
+# WHAT SURVIVES HERE
+#
+# The two base ACCEPTs below, made idempotent with -C. They are also
+# present in the baked rules-save, and the v1 file re-added them
+# unconditionally at every boot — which is where the duplicate INPUT
+# and FORWARD entries came from.
+#
+# Deliberately NOT carried over: the blanket
+#   iptables -I FORWARD 2 -i wan0 -o lan0 -p tcp --dport 3389 -j ACCEPT
+# It accepted inbound RDP to EVERY host on the lane. The tagged
+# CYBERCORE-KALI-RDP rule (scoped to the console address) and the
+# deploy path's per-workstation LANE-CONSOLE rules cover this
+# properly.
+# ---------------------------------------------------------------
+
+# Transit network reaches the gateway itself (orchestrator, monitoring).
+iptables -C INPUT -i wan0 -s 100.102.0.0/16 -j ACCEPT 2>/dev/null \
+  || iptables -I INPUT 2 -i wan0 -s 100.102.0.0/16 -j ACCEPT
+
+# Return traffic for anything the lane initiated outbound.
+iptables -C FORWARD -i wan0 -o lan0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
+  || iptables -I FORWARD 2 -i wan0 -o lan0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+exit 0

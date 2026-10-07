@@ -1,0 +1,80 @@
+-- 017_ciab_telemetry_plan.sql — Track E, phase E3: the TELEMETRY PLAN.
+--
+-- ONE STATEMENT. That is the whole file, and it is deliberate.
+--
+-- WHAT IT ADDS. ciab_engagement.telemetry_plan, a jsonb object holding:
+--
+--   stack                'elastic' | 'wazuh' | 'both'  — which SIEM(s) deploy
+--   sensor               boolean, DERIVED from stack   — deploy the loggen box
+--   scenario_id          which compiled scenario feeds the lane, or null
+--   sensor_template_key  catalog template_key overrides, or null. Recorded so a
+--   elk_template_key     lane can be re-deployed onto the SAME golden images
+--   wazuh_template_key   months later even if the tagged catalog rows moved on
+--   floor_seeded_at      when the benign floor was last seeded, or null
+--
+-- utils/engagement-model.js validateTelemetryPlan() is the authority on every
+-- one of those. Nothing about them is expressed here.
+--
+-- ═══════════════════════════════════════════════════════════════════════════
+-- WHY THERE IS NO CHECK CONSTRAINT ON stack, AND WHY THAT IS NOT LAZINESS
+-- ═══════════════════════════════════════════════════════════════════════════
+--
+-- Same doctrine as engagement_type, which 011's header and B0-9 both spell out:
+-- the JS validator runs FIRST, always, and produces a field-level 400 that
+-- routes/profile-deploy.js already knows how to render. A value that reached
+-- Postgres and tripped a CHECK would raise 23514, which that route renders as
+-- `err.statusCode || 500` — an unhandled 500 in place of a 400 naming the
+-- field. A constraint here would therefore make the failure WORSE, not safer.
+--
+-- The stronger reason is about this directory. src/plugin-loader.js:134-147
+-- sends EVERY .sql file here to pool.query() on EVERY boot, as ONE implicit
+-- transaction per file, inside a try/catch whose catch only console.error()s.
+-- Adding or widening a constraint on a column that already holds live rows is
+-- the one genuinely unsafe operation available in a directory with those
+-- properties: it validates against existing rows, and a single row it dislikes
+-- silently reverts the whole file, on every boot, forever, while the server
+-- starts normally and nothing surfaces the gap.
+--
+-- ═══════════════════════════════════════════════════════════════════════════
+-- WHY IT IS INCAPABLE OF RAISING ON BOOT 2
+-- ═══════════════════════════════════════════════════════════════════════════
+--
+-- ADD COLUMN IF NOT EXISTS is natively re-runnable — the idiom 002:37-40,
+-- 009:18-19 and 011 all use. There is nothing else in the file, so a partial
+-- application is structurally impossible and there is nothing for a
+-- to_regclass guard to save: the single statement names ciab_engagement and
+-- nothing else, so if 010 failed and the table is absent, this raises 42P01,
+-- the runner logs it, and the exact set of things lost is the set of things
+-- that could not have been created anyway. The next boot re-runs 010 and then
+-- this file, and both succeed. 011's header makes the same argument at length.
+--
+-- NOT NULL DEFAULT '{}'::jsonb rather than a nullable column, so that:
+--   * every existing row is backfilled to a legal empty plan in one pass, and
+--   * "no telemetry" is a VALUE the writer can set rather than an absence,
+--     which is what lets setEngagementTelemetryPlan CLEAR a plan.
+--
+-- ═══════════════════════════════════════════════════════════════════════════
+-- WHAT MUST KEEP WORKING, AND DOES
+-- ═══════════════════════════════════════════════════════════════════════════
+--
+-- adoptExistingReservation's FIXED 8-COLUMN INSERT (engagement-provision.js).
+-- That UPSERT runs on the READ path — merely opening the Engagements tab
+-- executes it — and it names profile_id, engagement_type, subnet_scheme,
+-- max_students, challenge_id, challenge_key, provision_status, provisioned_at
+-- and nothing else. A NOT NULL column with a DEFAULT is invisible to it: the
+-- row is inserted with '{}'. A NOT NULL column WITHOUT a default would have
+-- broken that path on the first page load, which is the failure this DEFAULT
+-- exists to prevent. test/ciab-engagement-model.test.js B0-76 pins the column
+-- list at eight, so widening this file into that INSERT fails a test.
+--
+-- MODEL_FIELDS is likewise untouched. It is the SET-clause list
+-- updateEngagementModel builds its UPDATE from and a test pins it to exactly
+-- the columns 011 adds; telemetry_plan is this file's and has its own narrow
+-- writer, setEngagementTelemetryPlan, which re-derives `sensor` on every write.
+--
+-- A CiAB migration reaches clinic_db ONLY (B0-12). ciab_engagement is a
+-- clinic_db table. Nothing in Track E's shared incident schema can be created
+-- from this directory — that is a cybercore_db table and therefore a boot hook,
+-- per the ensureTicketTables() precedent.
+
+ALTER TABLE ciab_engagement ADD COLUMN IF NOT EXISTS telemetry_plan JSONB NOT NULL DEFAULT '{}'::jsonb;

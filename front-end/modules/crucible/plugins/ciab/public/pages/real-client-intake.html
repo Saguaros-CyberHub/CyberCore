@@ -1,0 +1,1276 @@
+<!DOCTYPE html>
+<!--
+  CyberCore Real-Client Intake Form (v1.0)
+  Self-contained. Works offline via file:// and hosted via the platform.
+  DO NOT add external <script src> or <link href> tags — this file must run
+  with zero network access.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Real-Client Intake Form</title>
+<style>
+  :root {
+    --bg: #f8fafc; --panel: #ffffff; --panel-2: #f1f5f9;
+    --text: #0f172a; --muted: #64748b; --border: #e2e8f0;
+    --accent: #1e5288; --accent-2: #0c234b; --ok: #16a34a;
+    --warn: #d97706; --danger: #dc2626;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 14px; line-height: 1.5; }
+  header.bar { position: sticky; top: 0; z-index: 40; background: #ffffff; border-bottom: 1px solid var(--border); padding: 10px 20px;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05); }
+  header.bar h1 { font-size: 16px; margin: 0 12px 0 0; color: #0f172a; }
+  header.bar .mode-tag { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); }
+  header.bar .spacer { flex: 1; }
+  .btn { background: var(--panel); color: var(--text); border: 1px solid var(--border); padding: 6px 12px; border-radius: 6px;
+    cursor: pointer; font-size: 13px; transition: background 0.15s; }
+  .btn:hover { background: var(--panel-2); }
+  .btn.primary { background: var(--accent-2); border-color: var(--accent-2); color: #ffffff; font-weight: 600; }
+  .btn.primary:hover { background: var(--accent); border-color: var(--accent); }
+  .btn.danger  { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+  .btn.danger:hover { background: #fee2e2; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px; }
+  .banner { background: #fef3c7; border: 1px solid #fcd34d; color: #78350f; padding: 14px 18px; border-radius: 8px; margin-bottom: 20px; }
+  .banner strong { color: #451a03; }
+  .section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 18px; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04); }
+  .section h2 { margin: 0 0 6px 0; font-size: 17px; color: #0f172a; }
+  .section .desc { color: var(--muted); margin-bottom: 14px; }
+  .grid { display: grid; gap: 12px; }
+  .grid.cols-2 { grid-template-columns: 1fr 1fr; }
+  .grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
+  @media (max-width: 720px) { .grid.cols-2, .grid.cols-3 { grid-template-columns: 1fr; } }
+  .field label { display: block; font-size: 13px; color: #334155; margin-bottom: 4px; font-weight: 500; }
+  .field input[type=text], .field input[type=number], .field select, .field textarea {
+    width: 100%; background: #ffffff; color: var(--text); border: 1px solid var(--border); padding: 8px 10px; border-radius: 6px;
+    font-family: inherit; font-size: 13px;
+  }
+  .field input:focus, .field select:focus, .field textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.15); }
+  .field textarea { min-height: 64px; resize: vertical; }
+  .field.checkbox-row { display: flex; flex-wrap: wrap; gap: 12px; }
+  .field.checkbox-row label { display: inline-flex; align-items: center; gap: 6px; margin: 0; background: var(--panel-2);
+    padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); cursor: pointer; font-weight: 400; color: var(--text); }
+  .field.checkbox-row label:hover { background: #e0f2fe; border-color: var(--accent); }
+  .field.checkbox-row input { accent-color: var(--accent); }
+  .help-trigger { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%;
+    background: var(--panel-2); color: var(--muted); font-size: 11px; margin-left: 6px; cursor: help; border: 1px solid var(--border); padding: 0; font-weight: 600; }
+  .help-trigger:hover, .help-trigger:focus { background: var(--accent); color: #ffffff; border-color: var(--accent); outline: none; }
+  .help-pop { position: absolute; z-index: 100; max-width: 340px; background: #ffffff; color: var(--text); border: 1px solid var(--accent);
+    padding: 10px 12px; border-radius: 6px; font-size: 12px; line-height: 1.4; box-shadow: 0 4px 16px rgba(15, 23, 42, 0.15); }
+  .help-pop strong { color: var(--accent-2); }
+  .help-pop a { color: var(--accent); text-decoration: underline; font-weight: 500; }
+  .help-pop a:hover { color: var(--accent-2); }
+  .guide-trigger { display: inline-flex; align-items: center; gap: 4px; background: var(--panel-2); color: var(--accent-2); border: 1px solid var(--border);
+    padding: 4px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; font-weight: 500; }
+  .guide-trigger:hover, .guide-trigger:focus { background: #e0f2fe; border-color: var(--accent); outline: none; }
+  .guide-pop { position: absolute; z-index: 110; max-width: 480px; background: #ffffff; color: var(--text); border: 1px solid var(--accent);
+    padding: 16px 18px; border-radius: 8px; font-size: 13px; line-height: 1.5; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18); }
+  .guide-pop h4 { margin: 0 0 8px 0; font-size: 14px; color: var(--accent-2); }
+  .guide-pop ol { margin: 0 0 8px 0; padding-left: 20px; }
+  .guide-pop ol li { margin-bottom: 6px; }
+  .guide-pop .plat { background: var(--panel-2); padding: 8px 10px; border-radius: 6px; margin: 6px 0; font-size: 12px; border-left: 3px solid var(--accent); }
+  .guide-pop .plat strong { color: var(--accent-2); }
+  .guide-pop .tip { background: #fef3c7; border-left: 3px solid var(--warn); padding: 8px 10px; border-radius: 6px; margin-top: 8px; font-size: 12px; color: #78350f; }
+  .guide-pop .close { position: absolute; top: 6px; right: 8px; background: none; border: 0; cursor: pointer; color: var(--muted); font-size: 18px; padding: 2px 6px; }
+  .guide-pop .close:hover { color: var(--danger); }
+  .section-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+  .section-header h2 { margin: 0; }
+  .segment-row { display: grid; grid-template-columns: 1fr 1fr 2fr auto; gap: 8px; margin-bottom: 8px; }
+  .segment-row .btn { padding: 6px 10px; }
+  .ig1-control { border-left: 3px solid var(--accent); padding: 10px 14px; margin-bottom: 10px; background: var(--panel-2); border-radius: 4px; }
+  .ig1-control h3 { margin: 0 0 8px 0; font-size: 14px; color: #0f172a; }
+  .ig1-safeguard { padding: 8px 0; border-bottom: 1px dashed var(--border); }
+  .ig1-safeguard:last-child { border-bottom: 0; }
+  .ig1-safeguard .sg-title { font-weight: 600; color: var(--text); }
+  .ig1-safeguard .sg-num { color: var(--muted); font-size: 12px; margin-right: 6px; }
+  .ig1-safeguard .radio-row { margin: 6px 0; display: flex; gap: 14px; font-size: 13px; }
+  .ig1-safeguard .radio-row label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; color: var(--text); }
+  .ig1-safeguard textarea { margin-top: 4px; font-size: 12px; min-height: 44px; }
+  .status-bar { font-size: 12px; color: var(--muted); }
+  .status-bar.saved { color: var(--ok); }
+  .status-bar.unsaved { color: var(--warn); }
+  .toast { position: fixed; bottom: 20px; right: 20px; background: var(--panel); border: 1px solid var(--accent); color: var(--text);
+    padding: 10px 16px; border-radius: 6px; z-index: 200; box-shadow: 0 4px 16px rgba(15, 23, 42, 0.15); }
+  .validation-panel { background: #fef3c7; border: 1px solid #fcd34d; color: #78350f; padding: 12px 14px; border-radius: 8px;
+    margin-bottom: 14px; display: none; }
+  .validation-panel.active { display: block; }
+  .validation-panel ul { margin: 6px 0 0 18px; padding: 0; }
+  footer { color: var(--muted); font-size: 11px; text-align: center; padding: 24px 20px; }
+  .hidden { display: none !important; }
+
+  /* Print / Save-as-PDF: drop the interactive chrome, keep the form + answers. */
+  @media print {
+    .bar .btn, .bar .mode-tag, .bar .status-bar, .bar .spacer,
+    #file-input, .validation-panel, .help-pop { display: none !important; }
+    .bar { position: static !important; box-shadow: none !important; border: 0 !important; }
+    body { background: #fff !important; }
+    /* Show every character in the fields (textareas are pre-expanded by JS). */
+    textarea { overflow: visible !important; resize: none; }
+    input, textarea, select { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    /* Try not to split a labeled field across pages. */
+    label, .field, .form-row, fieldset { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ============================================================= -->
+<!-- IG1 SAFEGUARDS (v8.1) — inline data                            -->
+<!-- ============================================================= -->
+<script type="application/json" id="ig1-safeguards">
+[
+  { "control": 1,  "num": "1.1", "control_name": "Inventory and Control of Enterprise Assets", "name": "Establish and Maintain Detailed Enterprise Asset Inventory" },
+  { "control": 1,  "num": "1.2", "control_name": "Inventory and Control of Enterprise Assets", "name": "Address Unauthorized Assets" },
+  { "control": 2,  "num": "2.1", "control_name": "Inventory and Control of Software Assets", "name": "Establish and Maintain a Software Inventory" },
+  { "control": 2,  "num": "2.2", "control_name": "Inventory and Control of Software Assets", "name": "Ensure Authorized Software is Currently Supported" },
+  { "control": 2,  "num": "2.3", "control_name": "Inventory and Control of Software Assets", "name": "Address Unauthorized Software" },
+  { "control": 3,  "num": "3.1", "control_name": "Data Protection", "name": "Establish and Maintain a Data Management Process" },
+  { "control": 3,  "num": "3.2", "control_name": "Data Protection", "name": "Establish and Maintain a Data Inventory" },
+  { "control": 3,  "num": "3.3", "control_name": "Data Protection", "name": "Configure Data Access Control Lists" },
+  { "control": 3,  "num": "3.4", "control_name": "Data Protection", "name": "Enforce Data Retention" },
+  { "control": 3,  "num": "3.5", "control_name": "Data Protection", "name": "Securely Dispose of Data" },
+  { "control": 3,  "num": "3.6", "control_name": "Data Protection", "name": "Encrypt Data on End-User Devices" },
+  { "control": 4,  "num": "4.1", "control_name": "Secure Configuration of Enterprise Assets and Software", "name": "Establish and Maintain a Secure Configuration Process" },
+  { "control": 4,  "num": "4.2", "control_name": "Secure Configuration of Enterprise Assets and Software", "name": "Establish and Maintain a Secure Configuration Process for Network Infrastructure" },
+  { "control": 4,  "num": "4.3", "control_name": "Secure Configuration of Enterprise Assets and Software", "name": "Configure Automatic Session Locking on Enterprise Assets" },
+  { "control": 4,  "num": "4.4", "control_name": "Secure Configuration of Enterprise Assets and Software", "name": "Implement and Manage a Firewall on Servers" },
+  { "control": 4,  "num": "4.5", "control_name": "Secure Configuration of Enterprise Assets and Software", "name": "Implement and Manage a Firewall on End-User Devices" },
+  { "control": 4,  "num": "4.6", "control_name": "Secure Configuration of Enterprise Assets and Software", "name": "Securely Manage Enterprise Assets and Software" },
+  { "control": 4,  "num": "4.7", "control_name": "Secure Configuration of Enterprise Assets and Software", "name": "Manage Default Accounts on Enterprise Assets and Software" },
+  { "control": 5,  "num": "5.1", "control_name": "Account Management", "name": "Establish and Maintain an Inventory of Accounts" },
+  { "control": 5,  "num": "5.2", "control_name": "Account Management", "name": "Use Unique Passwords" },
+  { "control": 5,  "num": "5.3", "control_name": "Account Management", "name": "Disable Dormant Accounts" },
+  { "control": 5,  "num": "5.4", "control_name": "Account Management", "name": "Restrict Administrator Privileges to Dedicated Administrator Accounts" },
+  { "control": 6,  "num": "6.1", "control_name": "Access Control Management", "name": "Establish an Access Granting Process" },
+  { "control": 6,  "num": "6.2", "control_name": "Access Control Management", "name": "Establish an Access Revoking Process" },
+  { "control": 6,  "num": "6.3", "control_name": "Access Control Management", "name": "Require MFA for Externally-Exposed Applications" },
+  { "control": 6,  "num": "6.4", "control_name": "Access Control Management", "name": "Require MFA for Remote Network Access" },
+  { "control": 6,  "num": "6.5", "control_name": "Access Control Management", "name": "Require MFA for Administrative Access" },
+  { "control": 7,  "num": "7.1", "control_name": "Continuous Vulnerability Management", "name": "Establish and Maintain a Vulnerability Management Process" },
+  { "control": 7,  "num": "7.2", "control_name": "Continuous Vulnerability Management", "name": "Establish and Maintain a Remediation Process" },
+  { "control": 7,  "num": "7.3", "control_name": "Continuous Vulnerability Management", "name": "Perform Automated Operating System Patch Management" },
+  { "control": 7,  "num": "7.4", "control_name": "Continuous Vulnerability Management", "name": "Perform Automated Application Patch Management" },
+  { "control": 8,  "num": "8.1", "control_name": "Audit Log Management", "name": "Establish and Maintain an Audit Log Management Process" },
+  { "control": 8,  "num": "8.2", "control_name": "Audit Log Management", "name": "Collect Audit Logs" },
+  { "control": 8,  "num": "8.3", "control_name": "Audit Log Management", "name": "Ensure Adequate Audit Log Storage" },
+  { "control": 9,  "num": "9.1", "control_name": "Email and Web Browser Protections", "name": "Ensure Use of Only Fully Supported Browsers and Email Clients" },
+  { "control": 9,  "num": "9.2", "control_name": "Email and Web Browser Protections", "name": "Use DNS Filtering Services" },
+  { "control": 10, "num": "10.1", "control_name": "Malware Defenses", "name": "Deploy and Maintain Anti-Malware Software" },
+  { "control": 10, "num": "10.2", "control_name": "Malware Defenses", "name": "Configure Automatic Anti-Malware Signature Updates" },
+  { "control": 10, "num": "10.3", "control_name": "Malware Defenses", "name": "Disable Autorun and Autoplay for Removable Media" },
+  { "control": 11, "num": "11.1", "control_name": "Data Recovery", "name": "Establish and Maintain a Data Recovery Process" },
+  { "control": 11, "num": "11.2", "control_name": "Data Recovery", "name": "Perform Automated Backups" },
+  { "control": 11, "num": "11.3", "control_name": "Data Recovery", "name": "Protect Recovery Data" },
+  { "control": 11, "num": "11.4", "control_name": "Data Recovery", "name": "Establish and Maintain an Isolated Instance of Recovery Data" },
+  { "control": 12, "num": "12.1", "control_name": "Network Infrastructure Management", "name": "Ensure Network Infrastructure is Up-to-Date" },
+  { "control": 14, "num": "14.1", "control_name": "Security Awareness and Skills Training", "name": "Establish and Maintain a Security Awareness Program" },
+  { "control": 14, "num": "14.2", "control_name": "Security Awareness and Skills Training", "name": "Train Workforce Members to Recognize Social Engineering Attacks" },
+  { "control": 14, "num": "14.3", "control_name": "Security Awareness and Skills Training", "name": "Train Workforce Members on Authentication Best Practices" },
+  { "control": 14, "num": "14.4", "control_name": "Security Awareness and Skills Training", "name": "Train Workforce on Data Handling Best Practices" },
+  { "control": 14, "num": "14.5", "control_name": "Security Awareness and Skills Training", "name": "Train Workforce Members on Causes of Unintentional Data Exposure" },
+  { "control": 14, "num": "14.6", "control_name": "Security Awareness and Skills Training", "name": "Train Workforce Members on Recognizing and Reporting Security Incidents" },
+  { "control": 14, "num": "14.7", "control_name": "Security Awareness and Skills Training", "name": "Train Workforce on How to Identify and Report if Their Enterprise Assets are Missing Security Updates" },
+  { "control": 14, "num": "14.8", "control_name": "Security Awareness and Skills Training", "name": "Train Workforce on the Dangers of Connecting to and Transmitting Enterprise Data Over Insecure Networks" },
+  { "control": 15, "num": "15.1", "control_name": "Service Provider Management", "name": "Establish and Maintain an Inventory of Service Providers" },
+  { "control": 17, "num": "17.1", "control_name": "Incident Response Management", "name": "Designate Personnel to Manage Incident Handling" },
+  { "control": 17, "num": "17.2", "control_name": "Incident Response Management", "name": "Establish and Maintain Contact Information for Reporting Security Incidents" },
+  { "control": 17, "num": "17.3", "control_name": "Incident Response Management", "name": "Establish and Maintain an Enterprise Process for Reporting Incidents" }
+]
+</script>
+
+<!-- ============================================================= -->
+<!-- HELP / GLOSSARY DEFINITIONS                                   -->
+<!-- ============================================================= -->
+<script type="application/json" id="help-definitions">
+{
+  "WEP": "Wired Equivalent Privacy — an outdated and insecure Wi-Fi encryption standard from 1997. If your Wi-Fi uses WEP, anyone nearby can likely read your network traffic. Check your Wi-Fi router settings or ask your IT provider.",
+  "WPA2": "Wi-Fi Protected Access 2 — the current common standard for Wi-Fi encryption. Secure when configured with a strong password.",
+  "WPA3": "The newest Wi-Fi encryption standard (2018). Stronger than WPA2 and recommended for new networks.",
+  "SSID": "Service Set Identifier — the name of your Wi-Fi network that shows up when you scan for Wi-Fi.",
+  "Guest network": "A separate Wi-Fi network for visitors that doesn't give them access to your internal computers or servers.",
+  "SMB": "Server Message Block — the file-sharing protocol used by Windows (drive letters mapped to shares use this).",
+  "RDP": "Remote Desktop Protocol — Microsoft's remote access tool. If exposed to the internet without MFA it is a top-target for attackers.",
+  "SSH": "Secure Shell — encrypted remote login, typically used on Linux servers.",
+  "LDAP": "Lightweight Directory Access Protocol — how Windows domains and some other systems look up user accounts and permissions.",
+  "AD": "Active Directory — Microsoft's user-account and policy directory used by most Windows business networks.",
+  "DC": "Domain Controller — the Windows server that runs Active Directory. Usually critical; losing it is a big deal.",
+  "VLAN": "Virtual LAN — a way to split one physical network into isolated segments. If you don't know, you probably don't have them.",
+  "CIDR": "Classless Inter-Domain Routing notation — how network ranges are written, like 192.168.1.0/24.",
+  "MFA": "Multi-Factor Authentication — a second check beyond password (phone app, text code, hardware key).",
+  "SPF": "Sender Policy Framework — an email setting that tells receivers which mail servers are allowed to send for your domain. Helps stop spoofing.",
+  "DKIM": "DomainKeys Identified Mail — cryptographically signs outgoing email so receivers can verify it really came from you.",
+  "DMARC": "Domain-based Message Authentication — ties SPF + DKIM together and tells the world what to do with spoofed email claiming to be you.",
+  "EDR": "Endpoint Detection and Response — a modern evolution of antivirus that also records activity and can auto-respond to threats. CrowdStrike, SentinelOne, Defender for Endpoint are examples.",
+  "SIEM": "Security Information and Event Management — a system that collects logs from everything and alerts on suspicious patterns.",
+  "DLP": "Data Loss Prevention — tools that try to stop sensitive data (customer records, IP) from leaving the company by email, USB, etc.",
+  "Offsite backup": "A backup stored in a different physical location (or cloud) than your primary systems, so a fire/flood doesn't destroy both.",
+  "Offline backup": "A backup that is disconnected from the network when not being written to. Critical against ransomware.",
+  "Privileged account": "A user account with administrative rights (domain admin, root, system admin, etc.). These are the crown jewels for attackers.",
+  "CIS Control": "A set of prioritized cybersecurity recommendations maintained by the Center for Internet Security.",
+  "IG1": "Implementation Group 1 — the baseline set of 56 CIS safeguards every small/medium organization should implement. Considered essential cyber hygiene.",
+  "Dormant account": "A user account that has not been used for a long time (e.g., 90+ days) — often belonging to former employees.",
+  "DNS filtering": "A service that blocks your users from reaching known-malicious websites at the DNS lookup stage (Umbrella, Quad9, Cloudflare Gateway, NextDNS).",
+  "Session locking": "Automatically locking the screen after a period of inactivity so someone can't walk up and use an unattended computer.",
+  "Name": "The organization's name. Not required to be entered, do not enter real company name.",
+  "OS counts": "How many computers/servers run each operating system. Exact numbers are best, but rough estimates are fine — round up or down if you're not sure.",
+  "Server": "A computer that runs 24/7 to provide services (files, email, apps, databases) to other computers in your office. Usually in a server room or closet, not a regular desk.",
+  "Workstation": "A regular desktop computer a person uses for daily work. Laptops are counted separately.",
+  "Domain": "A 'domain' is Microsoft's way of centrally managing all PCs in an office. If you log in to your work computer with the same username/password as your email, you probably have a domain.",
+  "Workgroup": "Each computer is independent — users log in locally, no central management. Small offices (<10 machines) often use workgroups.",
+  "On-prem Exchange": "A Microsoft Exchange email server that lives inside your office (not in the cloud). Getting rare — most companies have moved to Microsoft 365 or Google Workspace.",
+  "Patch cadence": "How often you install security updates. 'Monthly' is typical; 'weekly or faster' is best practice; 'rarely or never' is dangerous.",
+  "Password manager": "A tool (1Password, Bitwarden, LastPass, Dashlane) that stores passwords securely so users don't reuse the same password everywhere.",
+  "Lockout policy": "After N failed login attempts, the account is locked for some time. Stops attackers from guessing passwords.",
+  "Incident response": "The plan for what to do when something bad happens (ransomware, data breach, suspicious login). Even a one-pager is better than nothing.",
+  "Audit log": "A record of who did what, when. Required by most compliance frameworks. Logs are useless if nobody reviews them.",
+  "Vulnerability scanning": "Automated software (Nessus, Qualys, Rapid7) that checks your systems for known security problems. Usually run monthly.",
+  "Managed service provider": "An outside company (MSP) that runs your IT for you. If you have one, they can answer most questions on this form.",
+  "Service provider": "Any outside company that holds or processes your data — payroll (ADP), CRM (Salesforce), cloud apps, payment processing, etc.",
+  "Regulatory framework": "A set of security rules you're required to follow because of your industry:\nHealthcare → <a href='https://www.hhs.gov/hipaa/index.html' target='_blank'>HIPAA</a>\nCredit-card processing → <a href='https://www.pcisecuritystandards.org/' target='_blank'>PCI-DSS</a>\nDefense contracting → <a href='https://dodcio.defense.gov/CMMC/' target='_blank'>CMMC</a>\nPublic companies → <a href='https://www.sec.gov/spotlight/sarbanes-oxley.htm' target='_blank'>SOX</a>\nFinancial services → <a href='https://www.ftc.gov/legal-library/browse/statutes/gramm-leach-bliley-act' target='_blank'>GLBA</a>\nEU data → <a href='https://gdpr.eu/' target='_blank'>GDPR</a>\nEducation → <a href='https://studentprivacy.ed.gov/ferpa' target='_blank'>FERPA</a>\nFederal agencies → <a href='https://www.nist.gov/cyberframework' target='_blank'>NIST CSF</a>"
+}
+</script>
+
+<!-- ============================================================= -->
+<!-- SECTION GUIDES — "How to find this information"               -->
+<!-- ============================================================= -->
+<script type="application/json" id="section-guides">
+{
+  "company": {
+    "title": "Filling out the Profile",
+    "steps": [
+      "Enter the organization's name. Not required to be entered, do not enter real company name.",
+      "Pick the closest industry match from the dropdown.",
+      "Employee count is a band — just estimate. Include full-time, part-time, and contractors who have a login.",
+      "Region is country-level only. We don't need city/state.",
+      "For regulatory frameworks, check all that apply. If you're not sure, check 'None / Don't know' — honest is better than guessing."
+    ],
+    "tip": "Be as accurate as you can — Ensure no identifying details are entered into this form"
+  },
+  "network": {
+    "title": "How do I know how many computers/servers we have?",
+    "steps": [
+      "If you have a managed IT provider or internal IT person — ask them. They almost certainly have an asset inventory spreadsheet or tool.",
+      "Rough headcount works: typically 1 computer per employee + a few shared (conference rooms, reception).",
+      "Servers are different from workstations — they run 24/7, usually live in a closet or server room, and often have names like SERVER01, FILE01, MAILSRV.",
+      "If you have Active Directory, open 'Active Directory Users and Computers' (on any domain-joined admin machine) — the 'Computers' folder lists everything.",
+      "For segments/VLANs — most small offices only have one network. If you don't know what a VLAN is, you probably don't have them."
+    ],
+    "platforms": [
+      { "label": "Windows (per machine)", "howto": "Right-click Start → System. The 'Device specifications' section shows OS name and version." },
+      { "label": "Mac (per machine)", "howto": "Apple menu → About This Mac. Shows macOS version." },
+      { "label": "Network scan", "howto": "Tools like Fing (free phone app) can scan your network and list most devices in a couple of minutes." }
+    ],
+    "tip": "Rough numbers are fine. 'Approximately 45 desktops' is more useful than a blank field. Round to the nearest 5 or 10."
+  },
+  "wireless": {
+    "title": "How do I find my Wi-Fi encryption type?",
+    "steps": [
+      "The fastest way: ask whoever set up the Wi-Fi (IT person, the installer, or your internet provider).",
+      "Or check the router admin page — see platform tips below."
+    ],
+    "platforms": [
+      { "label": "Windows Client", "howto": "Click the Wi-Fi icon in the system tray → right-click your network → Properties → look for 'Security type' (e.g., WPA2-Personal, WPA3-Personal)." },
+      { "label": "macOS", "howto": "System Settings → Wi-Fi → click 'Details' next to your network → see 'Security'." },
+      { "label": "Router admin page", "howto": "In a web browser, go to http://192.168.1.1 or http://192.168.0.1. Login is usually on a sticker on the router. Look under 'Wireless' or 'Security settings'." },
+      { "label": "iPhone / Android", "howto": "Harder to find — settings vary. Use one of the options above instead." }
+    ],
+    "tip": "WEP is outdated and insecure. WPA2 is the current standard. WPA3 is the newest. If you don't know — select 'Unknown' and we'll follow up."
+  },
+  "endpoint": {
+    "title": "How do I know what antivirus/EDR we use?",
+    "steps": [
+      "Look for icons near the clock (Windows system tray) or the menu bar (Mac) — security software usually puts an icon there.",
+      "Check Windows Security (Start → type 'Windows Security'). If it says 'Your organization manages this' or shows a different provider, that's your EDR.",
+      "If you have managed IT, ask them — they'll know exactly.",
+      "If you're not sure: 'Microsoft Defender (built-in)' is the default on Windows when nothing else is installed."
+    ],
+    "platforms": [
+      { "label": "Windows", "howto": "Start → Settings → Privacy & security → Windows Security → Virus & threat protection. It names the active provider at the top." },
+      { "label": "macOS", "howto": "System Settings → Privacy & Security. Look at 'Full Disk Access' and 'Accessibility' permissions — AV tools show up there." },
+      { "label": "Ask IT", "howto": "One quick email to your IT provider with 'What AV/EDR do we use?' answers this in minutes." }
+    ],
+    "tip": "If you pay an IT company a monthly fee, you likely have an EDR (CrowdStrike, SentinelOne, Defender for Endpoint, Huntress, Sophos). If you just bought computers and use what they came with, you're probably on built-in Defender."
+  },
+  "email_web": {
+    "title": "Microsoft 365, Google Workspace, or something else?",
+    "steps": [
+      "Look at where you log in to email:",
+      "• portal.office.com or outlook.office.com → Microsoft 365",
+      "• mail.google.com with a business address → Google Workspace",
+      "• Outlook that connects to a server whose name you've never heard of → On-prem Exchange (rare)",
+      "SPF/DKIM/DMARC are DNS records — most small businesses don't know off the top of their head. If unsure, pick 'Unknown' — we can look them up."
+    ],
+    "platforms": [
+      { "label": "Microsoft 365 admins", "howto": "admin.microsoft.com → Settings → Domains → pick your domain → 'DNS records' tab shows SPF/DKIM/DMARC status." },
+      { "label": "Google admins", "howto": "admin.google.com → Apps → Google Workspace → Gmail → Authenticate email." },
+      { "label": "Quick lookup", "howto": "On any computer, someone technical can run a free public tool like mxtoolbox.com to check SPF/DKIM/DMARC for any domain." }
+    ],
+    "tip": "Web filtering = does your office block known bad websites? If you use Cisco Umbrella, DNSFilter, Cloudflare Gateway, or similar — yes. If you've never heard of it — probably no."
+  },
+  "access": {
+    "title": "MFA and admin accounts — how to check",
+    "steps": [
+      "MFA test: try logging into email from a browser you've never used. Were you prompted for a code, app approval, or text message?",
+      "  • Yes, every time → 'All users, all systems'",
+      "  • Only for admins → 'Admin accounts only'",
+      "  • Only the first time on a new device → probably 'All users' (modern MFA remembers trusted devices)",
+      "Privileged accounts are the ones that can install software, reset passwords, or create new users. Count your internal IT people + any outside IT contractor accounts."
+    ],
+    "platforms": [
+      { "label": "Microsoft 365", "howto": "admin.microsoft.com → Users → Active users → pick a user → 'Multi-factor authentication' link at the top lists status per user." },
+      { "label": "Google Workspace", "howto": "admin.google.com → Reports → User Reports → '2-Step Verification' column shows enrollment." }
+    ],
+    "tip": "If your IT provider says they 'require MFA' but you never get prompted — double-check. MFA only counts if it's actually enforced."
+  },
+  "data": {
+    "title": "Backups — the most important question on this form",
+    "steps": [
+      "Ask three questions of whoever runs IT:",
+      "  1. How often does a backup run? (daily is minimum)",
+      "  2. Where does it go? (offsite or cloud = yes to offsite)",
+      "  3. Have we ever tested restoring from one?",
+      "If the answer to #3 is 'no', flag it — untested backups are a huge risk.",
+      "'Offline/air-gapped' means the backup is physically disconnected from the network when not being written. This protects against ransomware."
+    ],
+    "platforms": [
+      { "label": "Microsoft 365", "howto": "M365 does NOT back up your mailboxes/files in the way most people assume. If you use Veeam, Datto, SkyKick, AvePoint, Spanning — that's your backup. If none of those ring a bell, you may not have a real backup." },
+      { "label": "File server", "howto": "Common tools: Veeam Backup & Replication, Acronis, Rubrik, Datto. Look for one of these names in your IT docs or invoices." }
+    ],
+    "tip": "If you don't know: 'Unknown' is a valid answer. Don't guess — we'd rather have honest gaps than false assurance."
+  },
+  "vuln_audit": {
+    "title": "Vulnerability scanning, logging, and SIEM — jargon decoded",
+    "steps": [
+      "Vulnerability scanning = automated tool that checks your computers and servers for known security holes. Common names: Nessus, Qualys, Rapid7 InsightVM, Tenable.io.",
+      "Logging = are audit logs collected and kept somewhere central? Or just on each machine?",
+      "SIEM = a system that reads those logs and alerts on suspicious patterns. Common names: Splunk, Microsoft Sentinel, Arctic Wolf, Huntress, Blumira.",
+      "Audit retention = how long you keep the logs. Compliance frameworks usually require 1+ year."
+    ],
+    "platforms": [
+      { "label": "Quick check", "howto": "Do you get a monthly security report from IT listing 'vulnerabilities' or 'findings'? That's scanning. Do they ever mention alerts they investigated? That's probably a SIEM." }
+    ],
+    "tip": "Most small businesses don't have these. That's not unusual — just answer honestly. 'None' / 'Unknown' are common and useful answers."
+  },
+  "ig1": {
+    "title": "About the CIS Controls IG1 checklist",
+    "steps": [
+      "These are the 56 baseline cybersecurity safeguards from the Center for Internet Security (cisecurity.org).",
+      "For each one: Yes (we fully do this), Partial (some of the way there), No (we don't), or Don't Know.",
+      "You do NOT have to know every answer — 'Don't know' is perfectly valid. The gaps tell us where to focus.",
+      "Evidence notes are optional but helpful. Examples: 'We use Datto for backups', 'AV is Defender', 'Passwords min 12 chars'.",
+      "Skim quickly — don't spend more than ~20 minutes on this section. Rough answers are better than none."
+    ],
+    "tip": "Your IT provider can help with the technical ones. For policy/training questions, the business owner usually knows best."
+  }
+}
+</script>
+
+<!-- ============================================================= -->
+<!-- RESPONSES (populated when the form is downloaded as HTML)      -->
+<!-- ============================================================= -->
+<script type="application/json" id="responses"></script>
+
+<header class="bar">
+  <h1>🛡️ Real-Client Intake Form</h1>
+  <span class="mode-tag" id="mode-tag">Offline mode</span>
+  <span class="status-bar saved" id="status">Ready</span>
+  <span class="spacer"></span>
+  <button class="btn" id="btn-import">📂 Import JSON/HTML</button>
+  <button class="btn" id="btn-download-json">⬇️ Download JSON</button>
+  <button class="btn" id="btn-download-html">⬇️ Download filled form (HTML)</button>
+  <button class="btn" id="btn-save-pdf">🖨️ Save as PDF</button>
+  <button class="btn primary hidden" id="btn-upload">☁️ Save to server</button>
+  <button class="btn danger" id="btn-clear">🗑 Clear</button>
+  <input type="file" id="file-input" accept=".json,.html,application/json,text/html" class="hidden" />
+</header>
+
+<main>
+
+<div class="banner">
+  <strong>⚠ Privacy notice —</strong> Do not use the real company name, addresses, phone numbers, emails, or domain names anywhere on this form.
+  Free-text fields should describe your systems in general terms —
+  never paste real usernames, hostnames, or IPs that could identify the organization.
+</div>
+
+<div class="validation-panel" id="validation-panel">
+  <strong>⚠ Some required fields are missing:</strong>
+  <ul id="validation-list"></ul>
+</div>
+
+<!-- SECTION 1: Organization profile -->
+<section class="section" data-section="company">
+  <h2>1 · Organization Profile</h2>
+  <div class="desc">Basic information about the organization. Your administrator will anonymize this before student use.</div>
+  <div class="grid cols-2">
+    <div class="field">
+      <label>Name <span class="help-trigger" data-help="Name" tabindex="0">?</span></label>
+      <input type="text" name="cover_name" placeholder="e.g., Acme Widgets" />
+    </div>
+    <div class="field">
+      <label>Industry</label>
+      <select name="industry">
+        <option value="">— choose —</option>
+        <option>Healthcare</option><option>Finance / Banking</option><option>Education</option>
+        <option>Manufacturing</option><option>Retail / E-commerce</option><option>Legal</option>
+        <option>Non-profit</option><option>Government / Public sector</option>
+        <option>Professional services</option><option>Hospitality</option>
+        <option>Technology / SaaS</option><option>Construction / Real estate</option>
+        <option>Transportation / Logistics</option><option>Energy / Utilities</option>
+        <option>Other</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Employee count band</label>
+      <select name="employees_band">
+        <option value="">— choose —</option>
+        <option>1–10</option><option>11–50</option><option>51–100</option>
+        <option>101–250</option><option>251–500</option><option>501–1000</option>
+        <option>1001–5000</option><option>5000+</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Region (country only)</label>
+      <input type="text" name="region" placeholder="e.g., United States" />
+    </div>
+    <div class="field">
+      <label>Revenue band (USD)</label>
+      <select name="revenue_band">
+        <option value="">— choose —</option>
+        <option>&lt; $1M</option><option>$1M–$10M</option><option>$10M–$50M</option>
+        <option>$50M–$250M</option><option>$250M–$1B</option><option>&gt; $1B</option>
+        <option>Unknown / Prefer not to say</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Applicable regulatory frameworks <span class="help-trigger" data-help="Regulatory framework">?</span></label>
+      <div class="field checkbox-row">
+        <label><input type="checkbox" name="frameworks" value="HIPAA" /> HIPAA</label>
+        <label><input type="checkbox" name="frameworks" value="PCI-DSS" /> PCI-DSS</label>
+        <label><input type="checkbox" name="frameworks" value="CMMC" /> CMMC</label>
+        <label><input type="checkbox" name="frameworks" value="SOX" /> SOX</label>
+        <label><input type="checkbox" name="frameworks" value="GLBA" /> GLBA</label>
+        <label><input type="checkbox" name="frameworks" value="GDPR" /> GDPR</label>
+        <label><input type="checkbox" name="frameworks" value="FERPA" /> FERPA</label>
+        <label><input type="checkbox" name="frameworks" value="NIST-CSF" /> NIST CSF</label>
+        <label><input type="checkbox" name="frameworks" value="none" /> None / Don't know</label>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- SECTION 2: Network Topology -->
+<section class="section" data-section="network">
+  <h2>2 · Network Topology</h2>
+  <div class="desc">Enough about the environment to simulate it realistically. Estimates are fine — no need to be exact.</div>
+  <div class="grid cols-2">
+    <div class="field">
+      <label>Endpoint count <span class="help-trigger" data-help="Workstation">?</span></label>
+      <div class="desc" style="margin:2px 0 4px 0;">Total desktops + laptops combined — count each physical device once. Must match the OS breakdown below.</div>
+      <input type="number" min="0" name="endpoint_count" />
+    </div>
+    <div class="field"><label>Server count <span class="help-trigger" data-help="Server">?</span></label><input type="number" min="0" name="server_count" /></div>
+  </div>
+
+  <h3 style="margin-top:1.5rem; margin-bottom:0.25rem; font-size:0.95rem; color:var(--fg);">Operating Systems</h3>
+  <div class="desc" style="margin-bottom:0.5rem;">How many machines run each OS <span class="help-trigger" data-help="OS counts">?</span></div>
+  <div class="grid cols-3">
+    <div class="field"><label>Windows Server</label><input type="number" min="0" name="os_count_win_server" /></div>
+    <div class="field"><label>Windows Client</label><input type="number" min="0" name="os_count_win_client" /></div>
+    <div class="field"><label>Linux</label><input type="number" min="0" name="os_count_linux" /></div>
+    <div class="field"><label>macOS</label><input type="number" min="0" name="os_count_macos" /></div>
+    <div class="field"><label>Other / unknown</label><input type="number" min="0" name="os_count_other" /></div>
+  </div>
+
+  <h3 style="margin-top:1.5rem; margin-bottom:0.25rem; font-size:0.95rem; color:var(--fg);">Server Roles</h3>
+  <div class="desc" style="margin-bottom:0.5rem;">Does your environment have any of these?</div>
+  <div class="grid cols-3" id="server-roles-grid">
+    <div class="field role-field">
+      <label>Domain Controller <span class="help-trigger" data-help="DC" tabindex="0">?</span></label>
+      <select name="role_dc" class="role-select"><option value="">--</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select>
+      <input type="text" name="role_dc_version" class="role-version" placeholder="OS / Version (e.g., Server 2019)" style="display:none; margin-top:0.25rem;" />
+    </div>
+    <div class="field role-field">
+      <label>File Server <span class="help-trigger" data-help="SMB" tabindex="0">?</span></label>
+      <select name="role_file" class="role-select"><option value="">--</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select>
+      <input type="text" name="role_file_version" class="role-version" placeholder="OS / Version (e.g., Server 2022)" style="display:none; margin-top:0.25rem;" />
+    </div>
+    <div class="field role-field">
+      <label>Mail Server</label>
+      <select name="role_mail" class="role-select"><option value="">--</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select>
+      <input type="text" name="role_mail_version" class="role-version" placeholder="Software / Version (e.g., Exchange 2019)" style="display:none; margin-top:0.25rem;" />
+    </div>
+    <div class="field role-field">
+      <label>Web / App Server</label>
+      <select name="role_web" class="role-select"><option value="">--</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select>
+      <input type="text" name="role_web_version" class="role-version" placeholder="Software / Version (e.g., IIS 10, Apache 2.4)" style="display:none; margin-top:0.25rem;" />
+    </div>
+    <div class="field role-field">
+      <label>Database Server</label>
+      <select name="role_db" class="role-select"><option value="">--</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select>
+      <input type="text" name="role_db_version" class="role-version" placeholder="Software / Version (e.g., MSSQL 2019)" style="display:none; margin-top:0.25rem;" />
+    </div>
+    <div class="field role-field">
+      <label>Backup Server</label>
+      <select name="role_backup" class="role-select"><option value="">--</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select>
+      <input type="text" name="role_backup_version" class="role-version" placeholder="Software / Version (e.g., Veeam 12)" style="display:none; margin-top:0.25rem;" />
+    </div>
+    <div class="field role-field">
+      <label>Print Server</label>
+      <select name="role_print" class="role-select"><option value="">--</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select>
+      <input type="text" name="role_print_version" class="role-version" placeholder="OS / Version" style="display:none; margin-top:0.25rem;" />
+    </div>
+    <div class="field role-field">
+      <label>Other</label>
+      <select name="role_other" class="role-select"><option value="">--</option><option value="yes">Yes</option><option value="no">No</option></select>
+      <input type="text" name="role_other_version" class="role-version" placeholder="Describe (e.g., NVR, VOIP PBX)" style="display:none; margin-top:0.25rem;" />
+    </div>
+  </div>
+  <div class="field"><label>Additional server notes</label><textarea name="role_other_notes" placeholder="Any extra details about servers not captured above"></textarea></div>
+
+  <h3 style="margin-top:1.5rem; margin-bottom:0.25rem; font-size:0.95rem; color:var(--fg);">Exposed / In-Use Services</h3>
+  <div class="desc" style="margin-bottom:0.5rem;">Check all that are running. Add version if known.</div>
+  <div class="grid cols-2">
+    <div class="field svc-field"><label><input type="checkbox" name="services" value="SMB" class="svc-check" /> SMB / File Sharing <span class="help-trigger" data-help="SMB">?</span></label><input type="text" name="svc_version_smb" class="svc-version" placeholder="Version (e.g., SMBv3)" style="display:none; margin-top:0.25rem;" /></div>
+    <div class="field svc-field"><label><input type="checkbox" name="services" value="RDP" class="svc-check" /> RDP <span class="help-trigger" data-help="RDP">?</span></label><input type="text" name="svc_version_rdp" class="svc-version" placeholder="Version (if known)" style="display:none; margin-top:0.25rem;" /></div>
+    <div class="field svc-field"><label><input type="checkbox" name="services" value="SSH" class="svc-check" /> SSH <span class="help-trigger" data-help="SSH">?</span></label><input type="text" name="svc_version_ssh" class="svc-version" placeholder="Version (e.g., OpenSSH 8.9)" style="display:none; margin-top:0.25rem;" /></div>
+    <div class="field svc-field"><label><input type="checkbox" name="services" value="HTTP" class="svc-check" /> HTTP / HTTPS</label><input type="text" name="svc_version_http" class="svc-version" placeholder="Version (e.g., Apache 2.4, IIS 10)" style="display:none; margin-top:0.25rem;" /></div>
+    <div class="field svc-field"><label><input type="checkbox" name="services" value="SQL" class="svc-check" /> SQL / Database</label><input type="text" name="svc_version_sql" class="svc-version" placeholder="Version (e.g., MSSQL 2019, MySQL 8)" style="display:none; margin-top:0.25rem;" /></div>
+    <div class="field svc-field"><label><input type="checkbox" name="services" value="FTP" class="svc-check" /> FTP</label><input type="text" name="svc_version_ftp" class="svc-version" placeholder="Version (e.g., vsftpd 3.0)" style="display:none; margin-top:0.25rem;" /></div>
+    <div class="field svc-field"><label><input type="checkbox" name="services" value="DNS" class="svc-check" /> DNS</label><input type="text" name="svc_version_dns" class="svc-version" placeholder="Version (if known)" style="display:none; margin-top:0.25rem;" /></div>
+    <div class="field svc-field"><label><input type="checkbox" name="services" value="LDAP" class="svc-check" /> LDAP <span class="help-trigger" data-help="LDAP">?</span></label><input type="text" name="svc_version_ldap" class="svc-version" placeholder="Version (if known)" style="display:none; margin-top:0.25rem;" /></div>
+    <div class="field svc-field"><label><input type="checkbox" name="services" value="VPN" class="svc-check" /> VPN</label><input type="text" name="svc_version_vpn" class="svc-version" placeholder="Type (e.g., WireGuard, OpenVPN)" style="display:none; margin-top:0.25rem;" /></div>
+  </div>
+
+  <div class="field"><label>Domain mode <span class="help-trigger" data-help="Domain">?</span> <span class="help-trigger" data-help="Workgroup">?</span></label>
+    <select name="domain_mode">
+      <option value="">— choose —</option>
+      <option value="ad">Active Directory domain</option>
+      <option value="workgroup">Workgroup (no domain)</option>
+      <option value="hybrid">Hybrid (AD + cloud / Azure AD)</option>
+      <option value="cloud_only">Cloud-only identity (Entra ID / Google)</option>
+      <option value="unknown">Unknown</option>
+    </select>
+  </div>
+  <div class="field"><label>Domain cover-name (alias only)</label>
+    <input type="text" name="domain_cover" placeholder="e.g., acme.local — do NOT use the real domain" />
+  </div>
+
+  <div class="field"><label>Network segments / VLANs <span class="help-trigger" data-help="VLAN">?</span></label>
+    <div id="segments-list"></div>
+    <button class="btn" type="button" id="btn-add-segment">+ Add segment</button>
+  </div>
+</section>
+
+<!-- SECTION 3: Wireless -->
+<section class="section" data-section="wireless">
+  <h2>3 · Wireless</h2>
+  <div class="grid cols-2">
+    <div class="field"><label>Number of SSIDs <span class="help-trigger" data-help="SSID">?</span></label><input type="number" min="0" name="ssid_count" /></div>
+    <div class="field"><label>Primary encryption standard</label>
+      <select name="wifi_encryption">
+        <option value="">— choose —</option>
+        <option value="WPA3">WPA3 <span class="help-trigger" data-help="WPA3">?</span></option>
+        <option value="WPA2">WPA2</option>
+        <option value="WPA">WPA</option>
+        <option value="WEP">WEP (insecure)</option>
+        <option value="Open">Open (no encryption)</option>
+        <option value="Mixed">Mixed / varies</option>
+        <option value="unknown">Unknown</option>
+      </select>
+    </div>
+    <div class="field"><label>Guest network? <span class="help-trigger" data-help="Guest network">?</span></label>
+      <select name="guest_wifi"><option value="">—</option><option>Yes</option><option>No</option><option>Unknown</option></select>
+    </div>
+    <div class="field"><label>Guest isolated from internal?</label>
+      <select name="guest_isolated"><option value="">—</option><option>Yes</option><option>No</option><option>N/A</option><option>Unknown</option></select>
+    </div>
+  </div>
+</section>
+
+<!-- SECTION 4: Endpoint Security -->
+<section class="section" data-section="endpoint">
+  <h2>4 · Endpoint Security</h2>
+  <div class="grid cols-2">
+    <div class="field"><label>AV / EDR vendor <span class="help-trigger" data-help="EDR">?</span></label>
+      <select name="av_vendor">
+        <option value="">— choose —</option>
+        <option>Microsoft Defender for Endpoint</option>
+        <option>Microsoft Defender (built-in)</option>
+        <option>CrowdStrike Falcon</option>
+        <option>SentinelOne</option>
+        <option>Sophos</option>
+        <option>Bitdefender</option>
+        <option>Trend Micro</option>
+        <option>McAfee / Trellix</option>
+        <option>Symantec / Broadcom</option>
+        <option>Webroot</option>
+        <option>Other</option>
+        <option>None</option>
+        <option>Unknown</option>
+      </select>
+    </div>
+    <div class="field"><label>Disk encryption on laptops?</label>
+      <select name="disk_encryption"><option value="">—</option><option>Yes, all</option><option>Some</option><option>No</option><option>Unknown</option></select>
+    </div>
+    <div class="field"><label>USB / removable-media policy</label>
+      <select name="usb_policy">
+        <option value="">—</option>
+        <option>Blocked entirely</option><option>Read-only</option>
+        <option>Allowed with encryption</option><option>Allowed, no restrictions</option>
+        <option>Unknown</option>
+      </select>
+    </div>
+    <div class="field"><label>Patch cadence (OS + apps) <span class="help-trigger" data-help="Patch cadence">?</span></label>
+      <select name="patch_cadence">
+        <option value="">—</option>
+        <option>Automated, weekly or faster</option>
+        <option>Automated, monthly</option>
+        <option>Manual, monthly</option>
+        <option>Ad hoc / as needed</option>
+        <option>Rarely / never</option>
+        <option>Unknown</option>
+      </select>
+    </div>
+  </div>
+</section>
+
+<!-- SECTION 5: Email & Web -->
+<section class="section" data-section="email_web">
+  <h2>5 · Email &amp; Web</h2>
+  <div class="grid cols-2">
+    <div class="field"><label>Email provider class</label>
+      <select name="email_provider">
+        <option value="">—</option>
+        <option>Microsoft 365</option><option>Google Workspace</option>
+        <option>On-prem Exchange</option><option>Hosted / other</option>
+        <option>Unknown</option>
+      </select>
+    </div>
+    <div class="field"><label>Web filtering in place? <span class="help-trigger" data-help="DNS filtering">?</span></label>
+      <select name="web_filtering"><option value="">—</option><option>Yes</option><option>Partial</option><option>No</option><option>Unknown</option></select>
+    </div>
+    <div class="field"><label>SPF configured? <span class="help-trigger" data-help="SPF">?</span></label>
+      <select name="spf"><option value="">—</option><option>Yes</option><option>No</option><option>Unknown</option></select>
+    </div>
+    <div class="field"><label>DKIM configured? <span class="help-trigger" data-help="DKIM">?</span></label>
+      <select name="dkim"><option value="">—</option><option>Yes</option><option>No</option><option>Unknown</option></select>
+    </div>
+    <div class="field"><label>DMARC configured? <span class="help-trigger" data-help="DMARC">?</span></label>
+      <select name="dmarc"><option value="">—</option><option>Yes, enforcing</option><option>Yes, monitor-only</option><option>No</option><option>Unknown</option></select>
+    </div>
+  </div>
+</section>
+
+<!-- SECTION 6: Account & Access -->
+<section class="section" data-section="access">
+  <h2>6 · Account &amp; Access</h2>
+  <div class="grid cols-2">
+    <div class="field"><label>MFA coverage <span class="help-trigger" data-help="MFA">?</span></label>
+      <select name="mfa_coverage">
+        <option value="">—</option>
+        <option>All users, all systems</option>
+        <option>Admin accounts + email</option>
+        <option>Admin accounts only</option>
+        <option>Email only</option>
+        <option>None</option>
+        <option>Unknown</option>
+      </select>
+    </div>
+    <div class="field"><label>Privileged account count <span class="help-trigger" data-help="Privileged account">?</span></label>
+      <select name="priv_count_band">
+        <option value="">—</option>
+        <option>1–2</option><option>3–5</option><option>6–10</option>
+        <option>11–25</option><option>26–50</option><option>50+</option>
+        <option>Unknown</option>
+      </select>
+    </div>
+    <div class="field"><label>Password manager used? <span class="help-trigger" data-help="Password manager">?</span></label>
+      <select name="password_manager"><option value="">—</option><option>Yes, company-wide</option><option>Some users</option><option>No</option><option>Unknown</option></select>
+    </div>
+    <div class="field"><label>Account lockout policy? <span class="help-trigger" data-help="Lockout policy">?</span></label>
+      <select name="lockout_policy"><option value="">—</option><option>Yes</option><option>No</option><option>Unknown</option></select>
+    </div>
+    <div class="field"><label>Dormant-account cleanup <span class="help-trigger" data-help="Dormant account">?</span></label>
+      <select name="dormant_cleanup"><option value="">—</option><option>Automated</option><option>Manual, periodic</option><option>Ad hoc</option><option>Never</option><option>Unknown</option></select>
+    </div>
+  </div>
+</section>
+
+<!-- SECTION 7: Data Protection -->
+<section class="section" data-section="data">
+  <h2>7 · Data Protection</h2>
+  <div class="grid cols-2">
+    <div class="field"><label>Backup cadence</label>
+      <select name="backup_cadence">
+        <option value="">—</option>
+        <option>Continuous / real-time</option>
+        <option>Multiple times per day</option>
+        <option>Daily</option><option>Weekly</option>
+        <option>Monthly or less</option><option>None</option>
+        <option>Unknown</option>
+      </select>
+    </div>
+    <div class="field"><label>Offsite backup? <span class="help-trigger" data-help="Offsite backup">?</span></label>
+      <select name="offsite_backup"><option value="">—</option><option>Yes</option><option>No</option><option>Unknown</option></select>
+    </div>
+    <div class="field"><label>Offline / air-gapped backup? <span class="help-trigger" data-help="Offline backup">?</span></label>
+      <select name="offline_backup"><option value="">—</option><option>Yes</option><option>No</option><option>Unknown</option></select>
+    </div>
+    <div class="field"><label>Encryption at rest (servers/DB)?</label>
+      <select name="encryption_at_rest"><option value="">—</option><option>Yes</option><option>Partial</option><option>No</option><option>Unknown</option></select>
+    </div>
+    <div class="field"><label>DLP in place? <span class="help-trigger" data-help="DLP">?</span></label>
+      <select name="dlp"><option value="">—</option><option>Yes</option><option>Partial</option><option>No</option><option>Unknown</option></select>
+    </div>
+    <div class="field"><label>Backup restore test performed in last 12 months?</label>
+      <select name="restore_test"><option value="">—</option><option>Yes</option><option>No</option><option>Unknown</option></select>
+    </div>
+  </div>
+</section>
+
+<!-- SECTION 8: Vulnerability & Audit -->
+<section class="section" data-section="vuln_audit">
+  <h2>8 · Vulnerability &amp; Audit</h2>
+  <div class="grid cols-2">
+    <div class="field"><label>Vulnerability scanning? <span class="help-trigger" data-help="Vulnerability scanning">?</span></label>
+      <select name="vuln_scanning">
+        <option value="">—</option>
+        <option>Continuous / automated</option>
+        <option>Monthly</option><option>Quarterly</option>
+        <option>Annually / audit-only</option>
+        <option>None</option><option>Unknown</option>
+      </select>
+    </div>
+    <div class="field"><label>Logging coverage</label>
+      <select name="logging_coverage">
+        <option value="">—</option>
+        <option>Centralized, everything</option>
+        <option>Centralized, some systems</option>
+        <option>Local only, all systems</option>
+        <option>Local only, some systems</option>
+        <option>None / unknown</option>
+      </select>
+    </div>
+    <div class="field"><label>SIEM in place? <span class="help-trigger" data-help="SIEM">?</span></label>
+      <select name="siem"><option value="">—</option><option>Yes</option><option>Partial / limited</option><option>No</option><option>Unknown</option></select>
+    </div>
+    <div class="field"><label>Audit log retention <span class="help-trigger" data-help="Audit log">?</span></label>
+      <select name="audit_retention">
+        <option value="">—</option>
+        <option>&lt; 30 days</option><option>30–90 days</option>
+        <option>90 days – 1 year</option><option>1–3 years</option>
+        <option>&gt; 3 years</option><option>Unknown</option>
+      </select>
+    </div>
+  </div>
+</section>
+
+<!-- SECTION 9: IG1 Safeguards -->
+<section class="section" data-section="ig1">
+  <h2>9 · CIS Controls IG1 Safeguards <span class="help-trigger" data-help="IG1" tabindex="0">?</span></h2>
+  <div class="desc">For each of the 56 IG1 safeguards, mark current status and add brief evidence / notes. If unsure, answer "No" or leave blank — honest unknowns are more useful than guesses.</div>
+  <div id="ig1-container"></div>
+</section>
+
+<!-- SECTION 10: Free-text notes -->
+<section class="section" data-section="notes">
+  <h2>10 · Additional notes</h2>
+  <div class="desc">⚠ Reminder — do NOT paste real names, emails, domain names, or IPs.</div>
+  <div class="field"><label>Recent incidents, concerns, priorities, or anything unusual about the environment</label>
+    <textarea name="free_text" rows="5"></textarea>
+  </div>
+</section>
+
+<footer>
+  CyberCore Real-Client Intake v1.0 · Your answers are stored only in this browser's localStorage until you download or upload them.
+</footer>
+</main>
+
+<!-- ============================================================= -->
+<!-- SCRIPT                                                         -->
+<!-- ============================================================= -->
+<script>
+(function () {
+  'use strict';
+
+  const SCHEMA_VERSION = '1.0';
+  const LS_KEY = 'cybercore.real_client_intake.v1';
+
+  const IG1 = JSON.parse(document.getElementById('ig1-safeguards').textContent);
+  const HELP = JSON.parse(document.getElementById('help-definitions').textContent);
+  const GUIDES = JSON.parse(document.getElementById('section-guides').textContent);
+  const embeddedRaw = document.getElementById('responses').textContent.trim();
+
+  const isHosted = location.protocol === 'http:' || location.protocol === 'https:';
+  const PROFILE_ID = isHosted ? new URLSearchParams(location.search).get('profileId') : null;
+  // PROFILE_MODE: form is bound to a profile's intakes row. Autosaves to server,
+  // hides offline/upload affordances, and the action button marks-complete.
+  const PROFILE_MODE = !!PROFILE_ID;
+
+  if (PROFILE_MODE) {
+    document.getElementById('mode-tag').textContent = 'Linked to profile';
+  } else {
+    document.getElementById('mode-tag').textContent = isHosted ? 'Hosted mode' : 'Offline mode';
+    if (isHosted) document.getElementById('btn-upload').classList.remove('hidden');
+  }
+
+  // --- Render IG1 safeguards grouped by control ---
+  const ig1Container = document.getElementById('ig1-container');
+  const grouped = {};
+  IG1.forEach(sg => { (grouped[sg.control] ||= []).push(sg); });
+  Object.keys(grouped).sort((a,b) => +a - +b).forEach(ctrl => {
+    const list = grouped[ctrl];
+    const div = document.createElement('div');
+    div.className = 'ig1-control';
+    div.innerHTML = `<h3>Control ${ctrl} — ${list[0].control_name}</h3>` +
+      list.map(sg => `
+        <div class="ig1-safeguard" data-ig1="${sg.num}">
+          <div><span class="sg-num">${sg.num}</span><span class="sg-title">${sg.name}</span></div>
+          <div class="radio-row">
+            <label><input type="radio" name="ig1_${sg.num}" value="yes" /> Yes</label>
+            <label><input type="radio" name="ig1_${sg.num}" value="partial" /> Partial</label>
+            <label><input type="radio" name="ig1_${sg.num}" value="no" /> No</label>
+            <label><input type="radio" name="ig1_${sg.num}" value="unknown" /> Don't know</label>
+          </div>
+          <textarea name="ig1_${sg.num}_notes" placeholder="Evidence or notes (optional)"></textarea>
+        </div>`).join('');
+    ig1Container.appendChild(div);
+  });
+
+  // --- Network segments: repeatable rows ---
+  const segmentsList = document.getElementById('segments-list');
+  function addSegment(data) {
+    const row = document.createElement('div');
+    row.className = 'segment-row';
+    row.innerHTML = `
+      <input type="text" placeholder="VLAN ID (e.g., 10)" data-seg="vlan" value="${data?.vlan ?? ''}" />
+      <input type="text" placeholder="CIDR (e.g., 10.0.10.0/24)" data-seg="cidr" value="${data?.cidr ?? ''}" />
+      <input type="text" placeholder="Purpose (e.g., workstations)" data-seg="purpose" value="${data?.purpose ?? ''}" />
+      <button class="btn danger" type="button">✕</button>`;
+    row.querySelector('button').addEventListener('click', () => { row.remove(); scheduleSave(); });
+    row.querySelectorAll('input').forEach(i => i.addEventListener('input', scheduleSave));
+    segmentsList.appendChild(row);
+  }
+  document.getElementById('btn-add-segment').addEventListener('click', () => { addSegment(); scheduleSave(); });
+
+  // --- Inject per-section "How to find this" guide triggers ---
+  document.querySelectorAll('.section[data-section]').forEach(sec => {
+    const key = sec.dataset.section;
+    if (!GUIDES[key]) return;
+    const h2 = sec.querySelector('h2');
+    if (!h2 || h2.parentElement.classList.contains('section-header')) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'section-header';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'guide-trigger';
+    btn.dataset.guide = key;
+    btn.innerHTML = '📖 How to find this info';
+    btn.setAttribute('aria-label', 'Open guide for ' + key);
+    h2.parentElement.insertBefore(wrap, h2);
+    wrap.appendChild(h2);
+    wrap.appendChild(btn);
+  });
+
+  // --- Popovers (tooltips + section guides) ---
+  let activePop = null;
+  function closePop() { if (activePop) { activePop.remove(); activePop = null; } }
+  function positionPop(pop, anchor) {
+    const r = anchor.getBoundingClientRect();
+    pop.style.top = (window.scrollY + r.bottom + 6) + 'px';
+    const left = Math.min(window.scrollX + r.left, window.scrollX + window.innerWidth - pop.offsetWidth - 16);
+    pop.style.left = Math.max(8, left) + 'px';
+  }
+  function openGuide(key, anchor) {
+    closePop();
+    const guide = GUIDES[key];
+    if (!guide) return;
+    const pop = document.createElement('div');
+    pop.className = 'guide-pop';
+    const steps = (guide.steps || []).map(s => `<li>${s}</li>`).join('');
+    const platforms = (guide.platforms || []).map(p => `<div class="plat"><strong>${p.label}:</strong> ${p.howto}</div>`).join('');
+    const tip = guide.tip ? `<div class="tip">💡 ${guide.tip}</div>` : '';
+    pop.innerHTML = `<button class="close" aria-label="Close">&times;</button>
+      <h4>${guide.title}</h4>
+      ${steps ? `<ol>${steps}</ol>` : ''}
+      ${platforms}
+      ${tip}`;
+    document.body.appendChild(pop);
+    pop.querySelector('.close').addEventListener('click', closePop);
+    positionPop(pop, anchor);
+    activePop = pop;
+  }
+  document.addEventListener('click', (e) => {
+    const guide = e.target.closest('.guide-trigger');
+    if (guide) { e.preventDefault(); openGuide(guide.dataset.guide, guide); return; }
+    const t = e.target.closest('.help-trigger');
+    if (t) {
+      e.preventDefault();
+      closePop();
+      const key = t.dataset.help;
+      const text = (HELP[key] || 'No definition available.').replace(/\n/g, '<br>');
+      const pop = document.createElement('div');
+      pop.className = 'help-pop';
+      pop.innerHTML = `<strong>${key}</strong><br>${text}`;
+      document.body.appendChild(pop);
+      positionPop(pop, t);
+      activePop = pop;
+      return;
+    }
+    if (!e.target.closest('.help-pop, .guide-pop')) closePop();
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePop(); });
+
+  // --- Serialize/deserialize form state ---
+  function collect() {
+    const form = document.body;
+    const state = { schema_version: SCHEMA_VERSION, cover_name: '', sections: {} };
+    document.querySelectorAll('.section').forEach(sec => {
+      const secKey = sec.dataset.section;
+      const bucket = {};
+      sec.querySelectorAll('input, select, textarea').forEach(el => {
+        if (!el.name) return;
+        if (el.type === 'checkbox') {
+          if (!bucket[el.name]) bucket[el.name] = [];
+          if (el.checked) bucket[el.name].push(el.value);
+        } else if (el.type === 'radio') {
+          if (el.checked) bucket[el.name] = el.value;
+          else if (!(el.name in bucket)) bucket[el.name] = null;
+        } else {
+          bucket[el.name] = el.value;
+        }
+      });
+      // Network segments (custom)
+      if (secKey === 'network') {
+        bucket.segments = Array.from(segmentsList.querySelectorAll('.segment-row')).map(row => ({
+          vlan: row.querySelector('[data-seg=vlan]').value,
+          cidr: row.querySelector('[data-seg=cidr]').value,
+          purpose: row.querySelector('[data-seg=purpose]').value
+        }));
+      }
+      state.sections[secKey] = bucket;
+    });
+    state.cover_name = state.sections.company?.cover_name || '';
+    return state;
+  }
+
+  function apply(state) {
+    if (!state || !state.sections) return;
+    Object.entries(state.sections).forEach(([secKey, bucket]) => {
+      const sec = document.querySelector(`.section[data-section="${secKey}"]`);
+      if (!sec) return;
+      Object.entries(bucket).forEach(([name, value]) => {
+        if (secKey === 'network' && name === 'segments') {
+          segmentsList.innerHTML = '';
+          (value || []).forEach(addSegment);
+          return;
+        }
+        const els = sec.querySelectorAll(`[name="${name}"]`);
+        if (!els.length) return;
+        if (els[0].type === 'checkbox') {
+          const vals = Array.isArray(value) ? value : [];
+          els.forEach(el => { el.checked = vals.includes(el.value); });
+        } else if (els[0].type === 'radio') {
+          els.forEach(el => { el.checked = (el.value === value); });
+        } else {
+          els[0].value = value ?? '';
+        }
+      });
+    });
+    document.querySelectorAll('.role-select').forEach(sel => toggleRoleVersion(sel));
+    document.querySelectorAll('.svc-check').forEach(cb => toggleSvcVersion(cb));
+  }
+
+  // --- Server role version toggle ---
+  function toggleRoleVersion(select) {
+    const versionInput = select.closest('.role-field')?.querySelector('.role-version');
+    if (!versionInput) return;
+    versionInput.style.display = select.value === 'yes' ? '' : 'none';
+    if (select.value !== 'yes') versionInput.value = '';
+  }
+  document.querySelectorAll('.role-select').forEach(sel => {
+    sel.addEventListener('change', () => toggleRoleVersion(sel));
+    toggleRoleVersion(sel);
+  });
+
+  // --- Service version toggle ---
+  function toggleSvcVersion(checkbox) {
+    const versionInput = checkbox.closest('.svc-field')?.querySelector('.svc-version');
+    if (!versionInput) return;
+    versionInput.style.display = checkbox.checked ? '' : 'none';
+    if (!checkbox.checked) versionInput.value = '';
+  }
+  document.querySelectorAll('.svc-check').forEach(cb => {
+    cb.addEventListener('change', () => toggleSvcVersion(cb));
+    toggleSvcVersion(cb);
+  });
+
+  // --- Autosave ---
+  const statusEl = document.getElementById('status');
+  let saveTimer = null;
+  function setStatus(txt, cls) {
+    statusEl.textContent = txt;
+    statusEl.className = 'status-bar ' + (cls || '');
+  }
+  function scheduleSave() {
+    setStatus('Saving…', 'unsaved');
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(async () => {
+      const state = collect();
+      if (PROFILE_MODE) {
+        try {
+          const res = await fetch('/api/intakes/' + encodeURIComponent(PROFILE_ID), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify(state),
+          });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const body = await res.json();
+          setStatus('Saved · ' + (body.completion ?? 0) + '% complete', 'saved');
+        } catch (e) {
+          setStatus('Save failed: ' + e.message, 'unsaved');
+        }
+        return;
+      }
+      try {
+        localStorage.setItem(LS_KEY, JSON.stringify(state));
+        setStatus('Saved locally · ' + new Date().toLocaleTimeString(), 'saved');
+      } catch (e) {
+        setStatus('Save failed: ' + e.message, 'unsaved');
+      }
+    }, 400);
+  }
+  document.body.addEventListener('input', scheduleSave);
+  document.body.addEventListener('change', scheduleSave);
+
+  // --- Validation (soft) ---
+  function validate(state) {
+    const missing = [];
+    // Name is optional — admin assigns cover name later
+    const net = state.sections.network || {};
+    const endpointCount = Number(net.endpoint_count) || 0;
+    const serverCount   = Number(net.server_count)   || 0;
+    const hasAsset = endpointCount > 0 || serverCount > 0;
+    if (!hasAsset) missing.push('At least one non-zero device count in Section 2 (Network Topology)');
+
+    // Cross-check: endpoint OS totals should add up to endpoint_count.
+    const endpointOsSum =
+      (Number(net.os_count_win_client) || 0) +
+      (Number(net.os_count_linux)      || 0) +
+      (Number(net.os_count_macos)      || 0) +
+      (Number(net.os_count_other)      || 0);
+    if (endpointCount > 0 && endpointOsSum > 0 && endpointOsSum !== endpointCount) {
+      missing.push(`Endpoint count (${endpointCount}) doesn't match OS breakdown total (${endpointOsSum}). Each physical endpoint should be counted once across the OS fields.`);
+    }
+
+    const ig1Answered = IG1.filter(sg => state.sections.ig1?.[`ig1_${sg.num}`]).length;
+    if (ig1Answered < IG1.length) missing.push(`IG1 answers: ${ig1Answered} of ${IG1.length} safeguards answered`);
+    return missing;
+  }
+  function showValidation(list) {
+    const panel = document.getElementById('validation-panel');
+    const ul = document.getElementById('validation-list');
+    if (!list.length) { panel.classList.remove('active'); return false; }
+    ul.innerHTML = list.map(m => `<li>${m}</li>`).join('');
+    panel.classList.add('active');
+    panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return true;
+  }
+
+  // --- Download JSON ---
+  function download(filename, content, mime) {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename; document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 0);
+  }
+  function safeFilename(name) {
+    const d = new Date().toISOString().slice(0,10);
+    const slug = (name || 'intake').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0,40) || 'intake';
+    return `intake-${slug}-${d}`;
+  }
+  document.getElementById('btn-download-json').addEventListener('click', () => {
+    const state = collect();
+    showValidation(validate(state)); // warn but don't block
+    download(safeFilename(state.cover_name) + '.json', JSON.stringify(state, null, 2), 'application/json');
+  });
+  document.getElementById('btn-download-html').addEventListener('click', () => {
+    const state = collect();
+    showValidation(validate(state));
+    // Clone the current document and inject the payload into the #responses script block.
+    const doc = document.documentElement.cloneNode(true);
+    const target = doc.querySelector('#responses');
+    if (target) target.textContent = JSON.stringify(state);
+    // Strip any active help popover that was cloned.
+    doc.querySelectorAll('.help-pop').forEach(n => n.remove());
+    const html = '<!DOCTYPE html>\n' + doc.outerHTML;
+    download(safeFilename(state.cover_name) + '.html', html, 'text/html');
+  });
+  document.getElementById('btn-save-pdf').addEventListener('click', () => {
+    // Save-as-PDF via the browser's print dialog — captures everything currently
+    // entered on the form. Textareas would otherwise clip to their visible box,
+    // so expand each to its full content height first, then restore afterward.
+    const areas = Array.from(document.querySelectorAll('textarea'));
+    const prevHeights = areas.map(t => t.style.height);
+    areas.forEach(t => { t.style.height = 'auto'; t.style.height = t.scrollHeight + 'px'; });
+    const restore = () => {
+      areas.forEach((t, i) => { t.style.height = prevHeights[i]; });
+      window.removeEventListener('afterprint', restore);
+    };
+    window.addEventListener('afterprint', restore);
+    window.print();
+  });
+
+  // --- Import ---
+  document.getElementById('btn-import').addEventListener('click', () => document.getElementById('file-input').click());
+  document.getElementById('file-input').addEventListener('change', (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const text = String(ev.target.result || '');
+        let payload;
+        if (/\.html$/i.test(f.name) || /^<!doctype|<html/i.test(text.trim())) {
+          const m = text.match(/<script[^>]+id=["']responses["'][^>]*>([\s\S]*?)<\/script>/i);
+          if (!m || !m[1].trim()) throw new Error('No embedded responses found in HTML file.');
+          payload = JSON.parse(m[1]);
+        } else {
+          payload = JSON.parse(text);
+        }
+        if (!payload.schema_version) throw new Error('Missing schema_version — not a valid intake export.');
+        apply(payload);
+        scheduleSave();
+        setStatus('Imported · ' + new Date().toLocaleTimeString(), 'saved');
+      } catch (err) {
+        alert('Import failed: ' + err.message);
+      } finally {
+        e.target.value = '';
+      }
+    };
+    reader.readAsText(f);
+  });
+
+  // --- Clear ---
+  document.getElementById('btn-clear').addEventListener('click', () => {
+    if (!confirm('Clear all responses? This cannot be undone.')) return;
+    localStorage.removeItem(LS_KEY);
+    location.reload();
+  });
+
+  // --- Hosted action button: upload (standalone) or mark-complete (profile mode) ---
+  if (PROFILE_MODE) {
+    const btn = document.getElementById('btn-upload');
+    btn.textContent = '✓ Mark Complete';
+    btn.classList.remove('hidden');
+    btn.addEventListener('click', async () => {
+      const state = collect();
+      const missing = validate(state);
+      if (missing.length) {
+        showValidation(missing);
+        if (!confirm('There are missing fields. Mark complete anyway?')) return;
+      }
+      // Final save before completing.
+      try {
+        await fetch('/api/intakes/' + encodeURIComponent(PROFILE_ID), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify(state),
+        });
+        const res = await fetch('/api/intakes/' + encodeURIComponent(PROFILE_ID) + '/complete', {
+          method: 'POST', credentials: 'same-origin',
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        setStatus('Marked complete', 'saved');
+        alert('Intake marked complete.');
+      } catch (err) {
+        setStatus('Failed: ' + err.message, 'unsaved');
+        alert('Failed: ' + err.message);
+      }
+    });
+  } else {
+    document.getElementById('btn-upload').addEventListener('click', async () => {
+      const state = collect();
+      const missing = validate(state);
+      if (missing.length) {
+        showValidation(missing);
+        if (!confirm('There are missing fields. Upload anyway?')) return;
+      }
+      setStatus('Uploading…', 'unsaved');
+      try {
+        // Hit the legacy upload endpoint — it dual-writes to both `real_client_intakes`
+        // (so the existing detail/synthesize pages keep working) and the new
+        // unified `intakes` table (so the CRA dashboard can read from one place).
+        const res = await fetch('/api/real-client/intake/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify(state)
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const body = await res.json();
+        const newId = body.intake_id;
+        setStatus('Uploaded · intake ' + String(newId || '').slice(0,8), 'saved');
+        if (newId && confirm('Uploaded. Open the intake detail page?')) {
+          location.href = '/ciab/real-client-intake/' + newId;
+        }
+      } catch (err) {
+        setStatus('Upload failed: ' + err.message, 'unsaved');
+        alert('Upload failed: ' + err.message);
+      }
+    });
+  }
+
+  // --- Startup ---
+  // Profile mode: fetch from server. Standalone: prefer embedded #responses,
+  // then localStorage (with confirm), else empty form.
+  async function startup() {
+    if (PROFILE_MODE) {
+      try {
+        const res = await fetch('/api/intakes/' + encodeURIComponent(PROFILE_ID), {
+          credentials: 'same-origin',
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const body = await res.json();
+        const payload = body.intake?.payload;
+        if (payload && payload.sections) {
+          apply(payload);
+          setStatus('Loaded · ' + (body.intake.completion_percentage ?? 0) + '% complete', 'saved');
+          return;
+        }
+      } catch (err) {
+        setStatus('Load failed: ' + err.message + ' — starting empty', 'unsaved');
+      }
+      addSegment();
+      return;
+    }
+
+    let restored = null;
+    if (embeddedRaw) {
+      try { restored = JSON.parse(embeddedRaw); } catch (_) {}
+    }
+    if (!restored) {
+      try {
+        const s = localStorage.getItem(LS_KEY);
+        if (s) {
+          const parsed = JSON.parse(s);
+          if (confirm('A previous draft was found on this device. Resume it?')) restored = parsed;
+          else localStorage.removeItem(LS_KEY);
+        }
+      } catch (_) {}
+    }
+    if (restored) apply(restored);
+    else addSegment();
+    setStatus(restored ? 'Draft restored' : 'Ready', 'saved');
+  }
+  startup();
+})();
+</script>
+
+</body>
+</html>

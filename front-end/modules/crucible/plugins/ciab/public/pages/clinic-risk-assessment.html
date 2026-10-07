@@ -1,0 +1,1090 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Clinic Risk Assessment</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <style>
+    /* Risk + status palette as tokens so dark mode can re-tint them.
+       Severity ramp is shared with the ECharts heat maps (see chartTheme/SEVERITY_LEVELS in JS):
+       low #2f9e6e → guarded #d9a514 → elevated #e07b39 → high #c43d4b → critical #8b0015.
+       Badge tokens below use the white-text-safe members of that ramp. */
+    :root {
+      --risk-low: #2f9e6e; --risk-medium: #b58410; --risk-high: #c43d4b; --risk-critical: #8b0015;
+      --pill-open-bg: #f9e0e3;    --pill-open-fg: #8b0015;
+      --pill-mitigated-bg: #ddf1e7; --pill-mitigated-fg: #1f7a52;
+      --pill-accepted-bg: #f8efd4; --pill-accepted-fg: #8a6116;
+      --pill-transferred-bg: #dde9f4; --pill-transferred-fg: #1e5288;
+    }
+    [data-theme="dark"] {
+      --risk-low: #35a878; --risk-medium: #c08c12; --risk-high: #d4525f; --risk-critical: #a30f24;
+      --pill-open-bg: rgba(239,64,86,0.16);    --pill-open-fg: #f6a6b0;
+      --pill-mitigated-bg: rgba(47,158,110,0.18); --pill-mitigated-fg: #8fd9b8;
+      --pill-accepted-bg: rgba(217,165,20,0.16); --pill-accepted-fg: #ecc95e;
+      --pill-transferred-bg: rgba(55,141,189,0.18); --pill-transferred-fg: #81d3eb;
+    }
+    .cra-shell { display: flex; flex-direction: column; gap: 16px; }
+    .cra-breadcrumb { font-size: 0.8rem; color: var(--text-muted); }
+    .cra-breadcrumb a { color: var(--primary); text-decoration: none; }
+    .cra-breadcrumb a:hover { text-decoration: underline; }
+    .cra-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; margin-bottom: 4px; }
+    .cra-header h1 { margin: 0 0 4px 0; font-size: 1.5rem; }
+    .cra-header .sub { color: var(--text-secondary); font-size: 0.9rem; }
+    .cra-tabs { display: flex; gap: 18px; border-bottom: 1px solid var(--border-color, #e2e8f0); margin-bottom: 16px; overflow-x: auto; scrollbar-width: thin; }
+    .cra-tab-group { display: flex; flex-direction: column; flex-shrink: 0; }
+    .cra-tab-group + .cra-tab-group { border-left: 1px solid var(--border-color, #e2e8f0); padding-left: 18px; }
+    .cra-tab-group .group-label { font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.09em; color: var(--text-muted); padding: 4px 4px 0; }
+    .cra-tab-group .group-tabs { display: flex; gap: 4px; }
+    .cra-tab { padding: 8px 14px 10px; cursor: pointer; border: 0; background: transparent; color: var(--text-secondary); font-size: 0.92rem; font-weight: 500; border-bottom: 2px solid transparent; white-space: nowrap; }
+    .cra-tab:hover { color: var(--text-primary); }
+    .cra-tab.active { color: var(--primary, #0c234b); border-bottom-color: var(--primary, #0c234b); }
+    /* Collapsible overview sections — charts resize on toggle (see JS) */
+    details.cra-section { margin-top: 20px; }
+    details.cra-section > summary { display: flex; align-items: baseline; gap: 9px; cursor: pointer; user-select: none; font-weight: 600; font-size: 0.95rem; color: var(--text-primary); padding: 6px 2px; list-style: none; }
+    details.cra-section > summary::-webkit-details-marker { display: none; }
+    details.cra-section > summary::before { content: '▸'; flex-shrink: 0; font-size: 0.75rem; color: var(--text-muted, #64748b); transition: transform 0.15s ease; transform-origin: 45% 55%; }
+    details.cra-section[open] > summary::before { transform: rotate(90deg); }
+    details.cra-section > summary:hover { color: var(--primary, #0c234b); }
+    details.cra-section > summary .sec-hint { font-weight: 400; font-size: 0.8rem; color: var(--text-muted); }
+    .cra-pane { display: none; }
+    .cra-pane.active { display: block; }
+    .cra-grid { display: grid; gap: 16px; }
+    .cra-grid.cols-2 { grid-template-columns: 1fr 1fr; }
+    .cra-grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
+    @media (max-width: 900px) { .cra-grid.cols-2, .cra-grid.cols-4 { grid-template-columns: 1fr; } }
+    .cra-stat-card { background: var(--bg-card, white); border-radius: 10px; padding: 16px 20px; border-left: 4px solid var(--accent, #1e5288); box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+    .cra-stat-card .label { font-size: 0.75rem; text-transform: uppercase; color: var(--text-muted, #64748b); letter-spacing: 0.04em; }
+    .cra-stat-card .value { font-size: 1.6rem; font-weight: 700; color: var(--text-primary); margin-top: 4px; }
+    .cra-stat-card .hint { font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; }
+    .cra-card { background: var(--bg-card, white); border-radius: 10px; padding: 18px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); border: 1px solid var(--border-color, #e2e8f0); }
+    .cra-card h3 { margin: 0 0 12px 0; font-size: 1rem; color: var(--text-primary); }
+    .cra-chart { width: 100%; height: 320px; }
+    .cra-chart.tall { height: 380px; }
+
+    /* Findings table */
+    .findings-table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+    .findings-table th, .findings-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border-color, #e2e8f0); }
+    .findings-table th { background: var(--bg-table-head, #f8fafc); font-weight: 600; color: var(--text-secondary); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    .findings-table tr:hover { background: var(--bg-hover, #f8fafc); cursor: pointer; }
+    .findings-table .risk-badge { display: inline-block; min-width: 24px; padding: 2px 6px; border-radius: 4px; font-weight: 600; text-align: center; color: white; font-size: 0.75rem; }
+    .risk-low    { background: var(--risk-low); }
+    .risk-medium { background: var(--risk-medium); }
+    .risk-high   { background: var(--risk-high); }
+    .risk-critical { background: var(--risk-critical); }
+    .status-pill { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.7rem; font-weight: 500; text-transform: uppercase; }
+    .status-open       { background: var(--pill-open-bg); color: var(--pill-open-fg); }
+    .status-mitigated  { background: var(--pill-mitigated-bg); color: var(--pill-mitigated-fg); }
+    .status-accepted   { background: var(--pill-accepted-bg); color: var(--pill-accepted-fg); }
+    .status-transferred{ background: var(--pill-transferred-bg); color: var(--pill-transferred-fg); }
+
+    /* Drawer for add/edit finding */
+    .drawer-backdrop { position: fixed; inset: 0; background: rgba(15,23,42,0.4); z-index: 200; display: none; }
+    .drawer-backdrop.open { display: block; }
+    .drawer { position: fixed; top: 0; right: 0; height: 100vh; width: 480px; max-width: 100vw; background: var(--bg-card, white); box-shadow: -4px 0 24px rgba(15,23,42,0.15); z-index: 201; transform: translateX(100%); transition: transform 0.2s ease; overflow-y: auto; }
+    .drawer.open { transform: translateX(0); }
+    .drawer header { padding: 16px 20px; border-bottom: 1px solid var(--border-color, #e2e8f0); display: flex; justify-content: space-between; align-items: center; }
+    .drawer header h3 { margin: 0; font-size: 1.1rem; }
+    .drawer .body { padding: 20px; }
+    .drawer .field { margin-bottom: 14px; }
+    .drawer .field label { display: block; font-size: 0.85rem; font-weight: 500; color: var(--text-secondary); margin-bottom: 4px; }
+    .drawer .field input, .drawer .field select, .drawer .field textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--border-color, #e2e8f0); border-radius: 6px; font: inherit; background: var(--bg-input, white); color: var(--text-primary); }
+    .drawer .field textarea { min-height: 70px; resize: vertical; }
+    .drawer .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .drawer footer { padding: 14px 20px; border-top: 1px solid var(--border-color, #e2e8f0); display: flex; justify-content: space-between; gap: 10px; }
+    .drawer .slider-row { display: flex; align-items: center; gap: 10px; }
+    .drawer .slider-row input[type=range] { flex: 1; }
+    .drawer .slider-row .val { width: 24px; text-align: center; font-weight: 600; color: var(--primary, #0c234b); }
+    .drawer .group-title { font-size: 0.78rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; margin: 20px 0 10px 0; padding-bottom: 4px; border-bottom: 1px solid var(--border-color, #e2e8f0); }
+
+    .btn { padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border-color, #e2e8f0); background: var(--bg-card, white); cursor: pointer; font: inherit; color: var(--text-primary); }
+    .btn:hover { background: var(--bg-hover, #f8fafc); }
+    .btn.primary { background: var(--primary, #0c234b); border-color: var(--primary, #0c234b); color: white; }
+    .btn.primary:hover { background: var(--primary-dark, #001c48); }
+    .btn.danger { color: var(--danger, #dc2626); border-color: var(--pill-open-bg); }
+    .btn.danger:hover { background: var(--pill-open-bg); }
+
+    .csf-slider-grid { display: grid; grid-template-columns: 120px 1fr 32px; gap: 10px; align-items: center; margin: 8px 0; }
+    .csf-slider-grid .name { font-weight: 600; }
+    .csf-slider-grid .name .auto-pill { display: inline-block; margin-left: 6px; font-size: 0.7rem; font-weight: 400; padding: 2px 6px; border-radius: 10px; background: var(--bg-table-head, #f1f5f9); color: var(--text-muted); }
+
+    /* CIS RAM workbook */
+    .ram-control { background: var(--bg-card, white); border: 1px solid var(--border-color, #e2e8f0); border-radius: 8px; margin-bottom: 12px; overflow: hidden; }
+    .ram-control-header { padding: 12px 16px; display:flex; justify-content:space-between; align-items:center; cursor:pointer; user-select:none; background: var(--bg-table-head, #f8fafc); transition: background 0.1s; }
+    .ram-control-header:hover { background: var(--bg-hover, #f1f5f9); }
+    .ram-control-header h4 { margin: 0; font-size: 0.95rem; color: var(--text-primary); display:flex; align-items:center; gap:8px; }
+    .ram-control-header .ctrl-progress { font-size: 0.8rem; color: var(--text-muted, #64748b); }
+    .ram-control-header .caret { font-size: 0.7rem; color: var(--text-muted, #64748b); transition: transform 0.15s; }
+    .ram-control.collapsed .caret { transform: rotate(-90deg); }
+    .ram-control.collapsed .ram-rows { display: none; }
+    .ram-rows { border-top: 1px solid var(--border-color, #e2e8f0); }
+    .ram-row { display:grid; grid-template-columns: 60px 1fr 100px 60px 60px 70px; gap: 10px; padding: 10px 16px; align-items:center; border-bottom: 1px solid var(--border-color, #e2e8f0); cursor:pointer; transition: background 0.1s; }
+    .ram-row:last-child { border-bottom: 0; }
+    .ram-row:hover { background: var(--bg-hover, #f8fafc); }
+    .ram-row.expanded { background: var(--bg-hover, #f8fafc); }
+    .ram-row .num { font-weight: 600; color: var(--primary, #0c234b); font-size: 0.85rem; }
+    .ram-row .name { font-size: 0.875rem; color: var(--text-primary); }
+    .ram-row .asset { font-size: 0.8rem; color: var(--text-muted, #64748b); }
+    .ram-row .score { text-align:center; font-weight: 600; font-size: 0.85rem; }
+    .ram-row .reasonable { text-align:center; font-size:0.85rem; }
+    .ram-row .score-badge { display:inline-block; min-width:26px; padding:2px 7px; border-radius: 6px; color: white; font-weight:600; font-size: 0.78rem; }
+    .score-1, .score-2 { background: var(--risk-low); }
+    .score-3, .score-4 { background: var(--risk-medium); }
+    .score-6 { background: var(--risk-high); }
+    .score-9 { background: var(--risk-critical); }
+    .score-empty { background: var(--gray-200, #e2e8f0); color: var(--text-muted, #64748b); }
+    .ram-drawer { padding: 16px 16px 20px 16px; background: var(--bg-card, white); border-top: 1px dashed var(--border-color, #e2e8f0); display:none; }
+    .ram-row.expanded + .ram-drawer { display: block; }
+    .ram-drawer .grid { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+    .ram-drawer .grid.three { grid-template-columns: repeat(3, 1fr); }
+    @media (max-width: 800px) { .ram-drawer .grid, .ram-drawer .grid.three { grid-template-columns: 1fr; } }
+    .ram-drawer .field { margin-bottom: 0; }
+    .ram-drawer .field label { display:block; font-size: 0.75rem; color: var(--text-muted, #64748b); text-transform:uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
+    .ram-drawer .field input, .ram-drawer .field select, .ram-drawer .field textarea { width: 100%; padding: 6px 8px; border: 1px solid var(--border-color, #e2e8f0); border-radius: 5px; font: inherit; background: var(--bg-input, white); color: var(--text-primary); font-size: 0.875rem; }
+    .ram-drawer .field textarea { min-height: 50px; resize: vertical; }
+    .ram-drawer .group-title { font-size: 0.8rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; margin: 14px 0 8px 0; padding-bottom: 4px; border-bottom: 1px solid var(--border-color, #e2e8f0); }
+    .ram-drawer .group-title:first-child { margin-top: 0; }
+
+    /* Clickable CIS IG1 Coverage card -> opens the intake breakdown drawer */
+    .cis-clickable { cursor: pointer; transition: box-shadow 0.15s, border-color 0.15s; }
+    .cis-clickable:hover { border-color: var(--primary, #0c234b); box-shadow: 0 2px 12px rgba(30, 82, 136, 0.16); }
+    .view-intake-hint { float: right; font-size: 0.72rem; font-weight: 500; color: var(--primary, #0c234b); text-transform: none; letter-spacing: normal; }
+
+    /* Intake breakdown drawer */
+    .intake-summary { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 18px 0; }
+    .intake-summary .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 14px; font-size: 0.78rem; font-weight: 600; }
+    .ig1-ans { display: inline-block; padding: 2px 9px; border-radius: 11px; font-size: 0.72rem; font-weight: 600; text-transform: capitalize; white-space: nowrap; }
+    .ig1-ans.yes     { background: var(--pill-mitigated-bg); color: var(--pill-mitigated-fg); }
+    .ig1-ans.partial { background: var(--pill-accepted-bg); color: var(--pill-accepted-fg); }
+    .ig1-ans.no      { background: var(--pill-open-bg); color: var(--pill-open-fg); }
+    .ig1-ans.unknown { background: var(--bg-table-head, #f1f5f9); color: var(--text-muted, #64748b); }
+    .intake-section { margin-bottom: 20px; }
+    .intake-section > .sec-title { font-size: 0.8rem; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; margin: 0 0 8px 0; padding-bottom: 5px; border-bottom: 1px solid var(--border-color, #e2e8f0); }
+    .intake-kv { display: grid; grid-template-columns: minmax(150px, 42%) 1fr; gap: 7px 14px; font-size: 0.875rem; align-items: baseline; }
+    .intake-kv .k { color: var(--text-muted, #64748b); }
+    .intake-kv .v { color: var(--text-primary); word-break: break-word; }
+    .ig1-control { margin-bottom: 12px; }
+    .ig1-control .ctrl-name { font-size: 0.82rem; font-weight: 600; color: var(--text-primary); margin: 0 0 6px 0; }
+    .ig1-sg { display: grid; grid-template-columns: 48px 1fr auto; gap: 10px; align-items: center; padding: 5px 0; border-bottom: 1px dashed var(--border-color, #e2e8f0); font-size: 0.84rem; }
+    .ig1-sg:last-child { border-bottom: 0; }
+    .ig1-sg .num { font-weight: 600; color: var(--primary, #0c234b); }
+    .ig1-sg .name { color: var(--text-primary); }
+
+    .empty-state { text-align: center; padding: 40px 20px; color: var(--text-muted, #64748b); }
+    .empty-state .big-icon { font-size: 2.5rem; margin-bottom: 8px; }
+    /* Lightweight inline toast — namespaced so it can't clash with the global .toast component */
+    .cra-toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #1e293b; color: white; padding: 10px 18px; border-radius: 6px; font-size: 0.875rem; z-index: 300; opacity: 0; transition: opacity 0.2s; }
+    .cra-toast.show { opacity: 1; }
+    [data-theme="dark"] .cra-toast { background: var(--bg-card-elevated, #1a2040); border: 1px solid var(--border-color); }
+
+    /* ═══════════════════════════════════════════════════════════════
+       Commercial polish pass — buttons, cards, tables, hero, toolbar
+       ═══════════════════════════════════════════════════════════════ */
+
+    /* Pill-style buttons + smooth transitions + focus rings */
+    .btn { border-radius: 999px; padding: 7px 16px; font-weight: 500; font-size: 0.875rem; transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease; }
+    .btn:active { transform: translateY(1px); }
+    .btn:focus-visible, .cra-tab:focus-visible, .filter-pill:focus-visible { outline: 2px solid var(--primary-light, #5c9fe6); outline-offset: 2px; }
+    .cra-shell input:focus-visible, .cra-shell select:focus-visible, .cra-shell textarea:focus-visible,
+    .drawer input:focus-visible, .drawer select:focus-visible, .drawer textarea:focus-visible { outline: 2px solid var(--primary-light, #5c9fe6); outline-offset: 1px; }
+
+    /* Shared kicker + card head used by the new components */
+    .cra-kicker { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.09em; color: var(--text-muted, #64748b); }
+    .cra-card { transition: box-shadow 0.15s ease, border-color 0.15s ease; }
+    .cra-card-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; padding: 14px 18px; border-bottom: 1px solid var(--border-color, #e2e8f0); }
+    .cra-card-head h3 { margin: 4px 0 0; font-size: 1rem; color: var(--text-primary); }
+
+    /* Refined stat cards: icon, larger value, hover lift */
+    .cra-stat-card { position: relative; border: 1px solid var(--border-color, #e2e8f0); transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease; }
+    .cra-stat-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-md, 0 6px 16px rgba(15, 23, 42, 0.08)); }
+    .cra-stat-card .stat-icon { position: absolute; top: 14px; right: 14px; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; border-radius: 10px; color: var(--primary, #0c234b); background: rgba(30, 82, 136, 0.08); }
+    [data-theme="dark"] .cra-stat-card .stat-icon { background: rgba(92, 159, 230, 0.14); }
+    .cra-stat-card .stat-icon svg { width: 18px; height: 18px; }
+    .cra-stat-card .value { font-size: 1.85rem; letter-spacing: -0.02em; line-height: 1.15; }
+
+    /* Executive hero banner */
+    .cra-hero { display: grid; grid-template-columns: auto minmax(180px, 1.1fr) minmax(220px, 1fr) auto; gap: 28px; align-items: center; background: var(--bg-card, white); border: 1px solid var(--border-color, #e2e8f0); border-radius: 12px; padding: 20px 24px; box-shadow: var(--shadow-sm, 0 1px 3px rgba(15, 23, 42, 0.06)); margin-bottom: 16px; }
+    @media (max-width: 1100px) { .cra-hero { grid-template-columns: auto 1fr; } }
+    @media (max-width: 640px)  { .cra-hero { grid-template-columns: 1fr; } }
+    .hero-grade-block { display: flex; align-items: center; gap: 14px; }
+    .grade-chip { width: 64px; height: 64px; flex-shrink: 0; border-radius: 16px; display: flex; align-items: center; justify-content: center; font-size: 2.1rem; font-weight: 800; color: #fff; letter-spacing: -0.02em; transition: background-color 0.15s ease; }
+    .grade-chip.grade-success { background: var(--success, #16a34a); }
+    .grade-chip.grade-warning { background: var(--warning, #d97706); }
+    .grade-chip.grade-danger  { background: var(--danger, #dc2626); }
+    .grade-chip.grade-none    { background: var(--text-muted, #94a3b8); }
+    .grade-detail .grade-num { font-size: 1.45rem; font-weight: 700; color: var(--text-primary); }
+    .grade-detail .grade-denom { font-size: 0.82rem; color: var(--text-muted, #64748b); margin-left: 3px; }
+    .grade-basis { font-size: 0.72rem; color: var(--text-muted, #64748b); margin-top: 3px; max-width: 190px; }
+    .hero-company-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+    .hero-company { font-size: 1.05rem; font-weight: 700; color: var(--text-primary); }
+    .hero-meta-line { font-size: 0.82rem; color: var(--text-secondary, #475569); margin-top: 3px; }
+    .hero-progress-top { display: flex; justify-content: space-between; gap: 10px; font-size: 0.8rem; color: var(--text-secondary, #475569); margin: 7px 0 5px; }
+    .hero-meter { height: 6px; border-radius: 999px; background: var(--border-color, #e2e8f0); overflow: hidden; }
+    .hero-meter-fill { height: 100%; width: 0; border-radius: 999px; background: var(--primary, #0c234b); transition: width 0.3s ease; }
+    details.hero-checklist { margin-top: 7px; }
+    details.hero-checklist summary { cursor: pointer; user-select: none; font-size: 0.75rem; font-weight: 600; color: var(--primary, #0c234b); }
+    .hero-checklist ul { list-style: none; margin: 8px 0 0; padding: 0; }
+    .hero-checklist li { display: flex; gap: 8px; align-items: baseline; font-size: 0.8rem; padding: 2px 0; }
+    .hero-checklist li .mark { width: 14px; text-align: center; flex-shrink: 0; }
+    .hero-checklist li.done { color: var(--text-muted, #64748b); }
+    .hero-checklist li.done .mark { color: var(--success, #16a34a); font-weight: 700; }
+    .hero-checklist li.todo a { color: var(--primary, #0c234b); text-decoration: none; font-weight: 500; }
+    .hero-checklist li.todo a:hover { text-decoration: underline; }
+    .hero-actions { display: flex; flex-direction: column; gap: 8px; }
+    .hero-actions .btn { white-space: nowrap; }
+    @media (max-width: 1100px) { .hero-actions { flex-direction: row; } }
+
+    /* Top Risks panel */
+    .top-risks-card { padding: 0; }
+    .remediation-wrap { flex: 0 1 320px; min-width: 200px; }
+    .remediation-top { display: flex; justify-content: space-between; gap: 10px; font-size: 0.75rem; color: var(--text-secondary, #475569); margin-bottom: 4px; }
+    .remediation-meter { height: 6px; border-radius: 999px; background: var(--border-color, #e2e8f0); overflow: hidden; }
+    .remediation-fill { height: 100%; width: 0; border-radius: 999px; background: var(--success, #16a34a); transition: width 0.3s ease; }
+    .top-risk-row { display: grid; grid-template-columns: 46px 90px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 10px 18px; border-top: 1px solid var(--border-color, #e2e8f0); cursor: pointer; transition: background-color 0.15s ease; }
+    .top-risk-row:hover { background: var(--bg-card-hover, var(--bg-hover, #f8fafc)); }
+    .top-risk-row .tr-code { font-weight: 600; font-size: 0.82rem; color: var(--primary, #0c234b); }
+    .top-risk-row .tr-title { font-weight: 500; font-size: 0.875rem; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .top-risk-row .tr-sub { font-size: 0.75rem; color: var(--text-muted, #64748b); margin-top: 1px; }
+
+    /* Risk Register toolbar */
+    .cra-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .cra-toolbar .cra-search { flex: 1 1 220px; max-width: 320px; padding: 8px 14px; border: 1px solid var(--border-color, #e2e8f0); border-radius: 999px; font: inherit; font-size: 0.875rem; background: var(--bg-input, white); color: var(--text-primary); transition: border-color 0.15s ease, box-shadow 0.15s ease; }
+    .cra-toolbar .cra-search:focus { border-color: var(--primary-light, #5c9fe6); }
+    .filter-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+    .filter-pill { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border-color, #e2e8f0); background: var(--bg-card, white); color: var(--text-secondary, #475569); font: inherit; font-size: 0.8rem; font-weight: 500; cursor: pointer; transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease; }
+    .filter-pill:hover { border-color: var(--primary, #0c234b); color: var(--text-primary); }
+    .filter-pill.active { background: var(--primary, #0c234b); border-color: var(--primary, #0c234b); color: #fff; }
+    .filter-pill .pill-count { font-size: 0.7rem; font-weight: 700; background: rgba(148, 163, 184, 0.18); border-radius: 999px; padding: 1px 7px; }
+    .filter-pill.active .pill-count { background: rgba(255, 255, 255, 0.22); }
+    .cra-toolbar .cra-select { padding: 7px 12px; border: 1px solid var(--border-color, #e2e8f0); border-radius: 999px; font: inherit; font-size: 0.85rem; background: var(--bg-input, white); color: var(--text-primary); cursor: pointer; }
+
+    /* Premium tables: sticky thead, zebra rows, tighter density, numeric alignment */
+    .cra-table-wrap { padding: 0; overflow: auto; max-height: 65vh; }
+    .cra-table-wrap .findings-table thead th { position: sticky; top: 0; z-index: 2; box-shadow: inset 0 -1px 0 var(--border-color, #e2e8f0); border-bottom: 0; }
+    .findings-table th, .findings-table td { padding: 7px 12px; }
+    .findings-table tbody tr:nth-child(even) { background: rgba(148, 163, 184, 0.07); }
+    .findings-table tbody tr:hover { background: var(--bg-hover, #f1f5f9); }
+    .findings-table .ta-num { text-align: right; }
+    .findings-table td.td-title { max-width: 360px; }
+    th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+    th.sortable:hover { color: var(--text-primary); }
+    th.sortable .sort-ind { display: inline-block; width: 12px; margin-left: 2px; font-size: 0.6rem; color: var(--primary, #0c234b); }
+
+    /* Empty states with CTA */
+    .cra-empty { text-align: center; padding: 44px 20px; }
+    .cra-empty .title { font-weight: 600; font-size: 1rem; color: var(--text-primary); }
+    .cra-empty .desc { font-size: 0.85rem; color: var(--text-muted, #64748b); margin: 4px auto 0; max-width: 420px; }
+    .cra-empty .btn { margin-top: 14px; }
+    .cra-empty.compact { padding: 24px 16px; }
+
+    /* ═══════════════════════════════════════════════════════════════
+       Visualization cards — kicker + title + caption header, fixed-height
+       chart body, severity-chip legend pinned to the card bottom so all
+       cards in a grid row stay equal height.
+       ═══════════════════════════════════════════════════════════════ */
+    .chart-card { padding: 0; display: flex; flex-direction: column; }
+    .chart-card-head { padding: 16px 18px 12px; border-bottom: 1px solid var(--border-color, #e2e8f0); }
+    .chart-card-head h3 { margin: 3px 0 0; font-size: 1rem; color: var(--text-primary); }
+    .chart-caption { margin: 5px 0 0; font-size: 0.78rem; line-height: 1.45; color: var(--text-muted, #64748b); max-width: 62ch; }
+    .chart-card .cra-chart { flex-shrink: 0; }
+    .chart-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 10px 18px 14px; border-top: 1px solid var(--border-color, #e2e8f0); margin-top: auto; }
+    .legend-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 0.72rem; font-weight: 600; color: var(--text-secondary, #475569); }
+    .legend-chip .dot { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+    .legend-note { font-size: 0.72rem; color: var(--text-muted, #64748b); margin-left: auto; }
+
+    /* Drawer refinements: rounded panel, sticky header so context survives scroll */
+    .drawer { border-radius: 16px 0 0 16px; box-shadow: -12px 0 40px rgba(2, 6, 23, 0.18); }
+    .drawer header { position: sticky; top: 0; z-index: 5; background: var(--bg-card, white); border-radius: 16px 0 0 0; }
+    .drawer header h3 { font-size: 1.02rem; letter-spacing: -0.01em; }
+
+    /* CIS RAM workbook: row hover accent + softer section chrome */
+    .ram-control { border-radius: 10px; }
+    .ram-row:hover { box-shadow: inset 3px 0 0 var(--accent, #1e5288); }
+    .ram-row.expanded { box-shadow: inset 3px 0 0 var(--accent, #1e5288); }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="Layout.toggleSidebar()"></div>
+
+    <main class="main-content">
+      <header class="main-header">
+        <button class="menu-toggle" id="menuToggle" onclick="Layout.toggleSidebar()">
+          <span></span><span></span><span></span>
+        </button>
+        <div class="header-title">Clinic Risk Assessment</div>
+        <div class="header-actions">
+          <span class="header-user" id="headerUser"></span>
+        </div>
+      </header>
+
+      <div class="page-content">
+        <div class="cra-shell" id="craShell">
+          <div class="cra-breadcrumb"><a href="/ciab/clinic-risk-assessment">Risk Assessments</a> <span aria-hidden="true">/</span> <span id="craBreadcrumbName">Assessment</span></div>
+          <div class="cra-header">
+            <div>
+              <h1 id="craCompanyName">Loading…</h1>
+              <div class="sub" id="craSubtitle"></div>
+            </div>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <button class="btn" id="btnRefresh" title="Reload data" aria-label="Reload data">↻</button>
+            </div>
+          </div>
+
+          <div class="cra-tabs" role="tablist">
+            <div class="cra-tab-group">
+              <span class="group-label">Assess</span>
+              <div class="group-tabs">
+                <button class="cra-tab active" data-tab="overview"  role="tab">Overview</button>
+                <button class="cra-tab" data-tab="assets"    role="tab">Assets</button>
+                <button class="cra-tab" data-tab="register"  role="tab">Risk Register</button>
+              </div>
+            </div>
+            <div class="cra-tab-group">
+              <span class="group-label">Analyze</span>
+              <div class="group-tabs">
+                <button class="cra-tab" data-tab="cisram"    role="tab">CIS RAM</button>
+                <button class="cra-tab" data-tab="poam"      role="tab">POA&amp;M</button>
+                <button class="cra-tab" data-tab="insurance" role="tab">Insurance</button>
+                <button class="cra-tab" data-tab="maturity"  role="tab">Maturity</button>
+              </div>
+            </div>
+            <div class="cra-tab-group">
+              <span class="group-label">Deliver</span>
+              <div class="group-tabs">
+                <button class="cra-tab" data-tab="snapshots" role="tab">Snapshots</button>
+                <button class="cra-tab" data-tab="report"    role="tab">Report</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- OVERVIEW -->
+          <div class="cra-pane active" id="pane-overview">
+            <!-- Executive hero: overall grade, engagement metadata, completeness, quick actions -->
+            <div class="cra-hero" id="craHero">
+              <div class="hero-grade-block">
+                <div class="grade-chip grade-none" id="heroGradeChip" title="Weighted blend: inherent risk 40% · IG1 coverage 25% · CSF maturity 20% · insurance readiness 15% (renormalized for available data)">–</div>
+                <div class="grade-detail">
+                  <div class="cra-kicker">Overall Risk Grade</div>
+                  <div><span class="grade-num" id="heroGradeScore">—</span><span class="grade-denom">/ 100</span></div>
+                  <div class="grade-basis" id="heroGradeBasis"></div>
+                </div>
+              </div>
+              <div class="hero-meta">
+                <div class="cra-kicker">Engagement</div>
+                <div class="hero-company-row">
+                  <span class="hero-company" id="heroCompany">—</span>
+                  <span id="craSourceBadge" class="status-pill status-open" style="display:none"></span>
+                </div>
+                <div class="hero-meta-line" id="heroMetaLine"></div>
+              </div>
+              <div class="hero-progress">
+                <div class="cra-kicker">Assessment Completeness</div>
+                <div class="hero-progress-top"><span id="heroStepsLabel">0 of 7 steps</span><span id="heroStepsPct">0%</span></div>
+                <div class="hero-meter"><div class="hero-meter-fill" id="heroMeterFill"></div></div>
+                <details class="hero-checklist" id="heroChecklist">
+                  <summary>View checklist</summary>
+                  <ul id="heroChecklistItems"></ul>
+                </details>
+              </div>
+              <div class="hero-actions">
+                <button class="btn primary" id="btnHeroReport" type="button">Open Report</button>
+                <button class="btn" id="btnHeroSnapshot" type="button">Take Snapshot</button>
+              </div>
+            </div>
+
+            <div class="cra-grid cols-4" id="overviewStats"></div>
+
+            <!-- Top open risks by inherent score + remediation progress -->
+            <div class="cra-card top-risks-card" id="topRisksCard" style="margin-top:16px;">
+              <div class="cra-card-head">
+                <div>
+                  <div class="cra-kicker">Priority Queue</div>
+                  <h3>Top Risks</h3>
+                </div>
+                <div class="remediation-wrap">
+                  <div class="remediation-top"><span>Remediation progress</span><span id="remediationLabel">—</span></div>
+                  <div class="remediation-meter"><div class="remediation-fill" id="remediationFill"></div></div>
+                </div>
+              </div>
+              <div id="topRisksList"></div>
+            </div>
+
+            <!-- Compliance posture callout — populated by JS from intake._meta.posture -->
+            <div id="postureCallout" style="display:none; margin-top:16px; padding:14px 18px; border-radius:8px; background:rgba(30, 82, 136, 0.08); border-left:4px solid var(--primary, #0c234b);">
+              <div style="font-size:0.7rem; font-weight:700; letter-spacing:0.1em; color:var(--primary, #0c234b); text-transform:uppercase;" id="postureKicker">Compliance Posture</div>
+              <div style="font-size:1.05rem; font-weight:600; color:var(--text-primary, #1e293b); margin-top:4px;" id="postureTitle"></div>
+              <div style="font-size:0.85rem; color:var(--text-muted, #64748b); margin-top:4px;" id="postureBody"></div>
+            </div>
+
+            <div style="display:flex; justify-content:flex-end; gap:8px; margin:16px 0 0;">
+              <button class="btn" id="btnToggleCsf" type="button" title="Show or hide the NIST CSF maturity radar and function-score charts">Hide NIST CSF</button>
+            </div>
+
+            <details class="cra-section" open id="secHeatmaps">
+              <summary>Risk Heat Maps <span class="sec-hint">inherent today vs. residual after treatment</span></summary>
+              <div class="cra-grid cols-2" style="margin-top:10px">
+                <div class="cra-card chart-card">
+                  <div class="chart-card-head">
+                    <div class="cra-kicker">Inherent Risk</div>
+                    <h3>Heat Map — Today</h3>
+                    <p class="chart-caption">Each tile counts register findings at that likelihood × impact, scored before any treatment. Read toward the top-right — that's where action is most urgent.</p>
+                  </div>
+                  <div class="cra-chart tall" id="chartHeatmap"></div>
+                  <div class="chart-legend" id="legendHeatmap"></div>
+                </div>
+                <div class="cra-card chart-card">
+                  <div class="chart-card-head">
+                    <div class="cra-kicker">Residual Risk</div>
+                    <h3>Heat Map — After Treatment</h3>
+                    <p class="chart-caption">The same findings re-plotted at their projected post-treatment scores. The visible drift toward the bottom-left is the value of the remediation plan.</p>
+                  </div>
+                  <div class="cra-chart tall" id="chartHeatmapResidual"></div>
+                  <div class="chart-legend" id="legendHeatmapResidual"></div>
+                </div>
+              </div>
+            </details>
+            <details class="cra-section" open id="secFrameworks">
+              <summary>Framework Maturity &amp; Coverage <span class="sec-hint">NIST CSF 2.0 and CIS IG1</span></summary>
+              <div class="cra-grid" style="margin-top:10px; grid-template-columns: 1fr;" id="csfRadarRow">
+                <div class="cra-card chart-card">
+                  <div class="chart-card-head">
+                    <div class="cra-kicker">NIST CSF 2.0</div>
+                    <h3>Maturity Radar</h3>
+                    <p class="chart-caption">Program maturity 0–5 across the six CSF functions. A large, balanced polygon is strong; dents show where the program is thin. Hover for per-function detail.</p>
+                  </div>
+                  <div class="cra-chart tall" id="chartRadar"></div>
+                  <div class="chart-legend" id="legendRadar"></div>
+                </div>
+              </div>
+
+              <div class="cra-grid cols-2" style="margin-top:16px" id="cisCsfRow">
+                <div class="cra-card chart-card cis-clickable" id="cisCard" role="button" tabindex="0" title="Click to view the client's full intake form">
+                  <div class="chart-card-head">
+                    <div class="cra-kicker">CIS Controls</div>
+                    <h3>IG1 Safeguard Coverage <span class="view-intake-hint">View intake →</span></h3>
+                    <p class="chart-caption">How the 56 IG1 safeguards were answered on intake. Blue is implemented; red gaps are what drive findings onto the register.</p>
+                  </div>
+                  <div class="cra-chart" id="chartCis"></div>
+                </div>
+                <div class="cra-card chart-card" id="csfBarsCard">
+                  <div class="chart-card-head">
+                    <div class="cra-kicker">NIST CSF 2.0</div>
+                    <h3>Function Scores</h3>
+                    <p class="chart-caption">The radar's underlying numbers. Functions scoring below 2.0 are flagged red as priority gaps; ✎ marks a manual analyst override.</p>
+                  </div>
+                  <div class="cra-chart" id="chartCsf"></div>
+                </div>
+              </div>
+            </details>
+          </div>
+
+          <!-- ASSETS (Tier 1) -->
+          <div class="cra-pane" id="pane-assets">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+              <div>
+                <h3 style="margin:0 0 4px 0;">Asset Register</h3>
+                <div class="sub" id="assetsCount">No assets yet. Every risk should trace back to one or more assets.</div>
+              </div>
+              <div style="display:flex; gap:8px;">
+                <button class="btn" id="btnAddAsset">+ Add Asset</button>
+              </div>
+            </div>
+            <div class="cra-card cra-table-wrap">
+              <table class="findings-table" id="assetsTable">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Type</th>
+                    <th>Owner</th>
+                    <th>Tier</th>
+                    <th>C / I / A</th>
+                    <th>Data Class</th>
+                  </tr>
+                </thead>
+                <tbody id="assetsTbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- RISK REGISTER -->
+          <div class="cra-pane" id="pane-register">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+              <div class="sub" id="registerCount">No findings yet.</div>
+              <div style="display:flex; gap:8px;">
+                <button class="btn" id="btnLibrary" title="Browse the threat scenario library and instantiate a starter finding">📚 Add from Library</button>
+                <button class="btn primary" id="btnAddFinding">+ Add Finding</button>
+              </div>
+            </div>
+            <div class="cra-toolbar" id="registerToolbar">
+              <input type="search" id="regSearch" class="cra-search" placeholder="Search code, title, or owner…" aria-label="Search findings">
+              <div class="filter-pills" id="regStatusPills" role="group" aria-label="Filter by status"></div>
+              <select id="regSeverity" class="cra-select" aria-label="Filter by severity">
+                <option value="all">All severities</option>
+                <option value="critical">Critical</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+              </select>
+            </div>
+            <div class="cra-card cra-table-wrap">
+              <table class="findings-table" id="findingsTable">
+                <thead>
+                  <tr>
+                    <th class="sortable" data-sort="code">Code<span class="sort-ind"></span></th>
+                    <th class="sortable" data-sort="title">Title<span class="sort-ind"></span></th>
+                    <th>Category</th>
+                    <th class="ta-num">L</th><th class="ta-num">I</th>
+                    <th class="sortable ta-num" data-sort="risk">Risk<span class="sort-ind"></span></th>
+                    <th>Owner</th>
+                    <th class="sortable" data-sort="due">Due<span class="sort-ind"></span></th>
+                    <th class="sortable" data-sort="status">Status<span class="sort-ind"></span></th>
+                  </tr>
+                </thead>
+                <tbody id="findingsTbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- CIS RAM WORKBOOK -->
+          <div class="cra-pane" id="pane-cisram">
+            <div class="cra-card" style="margin-bottom:16px">
+              <div style="display:grid; grid-template-columns: 1fr auto auto auto; gap:18px; align-items:center;">
+                <div>
+                  <h3 style="margin:0 0 4px 0">CIS RAM v2.1 IG1 Workbook</h3>
+                  <p class="sub" style="color:var(--text-muted); font-size:0.85rem; margin:0;">
+                    Score each IG1 safeguard, define a treatment plan, and check if it's reasonable under your acceptable risk threshold.
+                  </p>
+                </div>
+                <div style="display:flex; flex-direction:column; align-items:flex-end;">
+                  <label style="font-size:0.75rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.04em;">Acceptable Risk Score</label>
+                  <input id="ramAcceptable" type="number" min="1" max="9" step="1"
+                         style="width:60px; padding:6px 8px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px; font: inherit; text-align:center; background:var(--bg-input, white); color:var(--text-primary);" />
+                </div>
+                <div class="cra-stat-card" style="border-left-color:var(--primary-light); padding:10px 14px; margin:0;">
+                  <div class="label">Scored</div>
+                  <div class="value" id="ramScored" style="font-size:1.2rem">0 / 56</div>
+                </div>
+                <div class="cra-stat-card" style="border-left-color:var(--risk-low, #2f9e6e); padding:10px 14px; margin:0;">
+                  <div class="label">Reasonable</div>
+                  <div class="value" id="ramReasonable" style="font-size:1.2rem">0 / 56</div>
+                </div>
+              </div>
+            </div>
+
+            <div id="ramControls"><!-- 17 control sections rendered here --></div>
+          </div>
+
+          <!-- POA&M (Tier 2) -->
+          <div class="cra-pane" id="pane-poam">
+            <div class="cra-card" style="margin-bottom:14px;">
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div>
+                  <h3 style="margin:0 0 4px 0;">Plan of Action &amp; Milestones (POA&amp;M)</h3>
+                  <div class="sub" style="font-size:0.85rem;">
+                    NIST SP 800-171 / CMMC standard format. One row per open finding, ordered by inherent risk descending. Download as CSV for client submission or import into FedRAMP / CMMC compliance tooling.
+                  </div>
+                </div>
+                <button class="btn primary" id="btnDownloadPoam">⬇ Download POA&amp;M CSV</button>
+              </div>
+            </div>
+            <div class="cra-card cra-table-wrap">
+              <table class="findings-table" id="poamTable">
+                <thead>
+                  <tr>
+                    <th>Weakness ID</th>
+                    <th>Weakness Name</th>
+                    <th>Source</th>
+                    <th>Point of Contact</th>
+                    <th>Scheduled Completion</th>
+                    <th>Risk</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody id="poamTbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- INSURANCE READINESS (Tier 2) -->
+          <div class="cra-pane" id="pane-insurance">
+            <div class="cra-card" style="margin-bottom:14px;">
+              <h3 style="margin:0 0 4px 0;">Cyber-Insurance Readiness</h3>
+              <div class="sub" style="font-size:0.85rem;">
+                Mirrors the underwriting questionnaire used by Coalition, At-Bay, Cowbell, Resilience, and other major carriers. Score &lt; 65 typically triggers a sub-standard or restricted coverage offer; &lt; 45 is grounds for declination.
+              </div>
+            </div>
+            <div class="cra-grid cols-2" style="margin-bottom:16px;">
+              <div class="cra-stat-card" style="border-left-color:var(--primary);">
+                <div class="label">Readiness Score</div>
+                <div class="value" id="insScore">—</div>
+                <div class="hint" id="insScoreHint">of 100 possible points</div>
+              </div>
+              <div class="cra-stat-card" id="insTierTile" style="border-left-color:var(--risk-high, #c43d4b);">
+                <div class="label">Underwriter Tier</div>
+                <div class="value" id="insTier">—</div>
+                <div class="hint" id="insTierHint">— complete the scorecard</div>
+              </div>
+            </div>
+            <div class="cra-card">
+              <h3 style="margin-top:0;">12-Control Scorecard</h3>
+              <p class="sub" style="font-size:0.85rem;">Pick yes / partial / no for each control. The score updates automatically.</p>
+              <div id="insControls"></div>
+              <div style="display:flex; gap:8px; margin-top:12px;">
+                <button class="btn primary" id="btnSaveInsurance">Save Scorecard</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- MATURITY -->
+          <div class="cra-pane" id="pane-maturity">
+            <div class="cra-card">
+              <h3>NIST CSF 2.0 Function Scores</h3>
+              <p class="sub">Pre-filled from CIS IG1 responses (auto). Drag any slider to override; the report will use your manual value.</p>
+              <div id="csfSliders"></div>
+              <div style="display:flex; gap:10px; margin-top:14px;">
+                <button class="btn primary" id="btnSaveCsf">Save CSF Scores</button>
+                <button class="btn" id="btnResetCsf" title="Clear manual overrides — use auto values">Reset to Auto</button>
+              </div>
+            </div>
+            <div class="cra-card" style="margin-top:16px;">
+              <h3>ALE / SLE / ARO Calculator</h3>
+              <p class="sub">Classic quantitative risk formula: <code>SLE = AV × EF</code>, <code>ALE = SLE × ARO</code>. The single most-tested formula on Security+ / CISSP / CISA exams.</p>
+              <div style="display:grid; grid-template-columns: 1fr 1fr 1fr auto; gap:10px; align-items:end;">
+                <label>Asset Value (USD)
+                  <input type="number" id="aleAV" placeholder="500000" style="width:100%; padding:6px 8px; border:1px solid var(--border-color,#e2e8f0); border-radius:6px; font:inherit; background:var(--bg-input,white); color:var(--text-primary);">
+                </label>
+                <label>Exposure Factor (0.0 – 1.0)
+                  <input type="number" id="aleEF" step="0.05" min="0" max="1" placeholder="0.4" style="width:100%; padding:6px 8px; border:1px solid var(--border-color,#e2e8f0); border-radius:6px; font:inherit; background:var(--bg-input,white); color:var(--text-primary);">
+                </label>
+                <label>ARO (events / year)
+                  <input type="number" id="aleARO" step="0.05" min="0" placeholder="0.25" style="width:100%; padding:6px 8px; border:1px solid var(--border-color,#e2e8f0); border-radius:6px; font:inherit; background:var(--bg-input,white); color:var(--text-primary);">
+                </label>
+                <button class="btn primary" id="btnCalcAle">Calculate</button>
+              </div>
+              <div id="aleResult" style="display:none; margin-top:14px; padding:14px; background:var(--bg-table-head,#f8fafc); border-radius:6px;"></div>
+            </div>
+          </div>
+
+          <!-- SNAPSHOTS (Tier 2) -->
+          <div class="cra-pane" id="pane-snapshots">
+            <div class="cra-card" style="margin-bottom:14px;">
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div>
+                  <h3 style="margin:0 0 4px 0;">Engagement Snapshots</h3>
+                  <div class="sub" style="font-size:0.85rem;">
+                    Risk assessment is recurring, not one-and-done. Take a snapshot before implementing recommendations, then re-measure later and watch the delta arrows move the right direction.
+                  </div>
+                </div>
+                <button class="btn primary" id="btnCreateSnapshot">📸 Take Snapshot</button>
+              </div>
+            </div>
+            <div id="snapshotDeltaSection"></div>
+            <div class="cra-card cra-table-wrap" style="margin-top:16px;">
+              <table class="findings-table">
+                <thead>
+                  <tr>
+                    <th>Label</th>
+                    <th>Date</th>
+                    <th>Findings</th>
+                    <th>Critical</th>
+                    <th>IG1 Coverage</th>
+                    <th>Inherent Risk</th>
+                    <th>Notes</th>
+                  </tr>
+                </thead>
+                <tbody id="snapshotsTbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- REPORT -->
+          <div class="cra-pane" id="pane-report">
+            <div class="cra-card">
+              <h3>Executive Summary (Deloitte / CISO board structure)</h3>
+              <p class="sub">Real board reports use a 4-section structure. Each section answers a specific question the board has. Leave any blank to fall back to the legacy single-block summary below.</p>
+              <div class="field">
+                <label><strong>1. Current Posture</strong> — Where is the organization today? <span class="sub">(1 paragraph)</span></label>
+                <textarea id="execCurrentPosture" rows="4" placeholder="e.g. Methow Logistics is a 35-employee Manufacturing firm with a tech-mature-policy-weak posture. CIS IG1 coverage is 47%; CSF maturity is 2.9 of 5; insurance readiness is 'Conditional' tier..." style="width:100%; padding:10px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px; font: inherit; resize: vertical; background: var(--bg-input, white); color: var(--text-primary);"></textarea>
+              </div>
+              <div class="field">
+                <label><strong>2. Top Risks</strong> — What are the 3 most pressing things the board must know about? <span class="sub">(business language, not technical)</span></label>
+                <textarea id="execTopRisks" rows="4" placeholder="e.g. (1) Domain-admin MFA gap means a single phishing click compromises the network; (2) No offsite/immutable backup means ransomware = total data loss; (3) No documented IR plan means the first 4h of any incident will be wasted reading templates..." style="width:100%; padding:10px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px; font: inherit; resize: vertical; background: var(--bg-input, white); color: var(--text-primary);"></textarea>
+              </div>
+              <div class="field">
+                <label><strong>3. Progress</strong> — What has improved since the prior assessment, or what's the baseline? <span class="sub">(1 paragraph)</span></label>
+                <textarea id="execProgress" rows="3" placeholder="e.g. This is the first formal risk assessment of record — baseline established. Recommend re-measuring in 6 months following implementation..." style="width:100%; padding:10px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px; font: inherit; resize: vertical; background: var(--bg-input, white); color: var(--text-primary);"></textarea>
+              </div>
+              <div class="field">
+                <label><strong>4. Decisions Needed</strong> — What does leadership need to explicitly approve / reject? <span class="sub">(budget, policy, staffing, risk acceptance)</span></label>
+                <textarea id="execDecisionsNeeded" rows="5" placeholder="e.g. (1) BUDGET: $35k one-time + $15k/year recurring to lift insurance readiness from Conditional to Insurable; (2) POLICY: formal adoption of the documented IR plan; (3) STAFFING: assign fractional CISO; (4) RISK ACCEPTANCE: written sign-off on the 2 critical findings the board elects to formally accept..." style="width:100%; padding:10px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px; font: inherit; resize: vertical; background: var(--bg-input, white); color: var(--text-primary);"></textarea>
+              </div>
+
+              <details style="margin-top:14px;">
+                <summary style="cursor:pointer; color:var(--text-muted); font-size:0.85rem;">Legacy single-block exec summary (only shown if the 4 sections above are empty)</summary>
+                <textarea id="execSummary" rows="6" style="width:100%; padding:10px; margin-top:8px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px; font: inherit; resize: vertical; background: var(--bg-input, white); color: var(--text-primary);"></textarea>
+              </details>
+
+              <div style="display:flex; gap:10px; margin-top:12px;">
+                <button class="btn primary" id="btnSaveSummary">Save Exec Summary</button>
+                <button class="btn" id="btnFinalize">Mark Final</button>
+              </div>
+            </div>
+
+            <div class="cra-card" style="margin-top:16px;">
+              <h3>Print-Ready Report (recommended)</h3>
+              <p class="sub">Opens a polished HTML version of the report in a new tab. Use your browser's <strong>Print → Save as PDF</strong> to get a clean PDF with embedded charts, proper page breaks, and full Unicode rendering. Best output quality.</p>
+              <button class="btn primary" id="btnOpenHtmlReport">📄 Open HTML Report</button>
+            </div>
+
+            <div class="cra-card" style="margin-top:16px;">
+              <h3>Legacy PDF Export</h3>
+              <p class="sub">Embeds the live charts directly into a server-generated PDF. Faster but layout is less flexible than the HTML report above.</p>
+              <button class="btn" id="btnExport">⬇ Export PDF (legacy)</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Add/Edit finding drawer -->
+  <div class="drawer-backdrop" id="drawerBackdrop"></div>
+  <aside class="drawer" id="drawer">
+    <header>
+      <h3 id="drawerTitle">Add Finding</h3>
+      <button class="btn" id="btnCloseDrawer" aria-label="Close">✕</button>
+    </header>
+    <div class="body">
+      <input type="hidden" id="findingId">
+      <div class="field">
+        <label>Title <span style="color:var(--risk-high, #c43d4b)">*</span></label>
+        <input type="text" id="fTitle" placeholder="e.g., Endpoint MFA gap on remote workers">
+      </div>
+      <div class="field">
+        <label>Description</label>
+        <textarea id="fDescription" placeholder="What you found, where, evidence."></textarea>
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Category</label>
+          <select id="fCategory">
+            <option value="">—</option>
+            <option value="technical">Technical</option>
+            <option value="process">Process</option>
+            <option value="people">People</option>
+            <option value="physical">Physical</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Status</label>
+          <select id="fStatus">
+            <option value="open">Open</option>
+            <option value="accepted">Accepted</option>
+            <option value="mitigated">Mitigated</option>
+            <option value="transferred">Transferred</option>
+          </select>
+        </div>
+      </div>
+      <div class="group-title">Inherent Scoring</div>
+      <div class="row2">
+        <div class="field">
+          <label>Likelihood (1–5)</label>
+          <div class="slider-row">
+            <input type="range" id="fLikelihood" min="1" max="5" value="3" step="1">
+            <span class="val" id="fLikelihoodVal">3</span>
+          </div>
+        </div>
+        <div class="field">
+          <label>Impact (1–5)</label>
+          <div class="slider-row">
+            <input type="range" id="fImpact" min="1" max="5" value="3" step="1">
+            <span class="val" id="fImpactVal">3</span>
+          </div>
+        </div>
+      </div>
+      <div class="group-title">Treatment &amp; Residual Risk</div>
+      <div class="field">
+        <label>Recommendation</label>
+        <textarea id="fRecommendation" placeholder="What you'd advise the client to do."></textarea>
+      </div>
+      <div class="field">
+        <label>Control References (CIS / CSF)</label>
+        <input type="text" id="fControlRefs" placeholder='e.g. CIS_IG1:6.3, NIST_CSF_2_0:PR.AA'>
+        <div class="sub" style="font-size:0.75rem; color:var(--text-muted); margin-top:4px;">Comma-separated. Format: <code>FRAMEWORK:ID</code></div>
+      </div>
+
+      <!-- Residual scoring (Tier 1) -->
+      <div class="row2">
+        <div class="field">
+          <label>Residual Likelihood (after treatment)</label>
+          <div class="slider-row">
+            <input type="range" id="fResLikelihood" min="1" max="5" value="2" step="1">
+            <span class="val" id="fResLikelihoodVal">2</span>
+          </div>
+        </div>
+        <div class="field">
+          <label>Residual Impact (after treatment)</label>
+          <div class="slider-row">
+            <input type="range" id="fResImpact" min="1" max="5" value="2" step="1">
+            <span class="val" id="fResImpactVal">2</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Threat source (NIST 800-30) -->
+      <div class="group-title">Threat &amp; Discovery</div>
+      <div class="row2">
+        <div class="field">
+          <label>Threat Source (NIST 800-30)</label>
+          <select id="fThreatSource">
+            <option value="">—</option>
+            <option value="adversarial">Adversarial (human attacker)</option>
+            <option value="accidental">Accidental (mistake / misconfiguration)</option>
+            <option value="structural">Structural (design / process gap)</option>
+            <option value="environmental">Environmental (natural / physical)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Discovery Method</label>
+          <select id="fDiscoveryMethod">
+            <option value="">—</option>
+            <option value="interview">Interview</option>
+            <option value="document_review">Document Review</option>
+            <option value="technical_scan">Technical Scan</option>
+            <option value="observation">Observation</option>
+            <option value="self_attestation">Self-Attestation</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Owner / Reviewer / Date (Tier 1) -->
+      <div class="group-title">Ownership &amp; Timeline</div>
+      <div class="row2">
+        <div class="field">
+          <label>Owner Role</label>
+          <input type="text" id="fOwnerRole" placeholder="e.g. IT Manager, CFO">
+        </div>
+        <div class="field">
+          <label>Owner Name</label>
+          <input type="text" id="fOwnerName" placeholder="e.g. Sam Tan">
+        </div>
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Reviewer</label>
+          <input type="text" id="fReviewer" placeholder="Who approves remediation completion">
+        </div>
+        <div class="field">
+          <label>Target Completion Date</label>
+          <input type="date" id="fTargetDate">
+        </div>
+      </div>
+
+      <!-- Evidence (Tier 1) -->
+      <div class="group-title">Evidence</div>
+      <div class="field">
+        <label>Evidence Observed</label>
+        <textarea id="fEvidence" placeholder="Specific evidence: 'Saw 3/5 admin accounts without MFA in M365 admin center on 2026-05-23.'"></textarea>
+        <div class="sub" style="font-size:0.75rem; color:var(--text-muted); margin-top:4px;">CMMC / NIST 800-171A assessors require every finding to trace to specific observable evidence.</div>
+      </div>
+
+      <!-- OWASP decomposed scoring (Tier 3, collapsible) -->
+      <details class="field" style="border:1px solid var(--border-color, #e2e8f0); padding:10px; border-radius:6px;">
+        <summary style="cursor:pointer; font-weight:600;">Advanced: OWASP Decomposed Scoring (8 likelihood + 8 impact factors)</summary>
+        <p class="sub" style="font-size:0.8rem; margin:8px 0;">
+          Each factor 0–9. Hover labels for guidance. The system averages the 8 within each side and maps to LOW/MEDIUM/HIGH/CRITICAL via the OWASP 4×4 matrix. Use this when you need to defend a score in a client review.
+        </p>
+        <div id="owaspFactors"></div>
+        <div style="display:flex; gap:8px; margin-top:10px; align-items:center;">
+          <button class="btn" id="btnApplyOwasp" type="button">Compute Severity</button>
+          <span id="owaspResult" style="font-size:0.85rem; color:var(--text-muted);"></span>
+        </div>
+      </details>
+
+      <!-- FAIR quantification (Tier 3, collapsible) -->
+      <details class="field" style="border:1px solid var(--border-color, #e2e8f0); padding:10px; border-radius:6px;">
+        <summary style="cursor:pointer; font-weight:600;">Advanced: FAIR-lite Quantification (Monte Carlo ALE in dollars)</summary>
+        <p class="sub" style="font-size:0.8rem; margin:8px 0;">
+          Optional dollar-denominated risk model. Provide a triangular distribution (min / most-likely / max) for Loss Event Frequency (events per year) and Loss Magnitude (USD per event). Server runs 5,000-iteration Monte Carlo and returns Annualized Loss Expectancy.
+        </p>
+        <div class="row2"><strong style="grid-column:1/-1; font-size:0.75rem; color:var(--text-muted);">Loss Event Frequency (events / year)</strong></div>
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px;">
+          <label>Min<input type="number" id="fairLefMin" step="0.05" placeholder="0.1"></label>
+          <label>Most Likely<input type="number" id="fairLefMode" step="0.05" placeholder="0.3"></label>
+          <label>Max<input type="number" id="fairLefMax" step="0.05" placeholder="1.0"></label>
+        </div>
+        <div class="row2" style="margin-top:8px;"><strong style="grid-column:1/-1; font-size:0.75rem; color:var(--text-muted);">Loss Magnitude (USD per event)</strong></div>
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px;">
+          <label>Min<input type="number" id="fairLmMin" step="1000" placeholder="50000"></label>
+          <label>Most Likely<input type="number" id="fairLmMode" step="1000" placeholder="200000"></label>
+          <label>Max<input type="number" id="fairLmMax" step="1000" placeholder="1500000"></label>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:10px; align-items:center;">
+          <button class="btn" id="btnRunFair" type="button">Run Monte Carlo</button>
+          <span id="fairResult" style="font-size:0.85rem; color:var(--text-muted);"></span>
+        </div>
+      </details>
+    </div>
+    <footer>
+      <button class="btn danger" id="btnDeleteFinding" style="display:none">Delete</button>
+      <div style="flex:1"></div>
+      <button class="btn" id="btnCancelFinding">Cancel</button>
+      <button class="btn primary" id="btnSaveFinding">Save</button>
+    </footer>
+  </aside>
+
+  <!-- Threat Scenario Library modal -->
+  <div class="drawer-backdrop" id="libBackdrop"></div>
+  <aside class="drawer" id="libDrawer" style="width: 640px;">
+    <header>
+      <h3>Threat Scenario Library</h3>
+      <button class="btn" id="btnCloseLib" aria-label="Close">✕</button>
+    </header>
+    <div class="body">
+      <p class="sub" style="margin-top:0;">Browse canonical SMB risk scenarios. Click one to instantiate it as a new finding in your register — you can edit any field afterward.</p>
+      <div style="display:flex; gap:8px; margin-bottom:10px;">
+        <input type="text" id="libSearch" placeholder="Search scenarios…" style="flex:1; padding:8px 10px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px; background:var(--bg-input,white); color:var(--text-primary);">
+        <select id="libCategory" style="padding:8px 10px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px; background:var(--bg-input,white); color:var(--text-primary);">
+          <option value="">All categories</option>
+          <option value="technical">Technical</option>
+          <option value="process">Process</option>
+          <option value="people">People</option>
+          <option value="physical">Physical</option>
+        </select>
+      </div>
+      <div id="libList"></div>
+    </div>
+  </aside>
+
+  <!-- Asset add/edit drawer -->
+  <div class="drawer-backdrop" id="assetBackdrop"></div>
+  <aside class="drawer" id="assetDrawer">
+    <header>
+      <h3 id="assetDrawerTitle">Add Asset</h3>
+      <button class="btn" id="btnCloseAssetDrawer" aria-label="Close">✕</button>
+    </header>
+    <div class="body">
+      <input type="hidden" id="assetId">
+      <div class="field">
+        <label>Name <span style="color:var(--risk-high, #c43d4b)">*</span></label>
+        <input type="text" id="aName" placeholder="e.g. corp-dc-01 / Customer Records / Executive Email">
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Type</label>
+          <select id="aType">
+            <option value="">—</option>
+            <option value="workstation">Workstation</option>
+            <option value="server">Server</option>
+            <option value="network_device">Network Device</option>
+            <option value="saas">SaaS Application</option>
+            <option value="data_store">Data Store</option>
+            <option value="mobile">Mobile Device</option>
+            <option value="iot">IoT Device</option>
+            <option value="process">Business Process</option>
+            <option value="people">People / Role</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Criticality Tier</label>
+          <select id="aCriticality">
+            <option value="">—</option>
+            <option value="1">Tier 1 — Crown Jewel</option>
+            <option value="2">Tier 2 — Important</option>
+            <option value="3">Tier 3 — Standard</option>
+          </select>
+        </div>
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Owner Role</label>
+          <input type="text" id="aOwner" placeholder="e.g. IT Manager, CFO">
+        </div>
+        <div class="field">
+          <label>Custodian (named person)</label>
+          <input type="text" id="aCustodian" placeholder="e.g. Sam Tan">
+        </div>
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Hostname / Identifier</label>
+          <input type="text" id="aHostname" placeholder="corp-dc-01">
+        </div>
+        <div class="field">
+          <label>IP Address</label>
+          <input type="text" id="aIp" placeholder="10.0.0.5">
+        </div>
+      </div>
+      <div class="field">
+        <label>Data Classification</label>
+        <select id="aDataClass">
+          <option value="">—</option>
+          <option value="Public">Public</option>
+          <option value="Internal">Internal</option>
+          <option value="Confidential">Confidential</option>
+          <option value="Restricted">Restricted</option>
+          <option value="Unknown">Unknown</option>
+        </select>
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Confidentiality (1–3)</label>
+          <div class="slider-row">
+            <input type="range" id="aConf" min="1" max="3" value="2" step="1">
+            <span class="val" id="aConfVal">2</span>
+          </div>
+        </div>
+        <div class="field">
+          <label>Integrity (1–3)</label>
+          <div class="slider-row">
+            <input type="range" id="aInteg" min="1" max="3" value="2" step="1">
+            <span class="val" id="aIntegVal">2</span>
+          </div>
+        </div>
+      </div>
+      <div class="field">
+        <label>Availability (1–3)</label>
+        <div class="slider-row">
+          <input type="range" id="aAvail" min="1" max="3" value="2" step="1">
+          <span class="val" id="aAvailVal">2</span>
+        </div>
+      </div>
+      <div class="field">
+        <label>Description</label>
+        <textarea id="aDescription" placeholder="What this asset does + why it matters."></textarea>
+      </div>
+    </div>
+    <footer>
+      <button class="btn danger" id="btnDeleteAsset" style="display:none">Delete</button>
+      <div style="flex:1"></div>
+      <button class="btn" id="btnCancelAsset">Cancel</button>
+      <button class="btn primary" id="btnSaveAsset">Save</button>
+    </footer>
+  </aside>
+
+  <!-- Intake breakdown drawer (opened from the CIS IG1 Coverage card) -->
+  <div class="drawer-backdrop" id="intakeBackdrop"></div>
+  <aside class="drawer" id="intakeDrawer" style="width: 720px;">
+    <header>
+      <h3 id="intakeDrawerTitle">Client Intake Form</h3>
+      <button class="btn" id="btnCloseIntake" aria-label="Close">✕</button>
+    </header>
+    <div class="body" id="intakeBody">
+      <div class="empty-state">Loading…</div>
+    </div>
+  </aside>
+
+  <div class="cra-toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="/ciab/vendor/echarts.min.js"></script>
+  <script src="/js/app.js"></script>
+  <script src="/js/layout.js"></script>
+  <script src="/ciab/js/clinic-risk-assessment.js"></script>
+</body>
+</html>

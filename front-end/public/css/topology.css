@@ -1,0 +1,390 @@
+/* ==========================================================================
+   topology.css — the topology canvas, its palette, and the property panel.
+
+   Follows main.css conventions: semantic custom properties only, no hard-coded
+   colours, so both themes work without a second stylesheet. The canvas itself
+   is drawn by Cytoscape and resolves its own colours from these same tokens
+   (see topology-render.js readTheme) — keep the two in step.
+   ========================================================================== */
+
+/* ── layout ─────────────────────────────────────────────────────────────── */
+
+.topo-wrap {
+  display: grid;
+  grid-template-columns: 190px 1fr 240px;
+  gap: 0;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  overflow: hidden;
+  background: var(--bg-card);
+  min-height: 460px;
+}
+
+/* One column under ~900px: palette on top, canvas, then panel. */
+@media (max-width: 900px) {
+  .topo-wrap { grid-template-columns: 1fr; }
+  .topo-palette, .topo-panel { max-height: 200px; }
+  .topo-canvas { min-height: 320px; }
+}
+
+.topo-palette,
+.topo-panel {
+  background: var(--bg-card-hover);
+  overflow-y: auto;
+  max-height: 520px;
+}
+.topo-palette { border-right: 1px solid var(--border-color); }
+.topo-panel   { border-left:  1px solid var(--border-color); }
+
+.topo-canvas {
+  position: relative;
+  min-height: 460px;
+  background:
+    radial-gradient(circle at 1px 1px, var(--border-color) 1px, transparent 0)
+    0 0 / 22px 22px;
+}
+
+/* Cytoscape sizes itself to this element, so it must have real dimensions
+   before create() runs — a zero-height container renders an empty graph. */
+.topo-canvas > .topo-cy { position: absolute; inset: 0; }
+
+/* ── section headers ────────────────────────────────────────────────────── */
+
+.topo-section-title {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 0.6rem 0.7rem 0.35rem;
+  position: sticky;
+  top: 0;
+  background: var(--bg-card-hover);
+  z-index: 1;
+}
+
+/* ── palette ────────────────────────────────────────────────────────────── */
+
+.topo-palette-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.7rem;
+  cursor: grab;
+  font-size: 0.78rem;
+  color: var(--text-primary);
+  border-left: 3px solid transparent;
+  transition: var(--transition);
+}
+.topo-palette-item:hover {
+  background: var(--bg-card);
+  border-left-color: var(--primary);
+}
+.topo-palette-item:active { cursor: grabbing; }
+.topo-palette-item img { width: 20px; height: 20px; flex: 0 0 20px; opacity: 0.85; }
+.topo-palette-item .topo-pi-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.topo-palette-item .topo-pi-vmid {
+  margin-left: auto;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.topo-palette-empty {
+  padding: 0.7rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+/* ── property panel ─────────────────────────────────────────────────────── */
+
+.topo-field { padding: 0 0.7rem 0.5rem; }
+.topo-field label {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 0.15rem;
+}
+.topo-field input,
+.topo-field select {
+  width: 100%;
+  padding: 0.3rem 0.4rem;
+  font-size: 0.78rem;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+.topo-field input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.topo-field-hint {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  margin-top: 0.15rem;
+  line-height: 1.35;
+}
+
+.topo-panel-empty {
+  padding: 0.9rem 0.7rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+/* ── toolbar ────────────────────────────────────────────────────────────── */
+
+.topo-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-card-hover);
+}
+.topo-toolbar .topo-spacer { margin-left: auto; }
+.topo-toolbar .topo-hint {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+/* ── validation report ──────────────────────────────────────────────────── */
+
+.topo-findings { padding: 0.5rem 0.6rem; display: grid; gap: 0.3rem; }
+.topo-finding {
+  display: flex;
+  gap: 0.45rem;
+  align-items: flex-start;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  padding: 0.35rem 0.5rem;
+  border-radius: 4px;
+  border-left: 3px solid var(--border-color);
+  background: var(--bg-card-hover);
+  color: var(--text-secondary);
+}
+.topo-finding.is-error   { border-left-color: var(--danger);  }
+.topo-finding.is-warning { border-left-color: var(--warning); }
+.topo-finding .topo-finding-vm {
+  font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+.topo-findings-ok {
+  padding: 0.5rem 0.6rem;
+  font-size: 0.75rem;
+  color: var(--success);
+}
+
+/* ── legend ─────────────────────────────────────────────────────────────── */
+
+.topo-legend {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.4rem 0.6rem;
+  border-top: 1px solid var(--border-color);
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  background: var(--bg-card-hover);
+}
+.topo-legend span { display: inline-flex; align-items: center; gap: 0.3rem; }
+.topo-legend i {
+  width: 18px;
+  height: 0;
+  border-top: 2px dashed currentColor;
+  display: inline-block;
+}
+.topo-legend .topo-lg-ext { color: #f59e0b; }
+.topo-legend .topo-lg-int { color: #378dbd; }
+/* The student's console machine. SOLID, not dashed: it marks a node border,
+   not a broadcast domain, and must not read as a third network segment.
+   Colour tracks --success so it matches theme.success in topology-render.js. */
+.topo-legend .topo-lg-console {
+  border-top-style: solid;
+  border-top-width: 3px;
+  color: var(--success, #4f9153);
+}
+
+/* ==========================================================================
+   Topology TAB (admin.html #tab-topology)
+   --------------------------------------------------------------------------
+   Everything above is shared with the challenge-editor modal and the live-lane
+   modal — nothing above this line may change, or those two break. These rules
+   only ADD: a taller canvas for a full page, a single-column read-only variant,
+   and the chrome the tab needs that a modal does not (seed bar, settings form,
+   mode switch).
+   ========================================================================== */
+
+/* A full page can afford more canvas than a modal can. Scoped to .topo-page so
+   the modal keeps the 460px it was designed around. */
+.topo-page .topo-wrap,
+.topo-page .topo-canvas { min-height: 560px; }
+.topo-page .topo-palette,
+.topo-page .topo-panel  { max-height: 620px; }
+
+/* Read-only viewer: no palette to drag from, no properties to edit. */
+.topo-wrap--view { grid-template-columns: 1fr; }
+
+/* ── mode switch (Designer | Viewer) ────────────────────────────────────── */
+
+.topo-modebar {
+  display: flex;
+  gap: 0.4rem;
+  margin-bottom: 1rem;
+}
+
+/* ── seed bar — "start from …" ──────────────────────────────────────────── */
+
+.topo-seedbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 0.75rem;
+  margin-bottom: 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  background: var(--bg-card-hover);
+}
+.topo-seedbar label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin: 0;
+}
+.topo-seedbar select {
+  padding: 0.3rem 0.4rem;
+  font-size: 0.78rem;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  max-width: 320px;
+}
+
+/* ── challenge settings ─────────────────────────────────────────────────── */
+
+.topo-settings {
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  padding: 0.75rem 1rem;
+  margin-bottom: 0.75rem;
+  background: var(--bg-card);
+}
+.topo-settings > summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+.topo-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+.topo-settings-grid .topo-settings-wide { grid-column: 1 / -1; }
+@media (max-width: 900px) {
+  .topo-settings-grid { grid-template-columns: 1fr 1fr; }
+}
+.topo-settings-grid label {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 0.15rem;
+}
+.topo-settings-grid input,
+.topo-settings-grid select,
+.topo-settings-grid textarea {
+  width: 100%;
+  padding: 0.35rem 0.45rem;
+  font-size: 0.8rem;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: inherit;
+}
+.topo-settings-hint {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  margin: 0.15rem 0 0;
+  line-height: 1.35;
+}
+/* A field-level problem from validateCreateState, rendered next to its input. */
+.topo-field-error {
+  font-size: 0.7rem;
+  color: var(--danger);
+  margin-top: 0.15rem;
+  line-height: 1.35;
+}
+.topo-settings-grid input.is-invalid,
+.topo-settings-grid select.is-invalid { border-color: var(--danger); }
+
+/* ── viewer header ──────────────────────────────────────────────────────── */
+
+.topo-viewbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 0.75rem;
+  margin-bottom: 0.5rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  background: var(--bg-card-hover);
+}
+.topo-viewbar .topo-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.topo-viewbar select {
+  flex: 1 1 260px;
+  padding: 0.3rem 0.4rem;
+  font-size: 0.78rem;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+.topo-viewmeta {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin: 0 0 0.5rem;
+  min-height: 1.1em;
+}
+
+/* ── create action ──────────────────────────────────────────────────────── */
+
+.topo-createbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-top: 1rem;
+}
+.topo-createstatus {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+  flex: 1 1 320px;
+}
+.topo-createstatus code {
+  font-size: 0.75rem;
+  background: var(--bg-card-hover);
+  padding: 0.05rem 0.25rem;
+  border-radius: 3px;
+}

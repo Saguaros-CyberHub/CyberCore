@@ -1,0 +1,11 @@
+---
+# Handlers are addressed by `listen`, not by name. A task that notifies a
+# handler by NAME breaks the moment the handler is renamed, and ansible does not
+# error on a notify that matches nothing — it just never restarts, which leaves
+# the running server on the old config while every task reports green. That is
+# the exact silent-success shape this role exists to avoid.
+- name: Restart the cc_web engine
+  ansible.builtin.service:
+    name: "{{ cc_web_service_name }}"
+    state: restarted
+  listen: cc_web restart

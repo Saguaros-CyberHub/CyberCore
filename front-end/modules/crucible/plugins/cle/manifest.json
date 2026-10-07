@@ -1,0 +1,37 @@
+{
+    "key": "cle",
+    "name": "Cyber Learning Environment",
+    "icon": "\ud83c\udf93",
+    "description": "Instructor tools for managing class environments",
+    "entry_url": "/cle/dashboard",
+    "category": "plugin",
+    "color": "#9f7aea",
+    "active": true,
+    "display_order": 1,
+    "parent_module": "crucible",
+    "routes": [
+        {
+            "file": "routes/pages.js",
+            "mountPath": "/cle"
+        },
+        {
+            "file": "routes/api.js",
+            "mountPath": "/"
+        }
+    ],
+    "staticDir": "public",
+    "staticMountPath": "/cle",
+    "database": {
+        "name": "cle_db",
+        "migrations": "migrations"
+    },
+    "subnav": {
+        "label": "Cyber Learning Environment",
+        "items": [
+            { "label": "Instructor Dashboard", "icon": "\ud83d\udcca", "url": "/cle/dashboard", "page": "dashboard", "roles": ["instructor", "admin"] },
+            { "label": "Courses",             "icon": "\ud83d\udcd1", "url": "/cle/courses",   "page": "courses",   "roles": ["instructor", "admin"] },
+            { "label": "Students",            "icon": "\ud83d\udc65", "url": "/cle/students",  "page": "students",  "roles": ["instructor", "admin"] },
+            { "label": "Session Log",         "icon": "\ud83d\udccb", "url": "/cle/sessions",  "page": "sessions",  "roles": ["instructor", "admin"] }
+        ]
+    }
+}

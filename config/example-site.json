@@ -17,6 +17,40 @@
     "physical_hardware_allocation_per_node": {
       "ram_gb": 256,
       "cpu_cores": 64
+    },
+    "scheduling": {
+      "_comment": "Placement thresholds. excluded_nodes are cluster members that must receive NO new lanes -- the case this was built for is a node still doing Ceph backfill, where `pct clone` and `pct start` lose the race for the udev-created /dev/rbd-pve/<fsid>/<pool>/<image> symlink and every lane scheduled there dies with 'Failed to run lxc.hook.pre-start ... status 32' three to five minutes into the deploy. Exclusion stops NEW placements only; lanes already on the node keep running, which is why this exists instead of just taking the node offline in Proxmox. It is the ONLY thing that helps: node-selector scores on FREE capacity, so a node doing nothing but backfill looks like the emptiest machine in the cluster and gets picked FIRST, then the next lane, and the next. site.json is bind-mounted :ro as a single file, so edit it in place on the host and restart the app -- the config is read at require time and nothing re-reads it.",
+      "excluded_nodes": [],
+      "min_free_mem_gb": 8,
+      "min_free_disk_gb": 20,
+      "max_concurrent_lanes": 5,
+      "max_concurrent_clones": 4,
+      "node_score_weights": { "cpu": 0.35, "mem": 0.55, "disk": 0.10 },
+      "_comment_bridge_wait_s": "How long a BACKGROUND lane deploy waits for at least one schedulable node to have the lane's SDN VNet bridge(s) up, before failing with BRIDGES_NOT_ON_ANY_NODE. `PUT /cluster/sdn` does not create bridges -- it makes every node queue its own 'SRV Networking' reload (ifreload -a), and on this cluster (hundreds of VNets in the shared ciabprof zone) those land minutes to HOURS apart. A node that has not finished is SKIPPED for this placement, not quarantined and not recorded: readiness only ever improves, so the next deploy asks again. This is what makes a new environment deployable as soon as ONE node has finished instead of after the slowest. The two synchronous admin routes (POST /api/admin/deploy-lane, POST /deploy-lab-network) use a fixed 15s instead, because an HTTP request cannot sit open for minutes.",
+      "bridge_wait_s": 300
+    },
+    "networking": {
+      "_comment": "Lane network topology. Absent here until now, which meant the hardcoded defaults in front-end/src/utils/site-config.js were the only record of the live contract.",
+      "v2_lab_network": {
+        "_comment": "Shared transit VLAN every v2/v3 lane gateway wan0 lands on. ONE ADDRESS PER LIVE LANE, so this prefix is the hard ceiling on concurrent lanes. Declare the block in `subnet`; `cidr` is DERIVED and means the suffix concatenated onto a gateway net0 address, so putting a block there renders ip=100.100.60.32100.100.60.0/22. Widening requires the matching prefix on the OPNsense VLAN-60 interface FIRST, or new lanes come up with no route and the deploy still reports success.",
+        "bridge": "vmbr0",
+        "vlan_tag": 60,
+        "subnet": "100.100.60.0/22",
+        "gateway": "100.100.60.1",
+        "host_range": {
+          "first": "100.100.60.10",
+          "last": "100.100.63.254"
+        },
+        "reserved_comment": "Addresses the allocator must never hand out. The subnet gateway, network and broadcast are excluded automatically; list anything else on this VLAN that CyberCore does not manage.",
+        "reserved": [],
+        "probe": {
+          "_comment": "Before committing an address the allocator arpings it from a cluster node. `interface` MUST be the tagged VLAN device (vmbr0.60), not the bare bridge: vmbr0 carries VLAN 60 only as tagged frames for guests, so an untagged probe never sees a lane gateway and reports every address free. If arping or the interface is missing the allocator REFUSES rather than guessing; set enabled=false to allocate from the database alone.",
+          "enabled": true,
+          "node": null,
+          "interface": "vmbr0.60",
+          "timeout_ms": 2000
+        }
+      }
     }
   },
   "cyberhub": {

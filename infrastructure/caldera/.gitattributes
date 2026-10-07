@@ -1,0 +1,9 @@
+# Docker builds from the WORKING TREE, not from the object database, and this
+# repository is developed on Windows with core.autocrlf=true. Without these
+# lines a fresh clone checks entrypoint.sh out with CRLF endings, the kernel
+# reads the shebang as "/bin/sh\r", and the container dies with
+# "no such file or directory" — naming a file that plainly exists.
+*.sh        text eol=lf
+*.py        text eol=lf
+*.yml       text eol=lf
+Dockerfile  text eol=lf
