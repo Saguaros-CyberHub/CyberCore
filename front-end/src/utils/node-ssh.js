@@ -1,0 +1,291 @@
+/**
+ * ============================================================================
+ * Proxmox node SSH helpers — for operations that have no HTTPS API equivalent
+ * ============================================================================
+ *
+ * The Proxmox HTTPS API covers VM/LXC lifecycle, storage, SDN, networks,
+ * cluster ops, and (for QEMU only) guest-agent exec. For LXC containers
+ * there is no `/exec` API endpoint — to run commands inside an LXC you must
+ * SSH into the Proxmox node and use `pct exec`. Same for `pct push`.
+ *
+ * This module wraps that pattern using the `ssh` and `scp` CLIs (no npm
+ * dependency). The host running this Node app needs:
+ *
+ *   1. The `ssh` and `scp` clients on PATH (standard openssh-client).
+ *   2. A passwordless SSH key set up to the Proxmox nodes as a user with
+ *      privileges to run `pct exec` (typically root).
+ *
+ * Configure via env:
+ *
+ *   PROXMOX_SSH_USER  — SSH user on Proxmox nodes (default: root)
+ *   PROXMOX_SSH_KEY   — path to the private key (default: ~/.ssh/id_ed25519)
+ *
+ * Usage:
+ *
+ *   const { pctExec, pctPush } = require('./node-ssh');
+ *   const out = await pctExec('cyberhub-node-3', 110120, ['ls', '/etc']);
+ *   await pctPush('cyberhub-node-3', 110120, '/local/file', '/inside/lxc/file');
+ *
+ * Errors throw with stderr included so callers can log usefully.
+ * ============================================================================
+ */
+
+const { spawn } = require('child_process');
+const path = require('path');
+const os = require('os');
+const fs = require('fs');
+
+const { getNodeAddress } = require('./site-config');
+
+const SSH_USER = process.env.PROXMOX_SSH_USER || 'root';
+const SSH_KEY  = process.env.PROXMOX_SSH_KEY  || path.join(os.homedir(), '.ssh', 'id_ed25519');
+
+/**
+ * The address to actually open a socket to for a Proxmox node.
+ *
+ * Proxmox names its nodes ('cyberhub-node-2') and every caller here passes that
+ * name straight through from the API. In the container those names do not
+ * resolve — its resolvers are 1.1.1.1 and the lab DNS, and neither serves the
+ * cluster's node records, so ssh fails with "Could not resolve hostname" before
+ * it ever reaches the key. site.json already carries the name → IP map, so use
+ * it and fall back to the bare name for anything not declared there (a
+ * single-node dev box where the name IS resolvable).
+ */
+function nodeAddress(node) {
+  try {
+    return getNodeAddress(node) || node;
+  } catch (_) {
+    return node;    // site.json unreadable — let ssh try the name and report it
+  }
+}
+
+/** Whether site.json declares a management address for this node. */
+function nodeIsDeclared(node) {
+  try { return !!getNodeAddress(node); } catch (_) { return false; }
+}
+
+/**
+ * One-line preflight so a misconfigured SSH channel reports the actual cause.
+ * Without it the failure surfaces as ssh's own "Identity file ... not
+ * accessible" warning buried in stderr, alongside a non-zero exit that reads
+ * like a remote problem.
+ */
+function assertKeyReadable() {
+  try {
+    fs.accessSync(SSH_KEY, fs.constants.R_OK);
+  } catch (_) {
+    throw new Error(
+      `SSH key '${SSH_KEY}' is missing or unreadable — the orchestrator cannot run ` +
+      `commands on cluster nodes. Set PROXMOX_SSH_KEY to a key mounted into the ` +
+      `container, and PROXMOX_SSH_USER if it is not '${SSH_USER}'.`
+    );
+  }
+}
+
+const SSH_FLAGS = [
+  '-i', SSH_KEY,
+  '-o', 'StrictHostKeyChecking=no',
+  '-o', 'UserKnownHostsFile=/dev/null',
+  '-o', 'BatchMode=yes',
+  '-o', 'ConnectTimeout=10',
+  '-o', 'ServerAliveInterval=30'
+];
+
+/**
+ * ssh's exit code, decoded into something a caller can branch on.
+ *
+ * 255 is AMBIGUOUS, and assuming otherwise is how this hint used to mislead.
+ * ssh returns 255 for its OWN failures (unresolvable host, auth refused,
+ * connection closed) -- but it also returns whatever the remote command
+ * returned, and `pct exec` against a stopped container exits 255 too. A real
+ * case: a gateway that failed to boot produced
+ *
+ *     nodeExec exit 255 ... pct exec 110811 -- /bin/sh -c mkdir -p /etc/dnsmasq.d
+ *     ssh could not reach 'cyberhub-node-8' ... check authorized_keys
+ *     container '110811' not running!
+ *
+ * ssh had connected fine. The cause was printed two lines under a hint pointing
+ * at SSH keys, and that is where the reader goes first.
+ *
+ * So: only claim an ssh-layer fault when ssh's OWN stderr says so. Anything else
+ * reached the node, and the remote output is the answer.
+ *
+ * The classification used to live inline in nodeExec's close handler and exist
+ * only inside the human-readable message, which meant no caller could act on
+ * it. challenge-lane-deployer.js printed "Check PROXMOX_SSH_KEY /
+ * PROXMOX_SSH_USER" on a node-8 deploy where ssh was perfectly healthy and the
+ * gateway LXC simply had not started -- it had no way to tell the two apart
+ * short of regexing the message it was handed. Hence the pure function and the
+ * three boolean tags stamped onto the thrown Error.
+ *
+ * Returns { reachedRemote, sshLayer, remoteNotRunning, hint }; hint is '' for
+ * any exit code other than 255, and otherwise carries a leading newline so it
+ * can be concatenated straight into an error message.
+ */
+function classifyExit({ code, stdout, stderr, node }) {
+  const out = stdout == null ? '' : String(stdout);
+  const err = stderr == null ? '' : String(stderr);
+
+  const SSH_LAYER = /ssh: connect to host|Could not resolve hostname|Permission denied|Host key verification failed|Connection (refused|timed out|closed) by|No route to host|Operation timed out/i;
+  const reachedRemote = code === 255 && !SSH_LAYER.test(err);
+  const sshLayer = code === 255 && !reachedRemote;
+
+  // pct prints exactly `container '110881' not running!`, on stderr from
+  // `pct exec` but on stdout from some of its siblings, so look at both.
+  const remoteNotRunning = /container '?\d+'? not running/i.test(`${err}\n${out}`);
+
+  let hint = '';
+  if (sshLayer) {
+    hint = nodeIsDeclared(node)
+      ? `\nssh could not reach '${node}' (${nodeAddress(node)}). It IS declared in site.json, so check that the orchestrator's public key is in ${SSH_USER}@${node}:~/.ssh/authorized_keys and that the node is up.`
+      : `\n'${node}' is NOT declared in site.json cluster.physical_cluster_ips, so ssh was handed the bare name and could not resolve it. Node selection reads the LIVE Proxmox cluster, so a newly joined node becomes schedulable BEFORE this map knows about it. Add the node and restart the app.`;
+  } else if (reachedRemote) {
+    // Surface the remote's own words instead of a theory about ssh.
+    const remote = (err.trim() || out.trim()).split(`\n`).filter(Boolean).pop() || '';
+    hint = remote
+      ? `\nssh connected; the REMOTE command failed: ${remote}`
+      : `\nssh connected, but the remote command exited 255 with no output.`;
+  }
+
+  return { reachedRemote, sshLayer, remoteNotRunning, hint };
+}
+
+/**
+ * Single-quote one argument for a POSIX shell.
+ *
+ * ssh does not exec its trailing arguments remotely — it joins them with plain
+ * spaces into ONE string and hands that to the remote shell to re-split. So an
+ * argument like `mkdir -p /etc/dnsmasq.d`, passed here as a single array
+ * element (the payload of `/bin/sh -c <this>`), loses that grouping the moment
+ * ssh joins it with its neighbors — the remote shell sees `-p` and the path as
+ * separate words, no different from `pct exec ... --`, instead of part of the
+ * `-c` string. Quoting every element before the join makes ssh's rejoin
+ * produce a string that re-splits back into exactly the elements we started
+ * with, no matter how many words are inside any one of them.
+ */
+function shQuote(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Run a command via ssh on a Proxmox node. Returns { stdout, stderr, code }.
+ * Throws on non-zero exit (so callers can use try/catch). Pass timeoutMs to
+ * abort runaway commands; default 5 minutes.
+ */
+function nodeExec(node, args, opts = {}) {
+  const timeoutMs = opts.timeoutMs ?? 5 * 60 * 1000;
+  return new Promise((resolve, reject) => {
+    try { assertKeyReadable(); } catch (e) { return reject(e); }
+    const cmd = ['ssh', ...SSH_FLAGS, `${SSH_USER}@${nodeAddress(node)}`, '--', ...args.map(shQuote)];
+    const child = spawn(cmd[0], cmd.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    let killed = false;
+    const t = setTimeout(() => { killed = true; child.kill('SIGKILL'); }, timeoutMs);
+
+    child.stdout.on('data', d => { stdout += d.toString('utf8'); });
+    child.stderr.on('data', d => { stderr += d.toString('utf8'); });
+    child.on('error', err => { clearTimeout(t); reject(err); });
+    child.on('close', code => {
+      clearTimeout(t);
+      if (killed) return reject(new Error(`nodeExec timed out after ${timeoutMs}ms on ${node}: ${args.join(' ')}`));
+      if (code !== 0) {
+        const { reachedRemote, sshLayer, remoteNotRunning, hint } =
+          classifyExit({ code, stdout, stderr, node });
+        const e = new Error(
+          `nodeExec exit ${code} on ${node}: ${args.join(' ')}${hint}\nstderr: ${stderr.trim()}\nstdout: ${stdout.trim()}`
+        );
+        e.code = code; e.stdout = stdout; e.stderr = stderr;
+        // Tags, not prose: challenge-lane-deployer.js branches on these to decide
+        // whether to re-check the container's state or blame the SSH channel.
+        e.reachedRemote = reachedRemote; e.sshLayer = sshLayer; e.remoteNotRunning = remoteNotRunning;
+        return reject(e);
+      }
+      resolve({ stdout, stderr, code });
+    });
+  });
+}
+
+/**
+ * Run a command inside an LXC via `pct exec`.
+ *   pctExec('cyberhub-node-3', 110120, ['/bin/sh', '-c', 'echo hi'])
+ * The LXC must be running. Stdin is closed; for stdin-fed commands use
+ * pctExecWithStdin().
+ */
+function pctExec(node, vmid, args, opts = {}) {
+  return nodeExec(node, ['pct', 'exec', String(vmid), '--', ...args], opts);
+}
+
+/**
+ * Run a command inside an LXC with a stdin payload. Used for writing files
+ * via heredoc-style: pctExecWithStdin(node, vmid, ['tee', '/etc/foo.conf'], 'file contents').
+ */
+function pctExecWithStdin(node, vmid, args, stdinData, opts = {}) {
+  const timeoutMs = opts.timeoutMs ?? 5 * 60 * 1000;
+  return new Promise((resolve, reject) => {
+    try { assertKeyReadable(); } catch (e) { return reject(e); }
+    const cmd = ['ssh', ...SSH_FLAGS, `${SSH_USER}@${nodeAddress(node)}`, '--',
+                 ...['pct', 'exec', String(vmid), '--', ...args].map(shQuote)];
+    const child = spawn(cmd[0], cmd.slice(1), { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    let killed = false;
+    const t = setTimeout(() => { killed = true; child.kill('SIGKILL'); }, timeoutMs);
+
+    child.stdout.on('data', d => { stdout += d.toString('utf8'); });
+    child.stderr.on('data', d => { stderr += d.toString('utf8'); });
+    child.on('error', err => { clearTimeout(t); reject(err); });
+    child.on('close', code => {
+      clearTimeout(t);
+      if (killed) return reject(new Error(`pctExecWithStdin timed out after ${timeoutMs}ms on ${node}/${vmid}`));
+      if (code !== 0) {
+        // This path used to throw with no hint at all, which mattered more than it
+        // looks: pctPushFromString runs pctExec (mkdir -p) and then THIS (cat >
+        // file), so on a gateway that never started, whichever of the two got
+        // there first is the one that reports it. Half the time that was this
+        // function, and it reported a bare "exit 255" with the container's own
+        // "not running!" line buried in stderr and nothing pointing at it.
+        const { reachedRemote, sshLayer, remoteNotRunning, hint } =
+          classifyExit({ code, stdout, stderr, node });
+        const e = new Error(`pctExecWithStdin exit ${code} on ${node}/${vmid}: ${args.join(' ')}${hint}\nstderr: ${stderr.trim()}`);
+        e.code = code; e.stdout = stdout; e.stderr = stderr;
+        e.reachedRemote = reachedRemote; e.sshLayer = sshLayer; e.remoteNotRunning = remoteNotRunning;
+        return reject(e);
+      }
+      resolve({ stdout, stderr, code });
+    });
+
+    if (stdinData != null) child.stdin.write(stdinData);
+    child.stdin.end();
+  });
+}
+
+/**
+ * Push a local file into an LXC's filesystem via `pct push`. The local file
+ * must be on the same Proxmox node where the LXC runs. For files originating
+ * on the orchestrator host (this Node app), this is two-step:
+ *   1. scp from app host to node:/tmp/...
+ *   2. pct push from node:/tmp/... to LXC:/...
+ *
+ * pctPushFromString writes the inline content directly via pctExecWithStdin
+ * (no host-side temp file). Use that for small (<1MB) text payloads.
+ */
+async function pctPushFromString(node, vmid, content, destPath, opts = {}) {
+  // Ensure destination directory exists, then tee the content in.
+  const dir = destPath.substring(0, destPath.lastIndexOf('/')) || '/';
+  await pctExec(node, vmid, ['/bin/sh', '-c', `mkdir -p ${dir}`], opts);
+  await pctExecWithStdin(node, vmid,
+    ['/bin/sh', '-c', `cat > ${destPath}`],
+    content,
+    opts);
+}
+
+module.exports = {
+  nodeExec,
+  pctExec,
+  pctExecWithStdin,
+  pctPushFromString,
+  classifyExit,
+  SSH_USER,
+  SSH_KEY
+};

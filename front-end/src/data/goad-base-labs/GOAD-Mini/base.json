@@ -1,0 +1,48 @@
+{
+  "schema_version": 2,
+  "lab": "GOAD-Mini",
+  "chain": [
+    "build.yml",
+    "ad-servers.yml",
+    "ad-parent_domain.yml",
+    "ad-data.yml",
+    "ad-relations.yml",
+    "adcs.yml",
+    "ad-acl.yml",
+    "security.yml",
+    "vulnerabilities.yml"
+  ],
+  "stock": {
+    "forest_root": "sevenkingdoms.local",
+    "root_dn": "DC=sevenkingdoms,DC=local",
+    "netbios": "SEVENKINGDOMS",
+    "first_label": "sevenkingdoms",
+    "hosts": {
+      "dc01": {
+        "hostname": "kingslanding",
+        "roster_name": "DC01",
+        "domain": "sevenkingdoms.local"
+      }
+    }
+  },
+  "lab_definition": {
+    "displayName": "GOAD-Mini (1 Win VM, single domain)",
+    "description": "Minimal AD lab \u2014 just DC01. Fastest to deploy (~10 min).",
+    "forestRoot": "sevenkingdoms.local",
+    "domains": [
+      "sevenkingdoms.local"
+    ],
+    "childSubdomain": null,
+    "vms": [
+      {
+        "name": "DC01",
+        "role": "dc",
+        "os": "Windows Server 2019",
+        "template_vmid": 1004,
+        "ipOctet": 10,
+        "nic_model": "e1000"
+      }
+    ]
+  },
+  "controller_recipe": "GOAD-Mini"
+}

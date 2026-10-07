@@ -1,0 +1,2265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CyberHub Admin</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <link rel="stylesheet" href="/css/topology.css">
+  <link rel="stylesheet" href="/css/admin-wazuh.css">
+  <style>
+    /* Admin Dashboard Styles */
+    .admin-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+    .stat-card {
+      background: var(--bg-card, white);
+      border-radius: 12px;
+      padding: 1.25rem;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+    .stat-icon {
+      width: 48px; height: 48px;
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.3rem;
+    }
+    .stat-icon.guac { background: linear-gradient(135deg, #38a169, #2f855a); }
+    .stat-icon.proxmox { background: linear-gradient(135deg, #e8692a, #c0511a); }
+    .stat-icon.conn { background: linear-gradient(135deg, var(--primary-light, #1e5288), var(--primary, #0c234b)); }
+    .stat-icon.users { background: linear-gradient(135deg, var(--accent-red, #ab0520), var(--accent-red-dark, #8b0015)); }
+    .stat-icon.active { background: linear-gradient(135deg, #ed8936, #dd6b20); }
+    .stat-content h3 { font-size: 1.6rem; font-weight: 700; color: var(--gray-900); margin: 0; }
+    .stat-content p { font-size: 0.85rem; color: var(--gray-500); margin: 0.2rem 0 0; }
+
+    /* Tabs */
+    .tabs { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; border-bottom: 2px solid var(--border-color); padding-bottom: 0; }
+    .tab-btn {
+      padding: 0.6rem 1.2rem; border: none; background: none;
+      font-size: 0.9rem; font-weight: 500; color: var(--gray-500);
+      cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px;
+      transition: all 0.2s;
+    }
+    .tab-btn:hover { color: var(--gray-700); }
+    .tab-btn.active { color: var(--primary); border-bottom-color: var(--primary); }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    /* Tables */
+    .admin-table {
+      width: 100%; border-collapse: collapse; background: var(--bg-card, white);
+      border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+    .admin-table th {
+      text-align: left; padding: 0.75rem 1rem; font-size: 0.8rem;
+      text-transform: uppercase; color: var(--gray-500); background: var(--gray-50);
+      font-weight: 600; letter-spacing: 0.03em;
+    }
+    .admin-table td { padding: 0.75rem 1rem; font-size: 0.9rem; border-top: 1px solid var(--border-light); }
+    .admin-table tr:hover td { background: var(--bg-card-hover); }
+
+    /* Status badges */
+    .badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
+    .badge-green { background: #c6f6d5; color: #22543d; }
+    .badge-red { background: #fed7d7; color: #9b2c2c; }
+    .badge-blue { background: rgba(30, 82, 136, 0.12); color: var(--primary-dark, #001c48); }
+    .badge-yellow { background: #fefcbf; color: #744210; }
+    .badge-gray { background: #edf2f7; color: #4a5568; }
+
+    /* Connection tree */
+    .tree-group { margin-left: 1.5rem; border-left: 2px solid var(--border-color); padding-left: 1rem; }
+    .tree-item { padding: 0.5rem 0; display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem; }
+    .tree-item .icon { font-size: 1rem; }
+    .tree-item .name { font-weight: 500; }
+    .tree-item .meta { color: var(--gray-500); font-size: 0.8rem; }
+
+    /* Action bar */
+    .action-bar { display: flex; gap: 0.75rem; margin-bottom: 1.25rem; flex-wrap: wrap; align-items: center; }
+    .action-bar .btn { font-size: 0.85rem; }
+
+    /* Modal */
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+      display: none; z-index: 1000; align-items: center; justify-content: center;
+    }
+    .modal-overlay.active { display: flex; }
+
+    /* Audit detail slide-over. Not a .modal-overlay: you scan the list and
+       want the row context still visible while reading one entry. */
+    .audit-drawer {
+      position: fixed; top: 0; right: 0; height: 100vh;
+      width: min(560px, 100%);
+      background: var(--bg-card, white);
+      border-left: 1px solid var(--border-color);
+      box-shadow: -4px 0 24px rgba(0,0,0,0.18);
+      transform: translateX(100%);
+      transition: transform 0.2s ease;
+      z-index: 1200; display: flex; flex-direction: column;
+    }
+    .audit-drawer.open { transform: translateX(0); }
+    .audit-drawer h4 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--gray-500); }
+    .audit-drawer pre { white-space: pre-wrap; word-break: break-word; }
+    .modal-content {
+      background: var(--bg-card, white); border-radius: 12px; width: 90%; max-width: 560px;
+      max-height: 80vh; overflow-y: auto; padding: 1.5rem;
+    }
+    .modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
+    .modal-header h3 { margin: 0; font-size: 1.1rem; }
+    .modal-close { background: none; border: none; font-size: 1.5rem; cursor: pointer; color: var(--gray-500); }
+    .form-group { margin-bottom: 1rem; }
+    .form-group label { display: block; font-size: 0.85rem; font-weight: 500; margin-bottom: 0.3rem; color: var(--gray-700); }
+    .form-group input, .form-group select {
+      width: 100%; padding: 0.5rem 0.75rem; border: 1px solid var(--border-color);
+      border-radius: 8px; font-size: 0.9rem;
+    }
+
+    /* Status indicator */
+    .status-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 0.4rem; }
+    .status-dot.online { background: #48bb78; }
+    .status-dot.offline { background: #fc8181; }
+
+    /* Protocol badge colors */
+    .proto-rdp { background: rgba(30, 82, 136, 0.12); color: var(--primary-dark, #001c48); }
+    .proto-ssh { background: #c6f6d5; color: #22543d; }
+    .proto-vnc { background: #fefcbf; color: #744210; }
+
+    /* ============================================================================
+       DARK MODE OVERRIDES
+       ============================================================================ */
+    [data-theme="dark"] .stat-card {
+      background: var(--bg-card);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    [data-theme="dark"] .tabs {
+      border-bottom-color: rgba(99,130,255,0.12);
+    }
+    [data-theme="dark"] .tab-btn {
+      color: var(--text-muted);
+    }
+    [data-theme="dark"] .tab-btn:hover {
+      color: var(--text-secondary);
+    }
+    [data-theme="dark"] .tab-btn.active {
+      color: var(--primary, #5c9fe6);
+      border-bottom-color: var(--primary, #5c9fe6);
+    }
+    [data-theme="dark"] .admin-table {
+      background: var(--bg-card);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    [data-theme="dark"] .admin-table th {
+      background: #0a0d1a;
+      color: var(--text-muted);
+    }
+    [data-theme="dark"] .admin-table td {
+      border-top-color: rgba(99,130,255,0.1);
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .admin-table tr:hover td {
+      background: #161b33;
+    }
+    [data-theme="dark"] .badge-green {
+      background: rgba(0,230,138,0.15);
+      color: #00e68a;
+    }
+    [data-theme="dark"] .badge-red {
+      background: rgba(255,92,114,0.15);
+      color: #ff5c72;
+    }
+    [data-theme="dark"] .badge-blue {
+      background: rgba(91,140,255,0.15);
+      color: #7ba6ff;
+    }
+    [data-theme="dark"] .badge-yellow {
+      background: rgba(255,184,48,0.15);
+      color: #ffb830;
+    }
+    [data-theme="dark"] .badge-gray {
+      background: #1a2040;
+      color: #b8c0d8;
+    }
+    [data-theme="dark"] .tree-group {
+      border-left-color: rgba(99,130,255,0.12);
+    }
+    [data-theme="dark"] .tree-item .name {
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .modal-overlay.active {
+      background: rgba(0,0,0,0.7);
+    }
+    [data-theme="dark"] .modal-content {
+      background: var(--bg-card);
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .form-group input,
+    [data-theme="dark"] .form-group select {
+      background: #0a0d1a;
+      border-color: rgba(99,130,255,0.12);
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .proto-rdp {
+      background: rgba(91,140,255,0.15);
+      color: #7ba6ff;
+    }
+    [data-theme="dark"] .proto-ssh {
+      background: rgba(0,230,138,0.15);
+      color: #00e68a;
+    }
+    [data-theme="dark"] .proto-vnc {
+      background: rgba(255,184,48,0.15);
+      color: #ffb830;
+    }
+    [data-theme="dark"] #tab-deploy input,
+    [data-theme="dark"] #tab-deploy select {
+      background: #0a0d1a;
+      border-color: rgba(99,130,255,0.12);
+      color: #f0f2fa;
+    }
+    /* .form-group styles input and select only, so a bare textarea - which the
+       broadcast composer is built around - is unreadable in dark mode without
+       this. */
+    [data-theme="dark"] #tab-broadcast input,
+    [data-theme="dark"] #tab-broadcast select,
+    [data-theme="dark"] #tab-broadcast textarea {
+      background: #0a0d1a;
+      border-color: rgba(99,130,255,0.12);
+      color: #f0f2fa;
+    }
+    #tab-broadcast textarea,
+    #tab-broadcast input[type="text"],
+    #tab-broadcast input[type="url"] {
+      width: 100%;
+      padding: 0.6rem 0.75rem;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      font-size: 0.9rem;
+      font-family: inherit;
+    }
+    #tab-broadcast textarea { min-height: 190px; resize: vertical; }
+    .bc-chip {
+      display: inline-block; cursor: pointer; user-select: none;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.72rem; padding: 0.15rem 0.45rem; margin: 0.15rem 0.25rem 0 0;
+      border: 1px solid var(--border-color); border-radius: 5px;
+      background: var(--bg-card-hover); color: var(--gray-500);
+    }
+    .bc-chip:hover { color: var(--primary); border-color: var(--primary); }
+    .bc-pick {
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.3rem 0.4rem; border-radius: 6px; font-size: 0.82rem;
+    }
+    .bc-pick:hover { background: var(--bg-card-hover); }
+    #broadcastPreviewFrame {
+      width: 100%; height: 420px; border: 1px solid var(--border-color);
+      border-radius: 8px; background: #f5f6f8;
+    }
+    [data-theme="dark"] #laneCapacityInfo {
+      background: rgba(91,140,255,0.1) !important;
+      color: #7ba6ff !important;
+    }
+    [data-theme="dark"] #lanesFilter {
+      background: #0a0d1a;
+      border-color: rgba(99,130,255,0.12);
+      color: #f0f2fa;
+    }
+    /* Intake-context panel: amber callout text needs lighter tones on dark */
+    [data-theme="dark"] #intakeContextPanel strong {
+      color: var(--warning) !important;
+    }
+    [data-theme="dark"] #intakeCtxBody {
+      color: var(--text-secondary) !important;
+    }
+    /* Script type filter buttons: admin-vuln-scripts.js re-applies light inline
+       colors on toggle, so dark mode needs !important guards */
+    [data-theme="dark"] #scriptTypeFilter .stf-btn:not(.active) {
+      background: var(--bg-card) !important;
+    }
+    [data-theme="dark"] #scriptTypeFilter .stf-btn[data-type="baseline"]:not(.active) {
+      color: var(--success) !important;
+    }
+    [data-theme="dark"] #scriptTypeFilter .stf-btn[data-type="vulnerable"]:not(.active) {
+      color: var(--danger) !important;
+    }
+    /* Toggle switch */
+    .toggle-switch { position:relative; display:inline-block; width:40px; height:22px; flex-shrink:0; }
+    .toggle-switch input { opacity:0; width:0; height:0; }
+    .toggle-slider {
+      position:absolute; cursor:pointer; inset:0;
+      background:#cbd5e0; border-radius:22px; transition:.2s;
+    }
+    .toggle-slider::before {
+      content:''; position:absolute; width:16px; height:16px;
+      left:3px; bottom:3px; background:white; border-radius:50%; transition:.2s;
+    }
+    .toggle-switch input:checked + .toggle-slider { background:#48bb78; }
+    .toggle-switch input:checked + .toggle-slider::before { transform:translateX(18px); }
+    .toggle-switch input:disabled + .toggle-slider { opacity:.5; cursor:not-allowed; }
+
+    /* ── Topology canvas context menu ──────────────────────────────────────
+       Cytoscape fires `cxttap` natively on nodes, edges and the core, so the
+       menu is plain absolutely-positioned HTML built by topology-editor.js.
+       public/vendor/ holds only cytoscape, edgehandles and lodash and there is
+       NO BUILD STEP, so vendoring a context-menu plugin would add a third-party
+       file to maintain for markup this size.
+
+       Positioned against <body> rather than the canvas: the canvas is inside a
+       CSS grid with overflow, and a menu clipped by its own container is worse
+       than no menu. z-index sits above the modal layer for the same reason —
+       the challenge-editor canvas lives inside one. */
+    .topo-ctxmenu {
+      position:absolute; z-index:11000; min-width:190px; max-width:280px;
+      padding:0.25rem; border-radius:8px;
+      background:var(--bg-card, #fff); color:var(--text-primary, #111);
+      border:1px solid var(--border-color, #d1d5db);
+      box-shadow:0 8px 28px rgba(0,0,0,0.22);
+      font-size:0.78rem; user-select:none;
+    }
+    .topo-ctxmenu-title {
+      padding:0.3rem 0.5rem 0.35rem; font-size:0.68rem; font-weight:700;
+      letter-spacing:0.04em; text-transform:uppercase;
+      color:var(--text-muted, #6b7280);
+      border-bottom:1px solid var(--border-color, #e5e7eb); margin-bottom:0.2rem;
+    }
+    .topo-ctxmenu-item {
+      display:flex; align-items:center; justify-content:space-between; gap:0.5rem;
+      padding:0.32rem 0.5rem; border-radius:5px; cursor:pointer; line-height:1.25;
+    }
+    .topo-ctxmenu-item:hover:not(.is-disabled) { background:var(--bg-card-hover, #f3f4f6); }
+    /* A disabled item keeps its ROW and shows why — the whole point of
+       disabling Rename on a GOAD host is to say that renaming it would break
+       the domain join, which a hidden item cannot say. */
+    .topo-ctxmenu-item.is-disabled { cursor:not-allowed; opacity:0.5; }
+    .topo-ctxmenu-item .topo-ctx-caret { color:var(--text-muted, #6b7280); font-size:0.7rem; }
+    .topo-ctxmenu-reason {
+      padding:0 0.5rem 0.35rem 0.5rem; margin:-0.15rem 0 0.2rem;
+      font-size:0.68rem; line-height:1.3; color:var(--text-muted, #6b7280);
+    }
+    .topo-ctxmenu-sep { height:1px; margin:0.25rem 0.35rem; background:var(--border-color, #e5e7eb); }
+    .topo-ctxmenu-empty { padding:0.3rem 0.5rem; color:var(--text-muted, #6b7280); }
+    /* A warning that is the state every shipped GOAD lab is already in must not
+       read as a blocker, or the slot gets ignored. */
+    .topo-field-error.is-warning { color:var(--warning, #f59e0b); }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
+
+    <main class="main-content">
+      <header class="main-header">
+        <div class="header-left">
+          <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
+          <h2 id="pageTitle" style="margin: 0; font-size: 1.1rem;">CyberHub Administration</h2>
+        </div>
+        <div class="header-right">
+          <button class="header-btn" onclick="refreshAll()" title="Refresh">🔄</button>
+        </div>
+      </header>
+
+      <div class="page-content">
+        <!-- Status Bar -->
+        <div class="admin-grid" id="statsBar">
+          <div class="stat-card">
+            <div class="stat-icon guac"><span id="guacStatusIcon">⏳</span></div>
+            <div class="stat-content">
+              <h3 id="guacStatusText" style="font-size: 1rem;">Checking...</h3>
+              <p>Guacamole API</p>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon proxmox"><span id="proxmoxStatusIcon">⏳</span></div>
+            <div class="stat-content">
+              <h3 id="proxmoxStatusText" style="font-size: 1rem;">Checking...</h3>
+              <p>Proxmox API</p>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon conn">🔗</div>
+            <div class="stat-content">
+              <h3 id="connCount">-</h3>
+              <p>Connections</p>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon users">👤</div>
+            <div class="stat-content">
+              <h3 id="userCount">-</h3>
+              <p>Guac Users</p>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon active">⚡</div>
+            <div class="stat-content">
+              <h3 id="activeCount">-</h3>
+              <p>Active Sessions</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Cluster Health Bar -->
+        <div id="clusterHealthBar" style="background: var(--bg-card, white); border-radius: 12px; padding: 1rem 1.25rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 1.5rem; display: none;">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;">
+            <h4 style="margin: 0; font-size: 0.9rem; display: flex; align-items: center; gap: 0.5rem;">
+              <span>Cluster Resources</span>
+              <span id="clusterHealthStatus" class="badge badge-gray" style="font-size: 0.7rem;">Loading</span>
+            </h4>
+            <span style="font-size: 0.8rem; color: var(--gray-500);">
+              VMs: <strong id="clusterVMCount">-</strong>
+            </span>
+          </div>
+          <div id="clusterNodeGauges" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.75rem;"></div>
+          <div id="clusterWarnings" style="margin-top: 0.5rem; display: none;"></div>
+        </div>
+
+        <!-- Tabs -->
+        <div class="tabs">
+          <button class="tab-btn active" onclick="switchTab('connections', this)">Connections</button>
+          <button class="tab-btn" onclick="switchTab('sessions', this)">Active Sessions</button>
+          <button class="tab-btn" onclick="switchTab('deploy', this)">Deploy Lanes</button>
+          <button class="tab-btn" onclick="switchTab('lanes', this)">Active Lanes</button>
+          <!-- Lazy, like Topology and Broadcast: the audit reads the last
+               cached result on activation and scans only when asked. -->
+          <button class="tab-btn" onclick="switchTab('audit', this); reconcileTabActivate()">Proxmox Audit</button>
+          <button class="tab-btn" onclick="switchTab('users', this)">Users</button>
+          <button class="tab-btn" onclick="switchTab('actlog', this); auditTabActivate()">Activity Log</button>
+          <button class="tab-btn" onclick="switchTab('challenges', this)">Environment Templates</button>
+          <button class="tab-btn" onclick="switchTab('workstation-templates', this)">Workstation Templates</button>
+          <button class="tab-btn" onclick="switchTab('crucible-events', this); loadCrucibleEvents()">Crucible Events</button>
+          <button class="tab-btn" onclick="switchTab('vulnscripts', this)">Scripts</button>
+          <!-- Cytoscape measures its container at init, and .tab-content is
+               display:none until this button runs switchTab. So the canvas is
+               built by topoTabActivate() on first activation, never at page load. -->
+          <button class="tab-btn" onclick="switchTab('topology', this); topoTabActivate()">Topology</button>
+          <!-- Lazy, like Topology: nothing on this tab is worth fetching until
+               somebody opens it. -->
+          <button class="tab-btn" onclick="switchTab('broadcast', this); broadcastTabActivate()">Broadcast</button>
+          <button class="tab-btn" onclick="switchTab('tickets', this); ticketsTabActivate()">Support Tickets</button>
+          <button class="tab-btn" onclick="switchTab('settings', this)">Settings</button>
+        </div>
+
+        <!-- TAB: Connections -->
+        <div class="tab-content active" id="tab-connections">
+          <div class="action-bar">
+            <button class="btn btn-primary" onclick="showCreateConnectionModal()">+ New Connection</button>
+            <button class="btn btn-outline" onclick="showCreateGroupModal()">+ New Group</button>
+            <button class="btn btn-outline" onclick="loadConnections()">Refresh</button>
+          </div>
+          <div id="connectionTree"></div>
+        </div>
+
+        <!-- TAB: Users (merged Guac + Clinic) -->
+        <div class="tab-content" id="tab-users">
+          <div class="action-bar">
+            <button class="btn btn-primary" onclick="showCreateCybercoreUserModal()">+ New User</button>
+            <button class="btn btn-primary" onclick="showBatchUsersModal()">+ Create Batch Users</button>
+            <button class="btn btn-primary" onclick="showCreateUserModal()">+ New Guac User</button>
+            <button class="btn btn-outline" onclick="loadMergedUsers()">Refresh</button>
+          </div>
+
+          <!-- Group Controls -->
+          <div id="groupControlsList" style="margin-bottom: 1.5rem;"></div>
+
+          <!-- All Users Table -->
+          <div id="mergedUsersTable"></div>
+        </div>
+
+        <!-- TAB: Active Sessions -->
+        <div class="tab-content" id="tab-sessions">
+          <div class="action-bar">
+            <button class="btn btn-outline" onclick="loadActiveSessions()">Refresh</button>
+          </div>
+          <div id="sessionsTable"></div>
+        </div>
+
+        <!-- TAB: Deploy Lane -->
+        <div class="tab-content" id="tab-deploy">
+          <div style="max-width: 720px; margin: 0 auto;">
+
+            <!-- Lane Deployment Form -->
+            <div style="background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
+              <h3 style="margin: 0 0 0.5rem;">Deploy Lanes</h3>
+              <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1.25rem;">
+                Create a batch of instructor + student accounts with a Guacamole connection group. Optionally deploy CyberHub lanes per student.
+              </p>
+              <div class="form-group">
+                <label>Group Name</label>
+                <input type="text" id="deployGroupName" placeholder="e.g., Spring-2026-Lab1">
+              </div>
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+                <div class="form-group">
+                  <label># of Instructors</label>
+                  <input type="number" id="deployNumInstructors" value="1" min="0" max="10">
+                </div>
+                <div class="form-group">
+                  <label># of Students</label>
+                  <input type="number" id="deployNumStudents" value="10" min="1" max="100">
+                </div>
+              </div>
+              <div class="form-group">
+                <label>Module</label>
+                <select id="deployGroupModule" onchange="loadChallengesForSelect('deployGroupModule', 'deployGroupChallenge')">
+                  <option value="">Loading modules...</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Challenge Key (optional for accounts only)</label>
+                <select id="deployGroupChallenge" onchange="onGroupChallengeSelected()">
+                  <option value="">Select a module first...</option>
+                </select>
+              </div>
+              <div class="form-group" style="display: flex; align-items: center; gap: 0.75rem;">
+                <input type="checkbox" id="deployAttackBoxes" style="width: auto;">
+                <label for="deployAttackBoxes" style="margin: 0;">Create Attack Boxes</label>
+              </div>
+              <!-- Vuln Script Selector for Group Deploy -->
+              <div id="groupDeployVulnScriptPanel" style="display: none; border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; max-height: 400px; overflow-y: auto;"></div>
+              <div style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; background: var(--gray-50);">
+                <div class="form-group" style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem;">
+                  <input type="checkbox" id="deployLanes" style="width: auto;" onchange="toggleLaneDeployInfo()">
+                  <label for="deployLanes" style="margin: 0; font-weight: 600;">Deploy CyberHub Lanes</label>
+                </div>
+                <p style="color: var(--gray-500); font-size: 0.8rem; margin: 0;">
+                  When enabled, each student gets an isolated VXLAN lane with a challenge VM + gateway.
+                  Requires a challenge key and module above. Leave unchecked to only create user accounts.
+                </p>
+                <div id="laneDeployOptions" style="display: none; margin-top: 0.75rem;">
+                  <div id="laneCapacityInfo" style="padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.8rem; background: rgba(30, 82, 136, 0.12); color: var(--primary-light, #1e5288); margin-bottom: 0.5rem;">
+                    Checking capacity...
+                  </div>
+                </div>
+              </div>
+              <button class="btn btn-primary" id="deployGroupBtn" onclick="deployGroup()" style="width: 100%;">Deploy Lanes</button>
+              <div id="deployGroupStatus" style="margin-top: 0.75rem; font-size: 0.85rem; color: var(--gray-500);"></div>
+            </div>
+          </div>
+
+          <!-- Deployed Groups List -->
+          <div style="margin-top: 1.5rem;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;">
+              <h3 style="margin: 0;">Deployed Groups</h3>
+              <button class="btn btn-outline btn-sm" onclick="loadDeployedGroups()" style="font-size: 0.8rem;">Refresh</button>
+            </div>
+            <div id="deployedGroupsList"></div>
+          </div>
+        </div>
+
+        <!-- TAB: Active Lanes -->
+        <div class="tab-content" id="tab-lanes">
+          <div class="action-bar">
+            <button class="btn btn-outline" onclick="loadLanes()">Refresh</button>
+            <button type="button" class="btn btn-primary" onclick="AdminWazuh.open()">Deploy Wazuh agents</button>
+            <select id="lanesFilter" onchange="loadLanes()" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
+              <option value="">All Statuses</option>
+              <option value="active">Active</option>
+              <option value="deploying">Deploying</option>
+              <option value="error">Error</option>
+              <option value="deleted">Deleted</option>
+              <option value="suspended">Suspended</option>
+            </select>
+          </div>
+          <div id="lanesTable"></div>
+
+          <!-- Persistent script execution panel (stays visible when modal closes) -->
+          <div id="scriptExecPanel" style="display: none; margin-top: 1rem; background: var(--bg-card, white); border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); overflow: hidden;">
+            <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.75rem 1rem; background: #1a202c; color: #e2e8f0;">
+              <strong style="font-size: 0.9rem;">Script Execution</strong>
+              <div style="display: flex; gap: 0.5rem; align-items: center;">
+                <span id="scriptExecSummary" style="font-size: 0.75rem; color: #a0aec0;"></span>
+                <button onclick="clearScriptExecPanel()" style="background: none; border: 1px solid #4a5568; color: #a0aec0; border-radius: 4px; padding: 0.1rem 0.4rem; font-size: 0.7rem; cursor: pointer;">Clear</button>
+              </div>
+            </div>
+            <div id="scriptExecOutputs" style="padding: 0.75rem; max-height: 500px; overflow-y: auto;"></div>
+          </div>
+        </div>
+
+        <!-- TAB: Proxmox Audit -->
+        <!-- Cluster-wide reconciliation: orphaned VMs, disks, SDN zones and
+             Guacamole connections, plus node/site.json drift. It lived under
+             Active Lanes, which scoped it wrongly - most of what it reports is
+             not lane-shaped, and half of it concerns nodes that hold no lanes
+             at all. -->
+        <div class="tab-content" id="tab-audit">
+          <div class="action-bar">
+            <button class="btn btn-outline" onclick="runReconcile()" id="btnReconcile" style="border-color:#ed8936; color:#ed8936;">Audit Proxmox</button>
+          </div>
+          <div id="reconcileResults"></div>
+        </div>
+
+        <!-- TAB: Activity Log -->
+        <div class="tab-content" id="tab-actlog">
+          <!-- Quick filters for the questions actually asked, so the common
+               case is one click rather than four dropdowns. -->
+          <div class="action-bar" style="flex-wrap: wrap;">
+            <button class="btn btn-sm btn-outline" onclick="auditApplyChip({category:'auth', status:'failure'})">Failed logins</button>
+            <button class="btn btn-sm btn-outline" onclick="auditApplyChip({status:'denied'})">Denied</button>
+            <button class="btn btn-sm btn-outline" onclick="auditApplyChip({actor_role:'instructor'})">Instructor activity</button>
+            <button class="btn btn-sm btn-outline" onclick="auditApplyChip({category:'enrollment'})">Students added</button>
+            <button class="btn btn-sm btn-outline" onclick="auditApplyChip({category:'infra'})">VMs &amp; lanes</button>
+            <button class="btn btn-sm btn-outline" onclick="auditReset()">Reset</button>
+          </div>
+
+          <div class="action-bar" style="flex-wrap: wrap;">
+            <input type="text" id="auditSearch" placeholder="Search actor, target, action…" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem; width: 220px;">
+            <select id="auditCategory" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
+              <option value="">All Categories</option>
+              <option value="user">Users</option>
+              <option value="enrollment">Enrollment</option>
+              <option value="infra">VMs &amp; Lanes</option>
+              <option value="auth">Auth</option>
+              <option value="access">Access</option>
+              <option value="config">Config</option>
+              <option value="content">Content</option>
+            </select>
+            <!-- Options are injected by loadAuditFacets(); never hardcode this
+                 list again, that is what went stale last time. -->
+            <select id="auditAction" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem; max-width: 260px;">
+              <option value="">All Actions</option>
+            </select>
+            <select id="auditStatus" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
+              <option value="">Any Status</option>
+              <option value="success">Success</option>
+              <option value="failure">Failure</option>
+              <option value="denied">Denied</option>
+            </select>
+            <select id="auditSource" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
+              <option value="">All Sources</option>
+              <option value="core">Core</option>
+              <option value="cle">CLE</option>
+              <option value="ciab">CIAB</option>
+              <option value="crucible">Crucible</option>
+              <option value="system">System</option>
+            </select>
+          </div>
+
+          <div class="action-bar" style="flex-wrap: wrap;">
+            <input type="text" id="auditActor" list="auditActorList" placeholder="Actor (email)" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem; width: 220px;">
+            <datalist id="auditActorList"></datalist>
+            <input type="text" id="auditTargetUser" placeholder="Target student (email or id)" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem; width: 220px;">
+            <input type="date" id="auditFrom" title="From" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
+            <input type="date" id="auditTo" title="To" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
+            <button class="btn btn-outline" onclick="loadAuditLog(0)">Search</button>
+            <button class="btn btn-outline" onclick="exportAuditCsv(this)">Export CSV</button>
+            <select id="auditPageSize" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
+              <option value="50">50 / page</option>
+              <option value="100">100 / page</option>
+              <option value="200">200 / page</option>
+            </select>
+            <label style="display: flex; align-items: center; gap: 0.3rem; font-size: 0.8rem; margin-left: auto;">
+              <input type="checkbox" id="auditAutoRefresh" style="width: auto;"> Auto-refresh
+            </label>
+          </div>
+
+          <div id="auditActorCard" style="display: none; background: var(--bg-card, white); border: 1px solid var(--border-color); border-radius: 8px; padding: 0.6rem 0.85rem; margin-bottom: 0.75rem; font-size: 0.85rem;"></div>
+
+          <div id="auditTable"></div>
+          <div id="auditPagination" style="display: flex; gap: 0.5rem; align-items: center; justify-content: center; margin-top: 0.75rem;"></div>
+        </div>
+
+        <!-- Detail drawer. A slide-over rather than a modal so the list stays
+             visible while reading one entry. -->
+        <div id="auditDrawer" class="audit-drawer">
+          <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 1rem; border-bottom: 1px solid var(--border-color);">
+            <strong>Audit Event</strong>
+            <button class="btn btn-sm btn-outline" onclick="closeAuditDrawer()">Close</button>
+          </div>
+          <div id="auditDrawerBody" style="padding: 1rem; overflow-y: auto; height: calc(100vh - 3.5rem);"></div>
+        </div>
+
+        <!-- TAB: Challenges -->
+        <div class="tab-content" id="tab-challenges">
+          <div class="action-bar">
+            <button class="btn btn-primary" onclick="showCreateChallengeForm()">+ New Environment</button>
+            <button class="btn btn-outline" onclick="loadChallengeTemplates()">Refresh</button>
+          </div>
+
+          <!-- Real-Client Intake context panel (populated from ?from_intake_id=…) -->
+          <div id="intakeContextPanel" style="display:none; background: rgba(249, 115, 22, 0.1); border: 1px solid #fdba74; border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: 1rem;">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:0.5rem; margin-bottom:0.5rem;">
+              <strong style="color:#9a3412;">📨 Building challenge from real-client intake: <span id="intakeCtxCover">—</span></strong>
+              <a id="intakeCtxLink" class="btn btn-sm btn-outline" href="#" target="_blank">View full intake →</a>
+            </div>
+            <div id="intakeCtxBody" style="font-size: 0.85rem; color: #431407;"></div>
+          </div>
+
+          <!-- Create Challenge Form (hidden by default) -->
+          <div id="createChallengeForm" style="display: none; background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 1.5rem;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">
+              <h3 style="margin: 0;">Create New Environment</h3>
+              <button class="btn btn-sm btn-outline" onclick="document.getElementById('createChallengeForm').style.display='none'">&times; Close</button>
+            </div>
+
+            <!-- Basic Info -->
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+              <div class="form-group">
+                <label>Challenge Name</label>
+                <input type="text" id="newChalName" placeholder="e.g., DunderCorp Network">
+              </div>
+              <div class="form-group">
+                <label>Challenge Key</label>
+                <input type="text" id="newChalKey" placeholder="e.g., dundercorp-lab">
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Description</label>
+              <textarea id="newChalDesc" rows="2" placeholder="What this environment contains..."></textarea>
+            </div>
+
+            <!-- Settings Row -->
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 1rem;">
+              <div class="form-group">
+                <label>Zone Abbrev (8 chars)</label>
+                <input type="text" id="newChalZone" maxlength="8" placeholder="auto" style="font-family: monospace;">
+              </div>
+              <div class="form-group">
+                <label>Max Lanes</label>
+                <input type="number" id="newChalMaxLanes" value="10" min="1" max="200">
+              </div>
+              <div class="form-group">
+                <label>Difficulty</label>
+                <select id="newChalDiff">
+                  <option value="beginner">Beginner</option>
+                  <option value="intermediate" selected>Intermediate</option>
+                  <option value="advanced">Advanced</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Module</label>
+                <select id="newChalModule">
+                  <option value="crucible">Crucible</option>
+                  <option value="cyberlabs">CyberLabs</option>
+                  <option value="forge">Forge</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- Network topology (subnet scheme) -->
+            <div class="form-group" style="margin-top: 0.25rem;">
+              <label>Network Topology</label>
+              <select id="newChalSubnetScheme" onchange="onChalSubnetSchemeChange()">
+                <option value="v2" selected>v2 — per-lane flat subnet (10.x.x.0/24, Tailscale BYOD)</option>
+                <option value="v3">v3 — segmented "DMZ" (external + internal, forced pivot)</option>
+              </select>
+              <p id="chalSubnetSchemeDesc" style="font-size: 0.72rem; color: var(--gray-500); margin: 0.35rem 0 0 0;">
+                Each lane gets its own /24 (10.x.x.0/24). Required for Tailscale BYOD access.
+              </p>
+            </div>
+
+            <!-- GOAD configuration card -->
+            <div style="border: 1px solid #f6ad55; border-radius: 10px; padding: 1rem; margin-top: 0.75rem; background: rgba(245, 158, 11, 0.12);">
+              <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer; margin: 0;">
+                <input type="checkbox" id="chalGoadEnabled" onchange="onChalGoadToggle()" style="width: 18px; height: 18px; cursor: pointer; margin: 0;">
+                <span style="font-weight: 600; font-size: 0.95rem;">Use GOAD (Game of Active Directory)</span>
+                <span style="font-size: 0.72rem; color: var(--gray-500); font-weight: 400;">— auto-deploys an Active Directory lab from upstream Orange Cyberdefense playbooks</span>
+              </label>
+              <div id="chalGoadConfig" style="display: none; margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px dashed #f6ad55;">
+                <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 0.75rem; font-size: 0.85rem;">
+                  <div class="form-group" style="margin: 0;">
+                    <label style="font-size: 0.75rem;">GOAD Version</label>
+                    <select id="chalGoadVersion" onchange="onChalGoadVersionChange()" style="width: 100%; padding: 0.4rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
+                      <option value="GOAD-Light">Loading...</option>
+                    </select>
+                  </div>
+                  <div class="form-group" style="margin: 0;">
+                    <label style="font-size: 0.75rem;">Forest Domain (read-only)</label>
+                    <input type="text" id="chalGoadDomain" value="cybersaguaros.local" readonly title="Set by the re-themed GOAD fork (ad/GOAD-Light/data/config.json)" style="font-size: 0.85rem; background:var(--gray-100); color:var(--gray-500); cursor:not-allowed;">
+                  </div>
+                  <div class="form-group" style="margin: 0;">
+                    <label style="font-size: 0.75rem;">Child Subdomain (read-only)</label>
+                    <input type="text" id="chalGoadChild" value="tumamoc" readonly title="Set by the re-themed GOAD fork (ad/GOAD-Light/data/config.json)" style="font-size: 0.85rem; background:var(--gray-100); color:var(--gray-500); cursor:not-allowed;">
+                  </div>
+                </div>
+                <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 0.75rem; margin-top: 0.5rem; font-size: 0.85rem;">
+                  <div class="form-group" style="margin: 0;">
+                    <label style="font-size: 0.75rem;">Local Administrator Password (read-only — baked into the Windows template)</label>
+                    <input type="text" id="chalGoadPassword" value="vagrant" readonly title="GOAD's Autounattend.xml bakes the Windows Administrator password as 'vagrant' — change it in the packer answer file, not here" style="font-size: 0.85rem; font-family: monospace; background:var(--gray-100); color:var(--gray-500); cursor:not-allowed;">
+                  </div>
+                  <div style="display: flex; align-items: center; gap: 0.5rem; padding-top: 1.3rem;">
+                    <input type="checkbox" id="chalGoadKali" checked onchange="onChalGoadKaliToggle()" style="width: 16px; height: 16px; cursor: pointer;">
+                    <label for="chalGoadKali" style="font-size: 0.8rem; cursor: pointer; margin: 0;">Include Kali attack box (.50)</label>
+                  </div>
+                </div>
+                <p id="chalGoadVersionDesc" style="font-size: 0.72rem; color: var(--gray-500); margin: 0.5rem 0 0 0;"></p>
+
+                <!-- Pre-baked golden-image mode -->
+                <div style="margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px dashed #f6ad55;">
+                  <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; margin: 0;">
+                    <input type="checkbox" id="chalGoadPrebaked" onchange="onChalGoadPrebakedToggle()" style="width: 16px; height: 16px; cursor: pointer; margin: 0;">
+                    <span style="font-weight: 600; font-size: 0.85rem;">&#9889; Pre-baked golden images (deploy in minutes, not ~90 min)</span>
+                  </label>
+                  <p style="font-size: 0.72rem; color: var(--gray-500); margin: 0.3rem 0 0 1.6rem;">
+                    Clone already-provisioned GOAD VMs instead of running ansible. Enter each machine's <strong>golden-image Template VMID</strong> in the VM list below, and pin the subnet the images were baked on.
+                  </p>
+                  <div id="chalGoadPrebakedConfig" style="display: none; margin-top: 0.5rem; padding-left: 1.6rem;">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; font-size: 0.85rem;">
+                      <div class="form-group" style="margin: 0;">
+                        <label style="font-size: 0.75rem;">Fixed Internal Subnet (GOAD AD) — first 3 octets</label>
+                        <input type="text" id="chalGoadFixedInt" value="10.167.161" placeholder="e.g., 10.167.161" style="font-size: 0.85rem; font-family: monospace;">
+                      </div>
+                      <div class="form-group" style="margin: 0;">
+                        <label style="font-size: 0.75rem;">Fixed External Subnet (Kali/BYOD) — first 3 octets</label>
+                        <input type="text" id="chalGoadFixedExt" value="10.39.161" placeholder="e.g., 10.39.161" style="font-size: 0.85rem; font-family: monospace;">
+                      </div>
+                    </div>
+                    <p style="font-size: 0.72rem; color: #c05621; margin: 0.4rem 0 0 0;">
+                      Every pre-baked lane reuses this exact subnet (safe — v3 lanes are VXLAN-isolated). It <strong>must</strong> match the base the golden image's AD/DNS was provisioned on. Network Topology is forced to <strong>v3</strong>.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- VM Builder -->
+            <div style="border: 1px solid var(--border-color); border-radius: 10px; padding: 1rem; margin-top: 0.75rem;">
+              <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;">
+                <h4 style="margin: 0; font-size: 0.95rem;">Virtual Machines</h4>
+                <button class="btn btn-sm btn-outline" onclick="addChallengeVM()">+ Add VM</button>
+              </div>
+              <div id="challengeVmList"></div>
+            </div>
+
+            <button class="btn btn-primary" onclick="createChallenge()" style="width: 100%; margin-top: 1rem;">Create Challenge (DB + SDN Zone + VNets)</button>
+            <div id="createChallengeStatus" style="margin-top: 0.75rem; font-size: 0.85rem;"></div>
+          </div>
+
+          <!-- Challenge List -->
+          <div id="challengeTemplatesList"></div>
+        </div>
+
+        <!-- ================================================================
+             TAB: Topology
+             ----------------------------------------------------------------
+             Two things in one tab, because they are two views of the same
+             graph: a DESIGNER that authors a new challenge on a canvas and
+             creates it for real, and a VIEWER that draws either a running
+             lane (live, from Proxmox) or a saved challenge's spec.
+
+             Every id here is prefixed topoDesign*/topoView* on purpose. The
+             challenge-editor modal further down this file resolves its own
+             canvas by getElementById('tplTopoCanvas'); a duplicated id would
+             be found HERE first (document order) and that modal would mount
+             into a hidden container.
+             ================================================================ -->
+        <div class="tab-content topo-page" id="tab-topology">
+
+          <div class="topo-modebar">
+            <button class="btn btn-sm btn-primary" id="topoModeDesignBtn" onclick="setTopoMode('design')">Designer</button>
+            <button class="btn btn-sm btn-outline"  id="topoModeViewBtn"   onclick="setTopoMode('view')">Viewer</button>
+          </div>
+
+          <!-- ── DESIGNER ─────────────────────────────────────────────── -->
+          <div id="topoDesignPane">
+
+            <div class="topo-seedbar">
+              <label for="topoSeedSource">Start from</label>
+              <select id="topoSeedSource" onchange="onTopoSeedSourceChange()">
+                <option value="blank">Blank canvas</option>
+                <option value="challenge">An existing challenge</option>
+                <option value="goad">A GOAD lab preset</option>
+                <option value="file">A topology file (.cctopo.json)</option>
+              </select>
+              <select id="topoSeedChoice" style="display:none;"></select>
+              <button class="btn btn-sm btn-outline" id="topoSeedLoadBtn" onclick="applyTopoSeed()">Load</button>
+              <input type="file" id="topoSeedFile" accept=".json,.cctopo.json,application/json"
+                     style="display:none" onchange="onTopoSeedFilePicked(this)">
+              <span class="topo-settings-hint" id="topoSeedHint" style="margin:0;"></span>
+            </div>
+
+            <details class="topo-settings" id="topoSettings" open>
+              <summary>Challenge settings</summary>
+              <div class="topo-settings-grid">
+                <div>
+                  <label for="topoName">Name</label>
+                  <input type="text" id="topoName" placeholder="e.g., DunderCorp Network">
+                  <div class="topo-field-error" id="topoErrName" style="display:none;"></div>
+                </div>
+                <div>
+                  <label for="topoKey">Challenge key</label>
+                  <input type="text" id="topoKey" placeholder="e.g., dundercorp-v1" oninput="onTopoKeyInput()">
+                  <div class="topo-field-error" id="topoErrKey" style="display:none;"></div>
+                </div>
+                <div>
+                  <label for="topoZone">SDN zone</label>
+                  <input type="text" id="topoZone" placeholder="auto from key" maxlength="8">
+                  <div class="topo-field-error" id="topoErrZone" style="display:none;"></div>
+                </div>
+                <div>
+                  <label for="topoMaxLanes">Max lanes</label>
+                  <input type="number" id="topoMaxLanes" value="10" min="1" max="200">
+                  <div class="topo-field-error" id="topoErrMaxLanes" style="display:none;"></div>
+                </div>
+                <div>
+                  <label for="topoDifficulty">Difficulty</label>
+                  <select id="topoDifficulty">
+                    <option value="beginner">Beginner</option>
+                    <option value="intermediate" selected>Intermediate</option>
+                    <option value="advanced">Advanced</option>
+                  </select>
+                </div>
+                <div>
+                  <label for="topoModule">Module</label>
+                  <select id="topoModule">
+                    <option value="crucible">Crucible</option>
+                    <option value="cyberlabs">CyberLabs</option>
+                    <option value="forge">Forge</option>
+                  </select>
+                  <p class="topo-settings-hint">Recorded for the UI — every challenge row is created in <code>crucible_challenge</code>.</p>
+                </div>
+                <div>
+                  <label for="topoSubnetScheme">Network topology</label>
+                  <select id="topoSubnetScheme" onchange="onTopoSchemeChange()">
+                    <option value="v2">v2 — one /24 per lane</option>
+                    <option value="v3">v3 — segmented (ext + int)</option>
+                  </select>
+                </div>
+                <div>
+                  <label>&nbsp;</label>
+                  <p class="topo-settings-hint" id="topoSchemeDesc"></p>
+                </div>
+                <div class="topo-settings-wide">
+                  <label for="topoDesc">Description</label>
+                  <textarea id="topoDesc" rows="2" placeholder="What this environment simulates..."></textarea>
+                </div>
+              </div>
+            </details>
+
+            <!-- GOAD card. Same fields as the challenge-editor modal's, with
+                 topoGoad* ids; the read-only ones reflect the GOAD fork and the
+                 baked Windows template, not per-challenge values. -->
+            <div style="border: 1px solid #f6ad55; border-radius: 10px; padding: 0.85rem; margin-bottom: 0.75rem; background: rgba(245, 158, 11, 0.12);">
+              <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer; margin: 0;">
+                <input type="checkbox" id="topoGoadEnabled" onchange="onTopoGoadToggle()" style="width: 18px; height: 18px; cursor: pointer; margin: 0;">
+                <span style="font-weight: 600; font-size: 0.95rem;">Use GOAD (Game of Active Directory)</span>
+                <span style="font-size: 0.72rem; color: var(--text-muted); font-weight: 400;">— upstream Orange Cyberdefense playbooks</span>
+              </label>
+              <div id="topoGoadConfig" style="display: none; margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px dashed #f6ad55;">
+                <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 0.75rem;">
+                  <div>
+                    <label style="font-size: 0.7rem; font-weight:600; color:var(--text-secondary);">GOAD Version</label>
+                    <select id="topoGoadVersion" onchange="onTopoGoadVersionChange()" style="width:100%; padding:0.35rem; font-size:0.8rem; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-input); color:var(--text-primary);">
+                      <option value="GOAD-Light">Loading...</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label style="font-size: 0.7rem; font-weight:600; color:var(--text-secondary);" for="topoGoadDomain">Forest Domain</label>
+                    <input type="text" id="topoGoadDomain" value="cybersaguaros.local" oninput="onTopoGoadDomainInput()"
+                           title="Defaults to the selected lab's stock forest. Enable Rename forest to build your authored root and child domains. Computer names remain the fixed catalog roster; compiled and pre-baked identities require regeneration."
+                           style="width:100%; padding:0.35rem; font-size:0.8rem; font-family:monospace; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-input); color:var(--text-primary);">
+                  </div>
+                  <div>
+                    <label style="font-size: 0.7rem; font-weight:600; color:var(--text-secondary);" for="topoGoadChild">Child Subdomain</label>
+                    <input type="text" id="topoGoadChild" value="tumamoc" oninput="onTopoGoadDomainInput()"
+                           placeholder="none"
+                           title="A single label, e.g. tumamoc — the child is always <label>.<forest domain>. Leave blank for a single-domain lab (GOAD-Mini, SCCM, NHA, DRACARYS)."
+                           style="width:100%; padding:0.35rem; font-size:0.8rem; font-family:monospace; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-input); color:var(--text-primary);">
+                  </div>
+                </div>
+                <!-- The rename opt-in. NOT derived from "domain !== forestRoot":
+                     the create handler defaults every GOAD spec to
+                     cybersaguaros.local, so that comparison is true for every
+                     stored spec today and would recompile all of them. Both
+                     domain fields above stay editable either way — with rename
+                     off the domain is still the record the DNS forwarder and the
+                     Caldera facts are built from. The checkbox is disabled from
+                     JS (goadCardPaintRenameHint), never by a readonly here. -->
+                <div style="margin-top: 0.5rem;">
+                  <label style="display:flex; align-items:flex-start; gap:0.5rem; cursor:pointer; margin:0;">
+                    <input type="checkbox" id="topoGoadRenameForest" onchange="onTopoGoadRenameForestToggle()"
+                           style="width:15px; height:15px; margin-top:0.15rem; cursor:pointer;">
+                    <span style="font-size:0.8rem;">Rename forest to the authored domain
+                      <span style="color:var(--text-muted);">— recompiles the lab tree and pushes it at deploy</span></span>
+                  </label>
+                  <p class="topo-settings-hint" id="topoGoadRenameHint" style="margin-top:0.25rem;"></p>
+                </div>
+                <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 0.75rem; margin-top: 0.5rem; align-items: end;">
+                  <div>
+                    <label style="font-size: 0.7rem; font-weight:600; color:var(--text-secondary);">Local Administrator Password (read-only — baked into the template)</label>
+                    <input type="text" id="topoGoadPassword" value="vagrant" readonly
+                           title="GOAD's Autounattend.xml bakes the Windows Administrator password as 'vagrant' — change it in the packer answer file, not here"
+                           style="width:100%; padding:0.35rem; font-size:0.8rem; font-family:monospace; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-card-hover); color:var(--text-muted); cursor:not-allowed;">
+                  </div>
+                  <div style="display:flex; align-items:center; gap:0.5rem;">
+                    <input type="checkbox" id="topoGoadKali" checked onchange="onTopoGoadKaliToggle()" style="width:16px; height:16px; cursor:pointer;">
+                    <label for="topoGoadKali" style="font-size:0.8rem; cursor:pointer; margin:0;">Include Kali (.50)</label>
+                  </div>
+                  <div style="display:flex; align-items:center; gap:0.5rem;">
+                    <input type="checkbox" id="topoGoadPrebaked" onchange="onTopoGoadPrebakedToggle()" style="width:16px; height:16px; cursor:pointer;">
+                    <label for="topoGoadPrebaked" style="font-size:0.8rem; cursor:pointer; margin:0;">Pre-baked golden images</label>
+                  </div>
+                </div>
+                <div id="topoGoadPrebakedConfig" style="display:none; margin-top:0.6rem; padding-top:0.6rem; border-top:1px dashed #f6ad55;">
+                  <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.75rem;">
+                    <div>
+                      <label style="font-size:0.7rem; font-weight:600; color:var(--text-secondary);">Fixed internal subnet (first 3 octets)</label>
+                      <input type="text" id="topoGoadFixedInt" placeholder="10.167.161"
+                             style="width:100%; padding:0.35rem; font-size:0.8rem; font-family:monospace; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-input); color:var(--text-primary);">
+                    </div>
+                    <div>
+                      <label style="font-size:0.7rem; font-weight:600; color:var(--text-secondary);">Fixed external subnet (first 3 octets)</label>
+                      <input type="text" id="topoGoadFixedExt" placeholder="10.39.161"
+                             style="width:100%; padding:0.35rem; font-size:0.8rem; font-family:monospace; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-input); color:var(--text-primary);">
+                    </div>
+                  </div>
+                  <p class="topo-settings-hint">
+                    Clones provisioned golden images instead of running the ~90-min ansible bake. Every pre-baked lane
+                    reuses these exact subnets (safe — v3 lanes are VXLAN-isolated), and they <strong>must</strong> match
+                    the base the image's AD/DNS was provisioned on. Forces <strong>v3</strong>.
+                  </p>
+                </div>
+                <div style="margin-top:0.6rem; padding-top:0.6rem; border-top:1px dashed #f6ad55;">
+                  <label style="font-size:0.7rem; font-weight:600; color:var(--text-secondary); display:block; margin-bottom:0.3rem;">
+                    Extensions
+                  </label>
+                  <div id="topoGoadExtensions"></div>
+                  <p class="topo-settings-hint">
+                    Upstream GOAD extensions. Ticking one places the machine, pins its address, and hands the key to the
+                    controller&#39;s <code>run.sh</code>, which installs the extension in-lane — so it is a
+                    <strong>request to install</strong>, not a label. Ticking is surgical: nothing else on the canvas is
+                    disturbed. A <strong>pre-baked</strong> environment runs no Ansible, so the two are refused together.
+                  </p>
+                </div>
+                <p class="topo-settings-hint" id="topoGoadVersionDesc"></p>
+                <div class="topo-field-error" id="topoErrGoad" style="display:none;"></div>
+              </div>
+            </div>
+
+            <div class="topo-toolbar">
+              <button class="btn btn-sm btn-outline" id="topoViewCanvasBtn" onclick="setTopoVmView('canvas')">Canvas</button>
+              <button class="btn btn-sm btn-outline" id="topoViewTableBtn"  onclick="setTopoVmView('table')">Table</button>
+              <span class="topo-spacer"></span>
+              <span class="topo-hint">Drag a template in · drag from a machine to a network to attach · right-click anything for its menu</span>
+              <button class="btn btn-sm btn-outline" onclick="topoDesignRelayout()" title="Re-arrange automatically">Auto-arrange</button>
+              <button class="btn btn-sm btn-outline" onclick="topoDesignValidate()">Validate</button>
+              <button class="btn btn-sm btn-outline" onclick="topoDesignExport()">Export</button>
+            </div>
+
+            <div id="topoDesignCanvasView">
+              <div class="topo-wrap">
+                <div class="topo-palette" id="topoDesignPalette"></div>
+                <div class="topo-canvas"  id="topoDesignCanvas"></div>
+                <div class="topo-panel"   id="topoDesignPanel"></div>
+              </div>
+              <div class="topo-legend">
+                <span><i class="topo-lg-ext"></i> External / Attacker</span>
+                <span><i class="topo-lg-int"></i> Internal / Corp</span>
+                <span><i class="topo-lg-console"></i> Student console</span>
+          <span>Double border = placement fixed by the GOAD lab</span>
+              </div>
+              <div id="topoDesignFindings"></div>
+            </div>
+
+            <div id="topoDesignTableView" style="display:none;">
+              <div id="topoDesignVmList"></div>
+              <button class="btn btn-sm btn-outline" onclick="topoAddVM()" style="margin-top: 0.5rem;">+ Add VM</button>
+            </div>
+
+            <h4 style="margin: 1.25rem 0 0.5rem;">Phantom Assets (appear in profile only)</h4>
+            <div id="topoPhantomList"></div>
+            <button class="btn btn-sm btn-outline" onclick="topoAddPhantom()" style="margin-top: 0.5rem;">+ Add Phantom Host</button>
+
+            <div class="topo-createbar">
+              <button class="btn btn-primary" onclick="topoCreateChallenge()">Create Challenge (DB + SDN Zone + VNets)</button>
+              <div class="topo-createstatus" id="topoCreateStatus"></div>
+            </div>
+          </div>
+
+          <!-- ── VIEWER ───────────────────────────────────────────────── -->
+          <div id="topoViewPane" style="display:none;">
+            <div class="topo-viewbar">
+              <label class="topo-radio">
+                <input type="radio" name="topoViewKind" value="lane" checked onchange="onTopoViewKindChange()"> Live lane
+              </label>
+              <label class="topo-radio">
+                <input type="radio" name="topoViewKind" value="spec" onchange="onTopoViewKindChange()"> Challenge spec
+              </label>
+              <select id="topoViewChoice" onchange="renderTopoView()"></select>
+              <button class="btn btn-sm btn-outline" onclick="loadTopoViewChoices(true)" title="Reload the list">Refresh</button>
+            </div>
+            <p class="topo-viewmeta" id="topoViewMeta"></p>
+            <div class="topo-wrap topo-wrap--view">
+              <div class="topo-canvas" id="topoViewCanvas"></div>
+            </div>
+            <div class="topo-legend" id="topoViewLegend">
+              <span><i class="topo-lg-ext"></i> External / Attacker</span>
+              <span><i class="topo-lg-int"></i> Internal / Corp</span>
+              <span>Amber border = not running</span>
+              <span>Attachments read live from Proxmox, not from the challenge spec</span>
+            </div>
+            <div id="topoViewFindings"></div>
+          </div>
+        </div>
+
+        <!-- TAB: Workstation Templates -->
+        <div class="tab-content" id="tab-workstation-templates">
+          <div class="action-bar">
+            <button class="btn btn-primary" onclick="showWorkstationTemplateForm()">+ New Template</button>
+            <button class="btn btn-outline" onclick="loadWorkstationTemplates()">Refresh</button>
+          </div>
+
+          <!-- Create / Edit Form -->
+          <div id="workstationTemplateForm" style="display:none; background:var(--bg-card,white); border-radius:12px; padding:1.5rem; box-shadow:0 2px 8px rgba(0,0,0,0.08); margin-bottom:1.5rem;">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:1rem;">
+              <h3 id="workstationFormTitle" style="margin:0;">New Workstation Template</h3>
+              <button class="btn btn-sm btn-outline" onclick="closeWorkstationTemplateForm()">&times; Close</button>
+            </div>
+
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+              <div class="form-group">
+                <label>Template Name</label>
+                <input type="text" id="wsTplName" placeholder="e.g., Kali Linux Workstation" oninput="wsTplAutoKey()">
+              </div>
+              <div class="form-group">
+                <label>Template Key</label>
+                <input type="text" id="wsTplKey" placeholder="e.g., kali-workstation" style="font-family:monospace;">
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label>Description</label>
+              <textarea id="wsTplDesc" rows="2" placeholder="What this workstation is for..."></textarea>
+            </div>
+
+            <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr 1fr; gap:1rem;">
+              <div class="form-group">
+                <label>Template VMID</label>
+                <input type="number" id="wsTplVmid" placeholder="e.g., 1002" min="100" max="9999">
+              </div>
+              <div class="form-group">
+                <label>VM Type</label>
+                <select id="wsTplProviderType">
+                  <option value="">Auto-detect</option>
+                  <option value="qemu">QEMU VM</option>
+                  <option value="lxc">LXC Container</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>OS Family</label>
+                <select id="wsTplOsFamily" onchange="wsTplSuggestCiUser()">
+                  <option value="windows_client">Windows Client</option>
+                  <option value="windows_server">Windows Server</option>
+                  <option value="linux">Linux</option>
+                  <option value="macos">macOS</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>OS Version <span style="color:var(--gray-400);font-size:0.8rem;">(optional)</span></label>
+                <input type="text" id="wsTplOsVersion" placeholder="e.g., 22.04, 11, 25H2">
+              </div>
+              <div class="form-group">
+                <label>Max Instances</label>
+                <input type="number" id="wsTplMaxInstances" value="10" min="1" max="500">
+              </div>
+            </div>
+
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+              <div class="form-group">
+                <label>Module</label>
+                <select id="wsTplModule">
+                  <option value="">— None —</option>
+                  <option value="crucible">Crucible</option>
+                  <option value="cyberlabs">CyberLabs</option>
+                  <option value="forge">Forge</option>
+                  <option value="university">University</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Notes <span style="color:var(--gray-400);font-size:0.8rem;">(admin-only)</span></label>
+                <input type="text" id="wsTplNotes" placeholder="e.g., proxmox template name or build notes">
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label>Cloud-Init Account <span style="color:var(--gray-400);font-size:0.8rem;">(optional — for images whose cloud-init agent is pinned to one account)</span></label>
+              <input type="text" id="wsTplCiUser" placeholder="e.g., cactus-user" autocomplete="off">
+              <div style="font-size:0.78rem; color:var(--gray-500); margin-top:0.25rem;">
+                Set this when the image bakes its cloud-init account name in (cloudbase-init's <code>username=</code>).
+                Each lane still gets its own generated password; only the account name is fixed.
+                <br>
+                <strong>Windows images need this.</strong> cloudbase-init is pinned at bake time and can only set
+                <em>that</em> account's password — name anything else and the password lands on the baked account
+                while Guacamole signs in as a user that does not exist, which reaches the student as a plain RDP
+                login failure. Images built from <code>windows-11-base-packer</code> use <code>cactus-user</code>;
+                <code>bake-win-client-template.sh</code> uses <code>Admin</code>. Check the template's
+                <code>cloudbase-init.conf</code> if you are unsure. Left blank on Windows, deploys fall back to
+                <code>cactus-user</code> and log a warning.
+                <br>
+                On Linux, leave blank to create a per-student account from their email — cloud-init genuinely
+                creates whatever account it is given there.
+              </div>
+            </div>
+
+            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:1rem;">
+              <div class="form-group">
+                <label>Default RDP Username <span style="color:var(--gray-400);font-size:0.8rem;">(optional — used for Guacamole console)</span></label>
+                <input type="text" id="wsTplRdpUser" placeholder="e.g., Administrator" autocomplete="off">
+              </div>
+              <div class="form-group">
+                <label>Default RDP Password <span style="color:var(--gray-400);font-size:0.8rem;">(optional)</span></label>
+                <input type="text" id="wsTplRdpPass" placeholder="VM's RDP password" autocomplete="off">
+              </div>
+              <div class="form-group">
+                <label>RDP Security <span style="color:var(--gray-400);font-size:0.8rem;">(Guacamole)</span></label>
+                <!-- Blank is the default and stores nothing, so lane-deployer's own
+                     'any' applies. Pinning a mode here is an override: 'tls' fails
+                     outright against xrdp and against NLA-only Windows, so it must
+                     be a deliberate choice, not what you get by leaving the form
+                     alone. -->
+                <select id="wsTplRdpSecurity">
+                  <option value="">Auto — let Guacamole negotiate (recommended)</option>
+                  <option value="nla">NLA (modern Windows)</option>
+                  <option value="tls">TLS</option>
+                  <option value="rdp">RDP (classic, no TLS)</option>
+                  <option value="any">Any (explicit)</option>
+                </select>
+              </div>
+            </div>
+
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+              <div class="form-group">
+                <label>Status</label>
+                <select id="wsTplStatus">
+                  <option value="draft">Draft</option>
+                  <option value="active">Active</option>
+                  <option value="retired">Retired</option>
+                </select>
+              </div>
+              <div class="form-group" style="display:flex; align-items:center; gap:0.75rem; padding-top:1.6rem;">
+                <label class="toggle-switch" style="margin:0;">
+                  <input type="checkbox" id="wsTplIsActive" checked>
+                  <span class="toggle-slider"></span>
+                </label>
+                <span style="font-size:0.875rem;">Enabled</span>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label style="display:flex;align-items:center;gap:0.6rem;">
+                <input type="checkbox" id="wsTplMalwareEnvironment">
+                Malware workstation / environment
+              </label>
+              <p style="font-size:0.8rem;color:var(--gray-500);margin:0.4rem 0 0;">
+                Adds Start Analysis and Reset Lab to this workstation's dashboard card.
+                Use a dedicated lab with a clean, malware-free template. Reset Lab rebuilds
+                every machine and the gateway from their clean templates.
+              </p>
+            </div>
+
+            <input type="hidden" id="wsTplEditId">
+            <button class="btn btn-primary" onclick="saveWorkstationTemplate()" style="width:100%; margin-top:0.5rem;">
+              <span id="wsTplSaveLabel">Create Workstation Template</span>
+            </button>
+            <div id="wsTplStatus2" style="margin-top:0.75rem; font-size:0.85rem;"></div>
+          </div>
+
+          <!-- Template List -->
+          <div id="workstationTemplatesList"></div>
+        </div>
+
+        <!-- TAB: Crucible Events -->
+        <div class="tab-content" id="tab-crucible-events">
+          <div class="action-bar" style="flex-wrap:wrap; gap:0.5rem; align-items:center;">
+            <button class="btn btn-primary" onclick="showCreateCrucibleEventModal()">+ New Event</button>
+            <button class="btn btn-outline" onclick="loadCrucibleEvents()">Refresh</button>
+            <div style="display:inline-flex; border:1px solid var(--border-color); border-radius:6px; overflow:hidden; font-size:0.8rem; flex-wrap:wrap;">
+              <button class="crucible-type-filter active" data-type="" onclick="filterCrucibleEventsByType('')"
+                style="background:var(--primary,#0c234b);color:#fff;border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid var(--border-color);">All</button>
+              <button class="crucible-type-filter" data-type="weekly"    onclick="filterCrucibleEventsByType('weekly')"
+                style="background:var(--bg-card);border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid var(--border-color);">📅 Weekly</button>
+              <button class="crucible-type-filter" data-type="vuln"      onclick="filterCrucibleEventsByType('vuln')"
+                style="background:var(--bg-card);border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid var(--border-color);">💀 Vuln Boxes</button>
+              <button class="crucible-type-filter" data-type="groupctf"  onclick="filterCrucibleEventsByType('groupctf')"
+                style="background:var(--bg-card);border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid var(--border-color);">🏁 Group CTF</button>
+              <button class="crucible-type-filter" data-type="koth"      onclick="filterCrucibleEventsByType('koth')"
+                style="background:var(--bg-card);border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid var(--border-color);">👑 KotH</button>
+              <button class="crucible-type-filter" data-type="redvsblue" onclick="filterCrucibleEventsByType('redvsblue')"
+                style="background:var(--bg-card);border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid var(--border-color);">⚔️ RvB</button>
+              <button class="crucible-type-filter" data-type="ir"        onclick="filterCrucibleEventsByType('ir')"
+                style="background:var(--bg-card);border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid var(--border-color);">🚨 IR/SOC</button>
+              <button class="crucible-type-filter" data-type="ctf_event" onclick="filterCrucibleEventsByType('ctf_event')"
+                style="background:var(--bg-card);border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid var(--border-color);">🎯 Events</button>
+              <button class="crucible-type-filter" data-type="byoctf"    onclick="filterCrucibleEventsByType('byoctf')"
+                style="background:var(--bg-card);border:0;padding:0.4rem 0.75rem;cursor:pointer;">🛠️ BYO CTF</button>
+            </div>
+          </div>
+          <div id="crucibleEventsList" style="margin-top:1rem;"></div>
+        </div>
+
+        <!-- TAB: Scripts -->
+        <div class="tab-content" id="tab-vulnscripts">
+          <div class="action-bar" style="flex-wrap: wrap; align-items: center; gap: 0.5rem;">
+            <button class="btn btn-primary" onclick="showCreateScriptModal()">+ New Script</button>
+            <button class="btn btn-outline" onclick="loadVulnScripts()">Refresh</button>
+            <select id="vulnScriptCategoryFilter" onchange="loadVulnScripts()" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
+              <option value="">All Categories</option>
+            </select>
+            <!-- Type filter: baseline vs vulnerable -->
+            <div id="scriptTypeFilter" style="display: inline-flex; border: 1px solid var(--border-color); border-radius: 6px; overflow: hidden; font-size: 0.8rem;">
+              <button type="button" data-type=""           class="stf-btn active" onclick="setScriptTypeFilter('')"
+                      style="background: var(--primary, #0c234b); color: #fff; border: 0; padding: 0.4rem 0.8rem; cursor: pointer; border-right: 1px solid var(--border-color);">All</button>
+              <button type="button" data-type="baseline"   class="stf-btn" onclick="setScriptTypeFilter('baseline')"
+                      style="background: var(--bg-card); color: #166534; border: 0; padding: 0.4rem 0.8rem; cursor: pointer; border-right: 1px solid var(--border-color);">🛡️ Baseline</button>
+              <button type="button" data-type="vulnerable" class="stf-btn" onclick="setScriptTypeFilter('vulnerable')"
+                      style="background: var(--bg-card); color: #991b1b; border: 0; padding: 0.4rem 0.8rem; cursor: pointer;">☠️ Vulnerable</button>
+            </div>
+            <span id="scriptListSummary" style="margin-left: auto; font-size: 0.8rem; color: var(--gray-500);"></span>
+          </div>
+          <div id="vulnScriptsList"></div>
+        </div>
+
+        <!-- TAB: Settings -->
+        <!-- Support tickets. Calls /api/tickets, NOT /api/admin/* — there is one
+             ticket router and it scopes by role internally, so an admin simply
+             gets the unscoped result. -->
+        <div class="tab-content" id="tab-tickets">
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Support Tickets</span>
+              <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;">
+                <select id="tkFilterStatus" class="form-select" style="width:auto"
+                        onchange="ticketsLoad()">
+                  <option value="open,in_progress,pending">Needs attention</option>
+                  <option value="">All</option>
+                  <option value="open">Open</option>
+                  <option value="in_progress">In Progress</option>
+                  <option value="pending">Pending</option>
+                  <option value="resolved">Resolved</option>
+                  <option value="closed">Closed</option>
+                </select>
+                <input id="tkFilterQ" class="form-input" style="width:auto"
+                       placeholder="Search subject or email" onkeydown="if(event.key==='Enter')ticketsLoad()">
+                <button class="btn btn-secondary btn-sm" onclick="ticketsLoad()">Refresh</button>
+              </div>
+            </div>
+            <div class="card-body">
+              <div id="tkCounts" style="margin-bottom:1rem;display:flex;gap:.5rem;flex-wrap:wrap;"></div>
+              <div id="tkTable"><p style="color:var(--text-muted)">Loading…</p></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-content" id="tab-settings">
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; align-items: start;">
+            <!-- Website Customization -->
+            <div style="background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
+              <h3 style="margin: 0 0 0.5rem;">Website Customization</h3>
+              <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1rem;">Customize your CyberHub instance branding (whitelabeling).</p>
+              
+              <div class="form-group">
+                <label>Site Display Name *</label>
+                <input type="text" id="settingsSiteName" placeholder="e.g., CyberHub, My Lab, etc." style="width: 100%; padding: 0.6rem 0.75rem; border: 1px solid var(--border-color); border-radius: 8px; font-size: 0.9rem;">
+                <p style="font-size: 0.75rem; color: var(--gray-500); margin: 0.3rem 0 0;">Appears in headers, page titles, and welcome messages. Default: "CyberHub"</p>
+              </div>
+              
+              <div class="form-group">
+                <label>Logo URL</label>
+                <input type="text" id="settingsSiteLogo" placeholder="https://example.com/logo.png" style="width: 100%; padding: 0.6rem 0.75rem; border: 1px solid var(--border-color); border-radius: 8px; font-size: 0.9rem;">
+                <p style="font-size: 0.75rem; color: var(--gray-500); margin: 0.3rem 0 0;">Logo image URL (shown in header)</p>
+              </div>
+              
+              <div class="form-group">
+                <label>Favicon URL</label>
+                <input type="text" id="settingsSiteFavicon" placeholder="https://example.com/favicon.ico" style="width: 100%; padding: 0.6rem 0.75rem; border: 1px solid var(--border-color); border-radius: 8px; font-size: 0.9rem;">
+                <p style="font-size: 0.75rem; color: var(--gray-500); margin: 0.3rem 0 0;">Favicon URL (shown in browser tabs)</p>
+              </div>
+              
+              <div class="form-group">
+                <label>Site Description</label>
+                <textarea id="settingsSiteDesc" placeholder="Enter site description..." style="width: 100%; padding: 0.6rem 0.75rem; border: 1px solid var(--border-color); border-radius: 8px; font-size: 0.9rem; min-height: 80px;"></textarea>
+                <p style="font-size: 0.75rem; color: var(--gray-500); margin: 0.3rem 0 0;">Meta description for search engines</p>
+              </div>
+              
+              <button class="btn btn-primary" onclick="saveSiteSettings()" style="width: 100%; margin-top: 1rem;">Save Changes</button>
+              <div id="siteSettingsStatus" style="margin-top: 0.75rem; font-size: 0.85rem; color: var(--gray-500);"></div>
+            </div>
+
+            <!-- Module & Plugin Management -->
+            <div style="background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
+              <h3 style="margin: 0 0 0.5rem;">Module & Plugin Management</h3>
+              <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1rem;">Enable or disable modules and plugins. Disabled items won't appear in the sidebar navigation. This does not delete them.</p>
+              <div id="modulesPluginsList" style="max-height: 500px; overflow-y: auto;">
+                <p style="color: var(--gray-500); text-align: center; padding: 2rem;">Loading modules and plugins...</p>
+              </div>
+              <button class="btn btn-primary" onclick="saveModuleSettings()" style="width: 100%; margin-top: 1rem;">Save Changes</button>
+              <div id="moduleSettingsStatus" style="margin-top: 0.75rem; font-size: 0.85rem; color: var(--gray-500);"></div>
+            </div>
+
+            <!-- Security / MFA Enforcement -->
+            <div style="background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
+              <h3 style="margin: 0 0 0.5rem;">🔐 Multi-Factor Authentication</h3>
+              <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1rem;">Choose who must use TOTP. Admins and instructors are always required; this widens it.</p>
+
+              <div class="form-group">
+                <label>MFA is required for</label>
+                <select id="settingsMfaScope" style="width: 100%; padding: 0.6rem 0.75rem; border: 1px solid var(--border-color); border-radius: 8px; font-size: 0.9rem;">
+                  <option value="privileged">Admins &amp; Instructors (default)</option>
+                  <option value="all">All users</option>
+                </select>
+                <p style="font-size: 0.75rem; color: var(--gray-500); margin: 0.3rem 0 0;">Required users who haven't enrolled are forced to set up MFA at their next login.</p>
+              </div>
+
+              <button class="btn btn-primary" onclick="saveMfaScope()" style="width: 100%; margin-top: 1rem;">Save Changes</button>
+              <div id="mfaScopeStatus" style="margin-top: 0.75rem; font-size: 0.85rem; color: var(--gray-500);"></div>
+            </div>
+
+            <!-- Email delivery -->
+            <div style="background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
+              <h3 style="margin: 0 0 0.5rem;">✉️ Email Delivery</h3>
+              <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1rem;">
+                Student invitations and password notices. Configured by environment variables, so this is read-only —
+                it exists to tell you whether mail will actually leave the server.
+              </p>
+
+              <div id="mailStatusBox" style="font-size: 0.85rem;">
+                <p style="color: var(--gray-500); text-align: center; padding: 1.5rem;">Loading mail status...</p>
+              </div>
+
+              <div class="form-group" style="margin-top: 1rem;">
+                <label>Send a test message to</label>
+                <input type="email" id="mailTestTo" placeholder="you@example.com" style="width: 100%; padding: 0.6rem 0.75rem; border: 1px solid var(--border-color); border-radius: 8px; font-size: 0.9rem;">
+                <p style="font-size: 0.75rem; color: var(--gray-500); margin: 0.3rem 0 0;">
+                  Bypasses the queue and reports what the relay said, so a hang or a refusal shows up here rather than in a table.
+                </p>
+              </div>
+
+              <div style="display: flex; gap: 0.5rem; margin-top: 1rem;">
+                <button class="btn btn-secondary" onclick="loadMailStatus()" style="flex: 0 0 auto;">Refresh</button>
+                <button class="btn btn-primary" id="mailTestBtn" onclick="sendMailTest()" style="flex: 1;">Send Test</button>
+              </div>
+              <div id="mailTestStatus" style="margin-top: 0.75rem; font-size: 0.85rem; color: var(--gray-500);"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- TAB: Broadcast -->
+        <div class="tab-content" id="tab-broadcast">
+
+          <!-- Painted from GET /mail/status. An admin should learn that nothing
+               will send BEFORE they write four paragraphs, not after. -->
+          <div id="broadcastMailBanner" style="margin-bottom: 1rem;"></div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1.15fr; gap: 1.5rem; align-items: start;">
+
+            <!-- ---------------------------------------------------------- -->
+            <!-- Audience                                                    -->
+            <!-- ---------------------------------------------------------- -->
+            <div style="background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
+              <h3 style="margin: 0 0 0.5rem;">Audience</h3>
+              <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1rem;">
+                Filter by role, pick people by hand, or paste addresses. Accounts the
+                platform creates for itself (<code>@clinic.local</code>, <code>@cohort.invalid</code>)
+                can never receive mail and are always reported as suppressed.
+              </p>
+
+              <div class="form-group">
+                <label>Roles</label>
+                <div id="broadcastRoles" style="display: flex; flex-wrap: wrap; gap: 0.75rem; font-size: 0.85rem;">
+                  <label style="display: flex; align-items: center; gap: 0.3rem;"><input type="checkbox" class="bc-role" value="student"> Students</label>
+                  <label style="display: flex; align-items: center; gap: 0.3rem;"><input type="checkbox" class="bc-role" value="instructor"> Instructors</label>
+                  <label style="display: flex; align-items: center; gap: 0.3rem;"><input type="checkbox" class="bc-role" value="admin"> Admins</label>
+                  <label style="display: flex; align-items: center; gap: 0.3rem;"><input type="checkbox" class="bc-role" value="user"> Users</label>
+                </div>
+              </div>
+
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+                <div class="form-group">
+                  <label>Account status</label>
+                  <select id="broadcastActivity">
+                    <option value="active">Active accounts only</option>
+                    <option value="">Any status</option>
+                    <option value="inactive">Inactive / suspended only</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>Organization</label>
+                  <select id="broadcastOrg">
+                    <option value="">Any organization</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label>Add specific people <span id="broadcastPickedCount" style="font-size: 0.8rem; color: var(--gray-500);"></span></label>
+                <input type="text" id="broadcastUserFilter" placeholder="Filter by name or email...">
+                <div id="broadcastUserList" style="max-height: 190px; overflow-y: auto; margin-top: 0.4rem; border: 1px solid var(--border-color); border-radius: 8px; padding: 0.4rem;">
+                  <p style="color: var(--gray-500); font-size: 0.82rem; padding: 0.75rem; margin: 0;">Loading users...</p>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label>Additional addresses</label>
+                <textarea id="broadcastAddresses" style="min-height: 70px;" placeholder="one per line, or comma separated"></textarea>
+                <p style="font-size: 0.75rem; color: var(--gray-500); margin: 0.3rem 0 0;">
+                  Addresses that already belong to an account are matched to it, so nobody gets two copies.
+                </p>
+              </div>
+
+              <button class="btn btn-primary" id="broadcastResolveBtn" onclick="resolveBroadcastAudience()" style="width: 100%; margin-top: 0.5rem;">Resolve audience</button>
+              <div id="broadcastAudienceResult" style="margin-top: 0.9rem; font-size: 0.85rem;"></div>
+            </div>
+
+            <!-- ---------------------------------------------------------- -->
+            <!-- Message                                                     -->
+            <!-- ---------------------------------------------------------- -->
+            <div style="background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
+              <h3 style="margin: 0 0 0.5rem;">Message</h3>
+              <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1rem;">
+                Plain text. It is wrapped in the same branded layout as invitations and
+                password notices, so links belong in the button below rather than the body.
+              </p>
+
+              <div class="form-group">
+                <label>Subject *</label>
+                <input type="text" id="broadcastSubject" maxlength="200" placeholder="e.g. Lab 3 opens Monday" oninput="queueBroadcastRender()">
+                <p style="font-size: 0.75rem; color: var(--gray-500); margin: 0.3rem 0 0;">
+                  Stored in plain text in the mail queue and visible in relay logs &mdash; keep secrets out of it.
+                  Merge fields are not substituted here.
+                </p>
+              </div>
+
+              <div class="form-group">
+                <label>Message *</label>
+                <textarea id="broadcastBody" maxlength="20000" placeholder="Write your announcement here.
+
+Leave a blank line between paragraphs." oninput="queueBroadcastRender()"></textarea>
+                <div style="margin-top: 0.35rem;">
+                  <span style="font-size: 0.75rem; color: var(--gray-500);">Insert:</span>
+                  <span class="bc-chip" onclick="insertBroadcastMerge('first_name')">{{first_name}}</span>
+                  <span class="bc-chip" onclick="insertBroadcastMerge('last_name')">{{last_name}}</span>
+                  <span class="bc-chip" onclick="insertBroadcastMerge('email')">{{email}}</span>
+                  <span class="bc-chip" onclick="insertBroadcastMerge('site_name')">{{site_name}}</span>
+                </div>
+              </div>
+
+              <label style="display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; margin-bottom: 0.75rem;">
+                <input type="checkbox" id="broadcastGreeting" checked onchange="queueBroadcastRender()">
+                Start with a greeting (&ldquo;Hi Ada,&rdquo;, or &ldquo;Hi,&rdquo; when we have no name)
+              </label>
+
+              <div style="display: grid; grid-template-columns: 1fr 1.4fr; gap: 0.75rem;">
+                <div class="form-group">
+                  <label>Button label</label>
+                  <input type="text" id="broadcastButtonLabel" maxlength="60" placeholder="Open CyberHub" oninput="queueBroadcastRender()">
+                </div>
+                <div class="form-group">
+                  <label>Button link</label>
+                  <input type="url" id="broadcastButtonUrl" placeholder="https://..." oninput="queueBroadcastRender()">
+                </div>
+              </div>
+
+              <div style="display: flex; align-items: baseline; justify-content: space-between; margin: 0.5rem 0 0.4rem;">
+                <strong style="font-size: 0.85rem;">Preview</strong>
+                <span id="broadcastPreviewNote" style="font-size: 0.75rem; color: var(--gray-500);"></span>
+              </div>
+              <!-- srcdoc, set as a property rather than an attribute: the shell
+                   is a full document saturated with quotes. sandbox makes it an
+                   opaque origin, hence the fixed height. -->
+              <iframe id="broadcastPreviewFrame" sandbox title="Message preview"></iframe>
+
+              <div id="broadcastMessageErrors" style="margin-top: 0.6rem; font-size: 0.82rem;"></div>
+
+              <div style="display: flex; gap: 0.5rem; margin-top: 1rem;">
+                <button class="btn btn-outline" id="broadcastTestBtn" onclick="sendBroadcastTest()" style="flex: 1;">Send test to me</button>
+                <button class="btn btn-primary" id="broadcastSendBtn" onclick="previewAndSendBroadcast()" style="flex: 1;">Preview &amp; Send</button>
+              </div>
+              <div id="broadcastStatus" style="margin-top: 0.75rem; font-size: 0.85rem; color: var(--gray-500);"></div>
+            </div>
+          </div>
+
+          <!-- Recent broadcasts -->
+          <div style="background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-top: 1.5rem;">
+            <div style="display: flex; align-items: baseline; justify-content: space-between;">
+              <h3 style="margin: 0 0 0.5rem;">Recent broadcasts</h3>
+              <button class="btn btn-outline btn-sm" onclick="loadBroadcastCampaigns()">Refresh</button>
+            </div>
+            <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1rem;">
+              Read from the mail queue, which is pruned on a retention schedule &mdash; older
+              broadcasts stay in the Activity Log.
+            </p>
+            <div id="broadcastCampaigns"></div>
+          </div>
+        </div>
+
+        <!-- (User Management merged into Users tab above) -->
+
+      </div>
+    </main>
+  </div>
+
+  <!-- Create Connection Modal -->
+  <div class="modal-overlay" id="createConnModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>New Connection</h3>
+        <button class="modal-close" onclick="closeModal('createConnModal')">&times;</button>
+      </div>
+      <div class="form-group">
+        <label>Name</label>
+        <input type="text" id="connName" placeholder="e.g., student1-kali">
+      </div>
+      <div class="form-group">
+        <label>Protocol</label>
+        <select id="connProtocol">
+          <option value="rdp">RDP</option>
+          <option value="ssh">SSH</option>
+          <option value="vnc">VNC</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Hostname</label>
+        <input type="text" id="connHostname" placeholder="e.g., 192.168.1.10">
+      </div>
+      <div class="form-group">
+        <label>Port</label>
+        <input type="text" id="connPort" placeholder="e.g., 3389, 22, or 5900">
+      </div>
+      <div class="form-group">
+        <label>Parent Group</label>
+        <select id="connParentGroup"><option value="ROOT">ROOT</option></select>
+      </div>
+      <div class="form-group">
+        <label>Username (optional)</label>
+        <input type="text" id="connUsername" placeholder="Auto-login username">
+      </div>
+      <div class="form-group">
+        <label>Password (optional)</label>
+        <input type="password" id="connPassword" placeholder="Auto-login password">
+      </div>
+      <button class="btn btn-primary" onclick="createConnection()">Create Connection</button>
+    </div>
+  </div>
+
+  <!-- Create Group Modal -->
+  <div class="modal-overlay" id="createGroupModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>New Connection Group</h3>
+        <button class="modal-close" onclick="closeModal('createGroupModal')">&times;</button>
+      </div>
+      <div class="form-group">
+        <label>Group Name</label>
+        <input type="text" id="groupName" placeholder="e.g., Lane-001">
+      </div>
+      <div class="form-group">
+        <label>Type</label>
+        <select id="groupType">
+          <option value="ORGANIZATIONAL">Organizational</option>
+          <option value="BALANCING">Load Balancing</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Parent Group</label>
+        <select id="groupParent"><option value="ROOT">ROOT</option></select>
+      </div>
+      <button class="btn btn-primary" onclick="createGroup()">Create Group</button>
+    </div>
+  </div>
+
+  <!-- Create User Modal -->
+  <!-- CyberCore User Creation Modal -->
+  <div class="modal-overlay" id="createCybercoreUserModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Create New User</h3>
+        <button class="modal-close" onclick="closeModal('createCybercoreUserModal')">&times;</button>
+      </div>
+      <div class="form-group">
+        <label>Username * <span style="font-size: 0.8rem; color: var(--gray-500);">(unique login name)</span></label>
+        <input type="text" id="ccUsername" placeholder="johndoe">
+      </div>
+      <div class="form-group">
+        <label>Email *</label>
+        <input type="email" id="ccEmail" placeholder="user@example.com">
+      </div>
+      <div class="form-group">
+        <label>First Name</label>
+        <input type="text" id="ccFirstName" placeholder="John">
+      </div>
+      <div class="form-group">
+        <label>Last Name</label>
+        <input type="text" id="ccLastName" placeholder="Doe">
+      </div>
+      <div class="form-group">
+        <label>Organization</label>
+        <input type="text" id="ccOrganization" placeholder="Company or School" value="Independent">
+      </div>
+      <div class="form-group">
+        <label>Role *</label>
+        <select id="ccRole" style="padding: 0.5rem; border: 1px solid var(--border-color); border-radius: 4px; font-size: 0.9rem;">
+          <option value="user">User</option>
+          <option value="student">Student</option>
+          <option value="instructor">Instructor</option>
+          <option value="admin">Admin</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Password *</label>
+        <input type="password" id="ccPassword" placeholder="Initial password">
+      </div>
+      <div id="ccStatus"></div>
+      <button class="btn btn-primary" onclick="createCybercoreUser()">Create User</button>
+    </div>
+  </div>
+
+  <!-- Edit User Modal -->
+  <!-- Everything a user owns is keyed by their UUID, so these fields are safe to
+       change. Email is the exception: it doubles as the Guacamole account name,
+       so the form locks it whenever the account holds lanes or VM allocations
+       whose consoles authenticate against the current address. -->
+  <div class="modal-overlay" id="editUserModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Edit User</h3>
+        <button class="modal-close" onclick="closeModal('editUserModal')">&times;</button>
+      </div>
+      <div id="euOwnership" style="font-size: 0.8rem; color: var(--gray-500); margin-bottom: 0.75rem;"></div>
+      <div class="form-group">
+        <label>Username <span style="font-size: 0.8rem; color: var(--gray-500);">(unique login name)</span></label>
+        <input type="text" id="euUsername">
+      </div>
+      <div class="form-group">
+        <label>Email</label>
+        <input type="email" id="euEmail">
+        <div id="euEmailNote" style="font-size: 0.78rem; color: var(--gray-500); margin-top: 0.25rem;"></div>
+      </div>
+      <div class="form-group">
+        <label>First Name</label>
+        <input type="text" id="euFirstName">
+      </div>
+      <div class="form-group">
+        <label>Last Name</label>
+        <input type="text" id="euLastName">
+      </div>
+      <div class="form-group">
+        <label>Organization</label>
+        <input type="text" id="euOrganization">
+      </div>
+      <div class="form-group">
+        <label>Role</label>
+        <select id="euRole" style="padding: 0.5rem; border: 1px solid var(--border-color); border-radius: 4px; font-size: 0.9rem;">
+          <option value="user">User</option>
+          <option value="student">Student</option>
+          <option value="instructor">Instructor</option>
+          <option value="admin">Admin</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label style="display: flex; align-items: center; gap: 0.5rem;">
+          <input type="checkbox" id="euActive" style="width: auto;">
+          Account active <span style="font-size: 0.8rem; color: var(--gray-500);">(unchecked blocks login)</span>
+        </label>
+      </div>
+      <div id="euStatus"></div>
+      <button class="btn btn-primary" id="euSaveBtn" onclick="saveUserEdits()">Save Changes</button>
+    </div>
+  </div>
+
+  <!-- Reset Login Password Modal -->
+  <!-- Resets the CyberHub login only. The "Reset Guac PW" action on the same row
+       is a separate credential — rewriting that one invalidates the stored copy
+       the user's existing lane consoles authenticate with. -->
+  <div class="modal-overlay" id="resetLoginPwModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Reset Login Password</h3>
+        <button class="modal-close" onclick="closeModal('resetLoginPwModal')">&times;</button>
+      </div>
+      <p style="font-size: 0.85rem; color: var(--gray-500); margin: 0 0 0.75rem;">
+        Sets the CyberHub sign-in password for <code id="rpUserEmail"></code>. This does not
+        change their Guacamole password.
+      </p>
+      <div class="form-group">
+        <label>New Password <span style="font-size: 0.8rem; color: var(--gray-500);">(leave blank to generate one)</span></label>
+        <input type="text" id="rpPassword" placeholder="Leave blank for a generated password" autocomplete="off">
+        <div style="font-size: 0.78rem; color: var(--gray-500); margin-top: 0.25rem;">
+          Minimum 8 characters with an uppercase letter, a lowercase letter, and a number.
+        </div>
+      </div>
+      <div id="rpStatus"></div>
+      <button class="btn btn-primary" id="rpSaveBtn" onclick="submitLoginPasswordReset()">Reset Password</button>
+    </div>
+  </div>
+
+  <!-- Batch User Creation Modal -->
+  <div class="modal-overlay" id="batchUsersModal">
+    <div class="modal-content" style="max-width: 680px;">
+      <div class="modal-header">
+        <h3>Create Batch Users</h3>
+        <button class="modal-close" onclick="closeModal('batchUsersModal')">&times;</button>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+        <div class="form-group">
+          <label>Role <span style="font-size: 0.8rem; color: var(--gray-500);">(applied to all)</span></label>
+          <select id="batchRole" style="padding: 0.5rem; border: 1px solid var(--border-color); border-radius: 4px; font-size: 0.9rem; width: 100%;">
+            <option value="student">Student</option>
+            <option value="user">User</option>
+            <option value="instructor">Instructor</option>
+            <option value="admin">Admin</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Organization <span style="font-size: 0.8rem; color: var(--gray-500);">(applied to all)</span></label>
+          <input type="text" id="batchOrganization" placeholder="Company or School" value="Independent">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Roster *</label>
+        <p style="font-size: 0.8rem; color: var(--gray-500); margin: 0 0 0.4rem;">
+          One person per line, comma- or tab-separated (paste straight from a spreadsheet):<br>
+          <code style="font-size: 0.78rem;">email, first name, last name, password</code><br>
+          Only <strong>email</strong> is required. Username is generated from the email; a random
+          password is generated when the last column is blank. A header row is detected and skipped.
+        </p>
+        <textarea id="batchRoster" rows="9" placeholder="jdoe@arizona.edu, Jane, Doe
+msmith@arizona.edu, Mark, Smith"
+          style="width: 100%; font-family: monospace; font-size: 0.85rem; padding: 0.5rem; border: 1px solid var(--border-color); border-radius: 4px;"></textarea>
+      </div>
+
+      <div id="batchStatus"></div>
+      <div id="batchResults" style="margin-top: 0.75rem;"></div>
+
+      <div style="display: flex; gap: 0.5rem; margin-top: 0.75rem;">
+        <button class="btn btn-primary" id="batchCreateBtn" onclick="createBatchUsers()">Create Users</button>
+        <button class="btn btn-outline" onclick="closeModal('batchUsersModal')">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Guacamole User Creation Modal -->
+  <div class="modal-overlay" id="createUserModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>New Guacamole User</h3>
+        <button class="modal-close" onclick="closeModal('createUserModal')">&times;</button>
+      </div>
+      <div class="form-group">
+        <label>Username</label>
+        <input type="text" id="newUsername" placeholder="e.g., student1">
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" id="newPassword" placeholder="Initial password">
+      </div>
+      <button class="btn btn-primary" onclick="createUser()">Create User</button>
+    </div>
+  </div>
+
+  <!-- User Permissions Modal -->
+  <div class="modal-overlay" id="permissionsModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Permissions — <span id="permUsername"></span></h3>
+        <button class="modal-close" onclick="closeModal('permissionsModal')">&times;</button>
+      </div>
+      <div id="permissionsBody" style="font-size: 0.9rem;"></div>
+    </div>
+  </div>
+
+  <!-- Script Editor Modal -->
+  <div class="modal-overlay" id="scriptEditorModal">
+    <div class="modal-content" style="max-width: 700px; max-height: 90vh; overflow-y: auto;">
+      <div class="modal-header">
+        <h3 id="scriptEditorTitle">New Script</h3>
+        <button class="modal-close" onclick="closeModal('scriptEditorModal')">&times;</button>
+      </div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+        <div class="form-group"><label>Slug</label><input type="text" id="scriptSlug" placeholder="e.g., smb-null-session"></div>
+        <div class="form-group"><label>Name</label><input type="text" id="scriptName" placeholder="e.g., SMB Null Session"></div>
+      </div>
+      <div class="form-group"><label>Description</label><textarea id="scriptDesc" rows="2" placeholder="What this script does..."></textarea></div>
+      <div class="form-group">
+        <label>Type</label>
+        <div style="display: flex; gap: 0.5rem;">
+          <label style="flex: 1; display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.7rem; border: 1px solid var(--border-color); border-radius: 6px; cursor: pointer;" for="scriptTypeBaseline">
+            <input type="radio" name="scriptType" id="scriptTypeBaseline" value="baseline">
+            <span>🛡️ <strong>Baseline</strong> — deploys a service cleanly, no vulns baked in</span>
+          </label>
+          <label style="flex: 1; display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.7rem; border: 1px solid var(--border-color); border-radius: 6px; cursor: pointer;" for="scriptTypeVulnerable">
+            <input type="radio" name="scriptType" id="scriptTypeVulnerable" value="vulnerable" checked>
+            <span>☠️ <strong>Vulnerable</strong> — introduces weaknesses</span>
+          </label>
+        </div>
+      </div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem;">
+        <div class="form-group">
+          <label>Category</label>
+          <select id="scriptCategory">
+            <option>Initial Setup</option><option>Compile Tools</option><option>Network Services</option>
+            <option>Web Applications</option><option>Web Server</option><option>User Simulation</option>
+            <option>Privilege Escalation</option><option>Persistence</option><option>Defense Evasion</option>
+            <option>Credential Access</option><option>Data Exfiltration</option><option>Composite Lab</option>
+            <option>Custom</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>OS Target</label>
+          <select id="scriptOS"><option value="windows">Windows</option><option value="linux">Linux</option><option value="any">Any</option></select>
+        </div>
+        <div class="form-group">
+          <label>Difficulty</label>
+          <select id="scriptDifficulty"><option value="beginner">Beginner</option><option value="intermediate" selected>Intermediate</option><option value="advanced">Advanced</option></select>
+        </div>
+      </div>
+      <div class="form-group"><label>Services Exposed (comma-separated)</label><input type="text" id="scriptServices" placeholder="e.g., 445/SMB, 22/SSH"></div>
+      <div class="form-group"><label>Depends On (comma-separated slugs)</label><input type="text" id="scriptDependsOn" placeholder="e.g., init-setup, life-artifacts"></div>
+      <div class="form-group"><label>Script Arguments (flags passed to the script)</label><input type="text" id="scriptArgs" placeholder="e.g., -Setup -Start"></div>
+      <div class="form-group">
+        <label>Script Content</label>
+        <textarea id="scriptContent" rows="15" style="font-family: monospace; font-size: 0.8rem; white-space: pre; tab-size: 2;" placeholder="Paste your PowerShell or Bash script here..."></textarea>
+      </div>
+      <input type="hidden" id="scriptEditId" value="">
+      <button class="btn btn-primary" onclick="saveVulnScript()" style="width: 100%;">Save Script</button>
+    </div>
+  </div>
+
+  <!-- Environment Template Editor Modal -->
+  <div class="modal-overlay" id="templateEditorModal">
+    <div class="modal-content" style="max-width: 800px; max-height: 90vh; overflow-y: auto;">
+      <div class="modal-header">
+        <h3 id="templateEditorTitle">New Environment Template</h3>
+        <button class="modal-close" onclick="closeModal('templateEditorModal')">&times;</button>
+      </div>
+      <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 1rem;">
+        <div class="form-group"><label>Template Name</label><input type="text" id="tplName" placeholder="e.g., DunderCorp Network"></div>
+        <div class="form-group">
+          <label>Difficulty</label>
+          <select id="tplDifficulty"><option value="beginner">Beginner</option><option value="intermediate" selected>Intermediate</option><option value="advanced">Advanced</option></select>
+        </div>
+      </div>
+      <div class="form-group"><label>Description</label><textarea id="tplDesc" rows="2" placeholder="What this challenge network simulates..."></textarea></div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+        <div class="form-group">
+          <label>Module</label>
+          <select id="tplModule"><option value="crucible">Crucible</option><option value="cyberlabs">CyberLabs</option><option value="forge">Forge</option></select>
+        </div>
+        <div class="form-group">
+          <label>Challenge Key (for VXLAN block)</label>
+          <input type="text" id="tplChallengeKey" placeholder="e.g., metasploitable2-basic">
+          <span style="font-size: 0.7rem; color: var(--gray-400);">Must match an existing challenge key (see the Environment Templates tab)</span>
+        </div>
+      </div>
+
+      <!-- Shown instead of the VM/GOAD builders when the challenge is a reserved
+           lab network (e.g. a CLE course) — it owns a VXLAN block and SDN zone,
+           not a VM list, so only its name/description/difficulty are editable. -->
+      <div id="tplReservationNotice" style="display: none; border: 1px solid #4299e1; border-radius: 10px; padding: 0.85rem; margin-top: 0.75rem; background: rgba(66, 153, 225, 0.12); font-size: 0.85rem;"></div>
+
+      <div id="tplBuilderSections">
+      <!-- GOAD configuration card.
+           FIELD-FOR-FIELD the same card as the Topology Designer's (admin.html
+           ~line 940), with tplGoad* ids instead of topoGoad*. Every behaviour
+           behind it is the ONE shared implementation in admin-topology.js
+           ("GOAD CARD — ONE implementation, two surfaces"); the wrappers that
+           bind it to this modal are tplGoadCard() and friends in
+           admin-challenges.js.
+
+           Two copies of the markup survive only because the Designer's block is
+           pinned by test/ad-domain-rules.test.js reading this file. They are
+           held together by test/goad-card-parity.test.js, which strips the
+           prefix off both blocks and fails on the first field, handler or
+           readonly flag that one grows and the other does not. If you add a
+           field here, add it there — the gate will tell you, but it is cheaper
+           to do it in one pass. -->
+      <div style="border: 1px solid #f6ad55; border-radius: 10px; padding: 0.85rem; margin-top: 0.75rem; background: rgba(245, 158, 11, 0.12);">
+        <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer; margin: 0;">
+          <input type="checkbox" id="tplGoadEnabled" onchange="onTplGoadToggle()" style="width: 18px; height: 18px; cursor: pointer; margin: 0;">
+          <span style="font-weight: 600; font-size: 0.95rem;">Use GOAD (Game of Active Directory)</span>
+          <span style="font-size: 0.72rem; color: var(--gray-500); font-weight: 400;">— upstream Orange Cyberdefense playbooks</span>
+        </label>
+        <div id="tplGoadConfig" style="display: none; margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px dashed #f6ad55;">
+          <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 0.75rem; font-size: 0.85rem;">
+            <div class="form-group" style="margin: 0;">
+              <label style="font-size: 0.75rem;">GOAD Version</label>
+              <select id="tplGoadVersion" onchange="onTplGoadVersionChange()" style="font-size: 0.85rem;">
+                <option value="GOAD-Light">Loading...</option>
+              </select>
+            </div>
+            <div class="form-group" style="margin: 0;">
+              <label style="font-size: 0.75rem;" for="tplGoadDomain">Forest Domain</label>
+              <input type="text" id="tplGoadDomain" value="cybersaguaros.local" oninput="onTplGoadDomainInput()"
+                     title="Defaults to the selected lab's stock forest. Enable Rename forest to build your authored root and child domains. Computer names remain the fixed catalog roster; compiled and pre-baked identities require regeneration."
+                     style="font-size: 0.85rem; font-family: monospace;">
+            </div>
+            <div class="form-group" style="margin: 0;">
+              <label style="font-size: 0.75rem;" for="tplGoadChild">Child Subdomain</label>
+              <input type="text" id="tplGoadChild" value="tumamoc" oninput="onTplGoadDomainInput()"
+                     placeholder="none"
+                     title="A single label, e.g. tumamoc — the child is always <label>.<forest domain>. Leave blank for a single-domain lab (GOAD-Mini, SCCM, NHA, DRACARYS)."
+                     style="font-size: 0.85rem; font-family: monospace;">
+            </div>
+          </div>
+          <!-- The rename opt-in — the Designer's twin, and the parity gate keeps
+               them twins. Disabled from JS, never with a readonly attribute:
+               the reason (unsupported transform, or pre-baked lane) is data-driven
+               and is said out loud in the hint below. -->
+          <div style="margin-top: 0.5rem;">
+            <label style="display:flex; align-items:flex-start; gap:0.5rem; cursor:pointer; margin:0;">
+              <input type="checkbox" id="tplGoadRenameForest" onchange="onTplGoadRenameForestToggle()"
+                     style="width:15px; height:15px; margin-top:0.15rem; cursor:pointer;">
+              <span style="font-size:0.8rem;">Rename forest to the authored domain
+                <span style="color:var(--gray-500);">— recompiles the lab tree and pushes it at deploy</span></span>
+            </label>
+            <p class="topo-settings-hint" id="tplGoadRenameHint" style="margin-top:0.25rem;"></p>
+          </div>
+          <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 0.75rem; margin-top: 0.5rem; font-size: 0.85rem; align-items: end;">
+            <div class="form-group" style="margin: 0;">
+              <label style="font-size: 0.75rem;">Local Administrator Password (read-only — baked into the Windows template)</label>
+              <input type="text" id="tplGoadPassword" value="vagrant" readonly title="GOAD's Autounattend.xml bakes the Windows Administrator password as 'vagrant' — change it in the packer answer file, not here" style="font-size: 0.85rem; font-family: monospace; background:var(--gray-100); color:var(--gray-500); cursor:not-allowed;">
+            </div>
+            <div style="display: flex; align-items: center; gap: 0.5rem; padding-bottom: 0.4rem;">
+              <input type="checkbox" id="tplGoadKali" checked onchange="onTplGoadKaliToggle()" style="width: 16px; height: 16px; cursor: pointer;">
+              <label for="tplGoadKali" style="font-size: 0.8rem; cursor: pointer; margin: 0;">Include Kali (.50)</label>
+            </div>
+            <div style="display: flex; align-items: center; gap: 0.5rem; padding-bottom: 0.4rem;">
+              <input type="checkbox" id="tplGoadPrebaked" onchange="onTplGoadPrebakedToggle()" style="width: 16px; height: 16px; cursor: pointer;">
+              <label for="tplGoadPrebaked" style="font-size: 0.8rem; cursor: pointer; margin: 0;">Pre-baked golden images</label>
+            </div>
+          </div>
+          <div id="tplGoadPrebakedConfig" style="display: none; margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px dashed #f6ad55;">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+              <div class="form-group" style="margin: 0;">
+                <label style="font-size: 0.75rem;">Fixed internal subnet (first 3 octets)</label>
+                <input type="text" id="tplGoadFixedInt" placeholder="10.167.161" style="font-size: 0.85rem; font-family: monospace;">
+              </div>
+              <div class="form-group" style="margin: 0;">
+                <label style="font-size: 0.75rem;">Fixed external subnet (first 3 octets)</label>
+                <input type="text" id="tplGoadFixedExt" placeholder="10.39.161" style="font-size: 0.85rem; font-family: monospace;">
+              </div>
+            </div>
+            <p class="topo-settings-hint">
+              Clones provisioned golden images instead of running the ~90-min ansible bake. Every pre-baked lane
+              reuses these exact subnets (safe — v3 lanes are VXLAN-isolated), and they <strong>must</strong> match
+              the base the image's AD/DNS was provisioned on. Requires a <strong>v3</strong> challenge; this
+              environment's subnet scheme was fixed when it was created and cannot be changed here.
+            </p>
+          </div>
+          <div style="margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px dashed #f6ad55;">
+            <label style="font-size: 0.75rem; font-weight: 600; display: block; margin-bottom: 0.3rem;">Extensions</label>
+            <div id="tplGoadExtensions"></div>
+            <p class="topo-settings-hint">
+              Upstream GOAD extensions. Ticking one places the machine, pins its address, and hands the key to the
+              controller's <code>run.sh</code>, which installs the extension in-lane — so it is a
+              <strong>request to install</strong>, not a label. Ticking is surgical: nothing else on the canvas is
+              disturbed. A <strong>pre-baked</strong> environment runs no Ansible, so the two are refused together.
+            </p>
+          </div>
+          <p class="topo-settings-hint" id="tplGoadVersionDesc"></p>
+          <div class="topo-field-error" id="tplErrGoad" style="display: none;"></div>
+        </div>
+      </div>
+
+      <h4 style="margin: 1rem 0 0.5rem;">Virtual Machines</h4>
+
+      <!-- Two views over the SAME templateVMs array. The canvas is the default;
+           the table is kept because it is the only place some fields are
+           editable in bulk, and because a canvas that misbehaves must never be
+           the only way to author a challenge. -->
+      <div class="topo-toolbar">
+        <button class="btn btn-sm btn-outline" id="tplViewCanvasBtn" onclick="setTplVmView('canvas')">Canvas</button>
+        <button class="btn btn-sm btn-outline" id="tplViewTableBtn" onclick="setTplVmView('table')">Table</button>
+        <span class="topo-spacer"></span>
+        <span class="topo-hint" id="tplTopoHint">Drag a template in · drag from a machine to a network to attach · right-click anything for its menu</span>
+        <button class="btn btn-sm btn-outline" onclick="tplTopoRelayout()" title="Re-arrange automatically">Auto-arrange</button>
+        <button class="btn btn-sm btn-outline" onclick="tplTopoValidate()">Validate</button>
+        <button class="btn btn-sm btn-outline" onclick="tplTopoExport()">Export</button>
+        <button class="btn btn-sm btn-outline" onclick="document.getElementById('tplTopoImportFile').click()">Import</button>
+        <input type="file" id="tplTopoImportFile" accept=".json,.cctopo.json,application/json" style="display:none" onchange="tplTopoImport(this)">
+      </div>
+
+      <div id="tplVmCanvasView">
+        <div class="topo-wrap">
+          <div class="topo-palette" id="tplTopoPalette"></div>
+          <div class="topo-canvas" id="tplTopoCanvas"></div>
+          <div class="topo-panel" id="tplTopoPanel"></div>
+        </div>
+        <div class="topo-legend">
+          <span><i class="topo-lg-ext"></i> External / Attacker</span>
+          <span><i class="topo-lg-int"></i> Internal / Corp</span>
+          <span><i class="topo-lg-console"></i> Student console</span>
+          <span>Double border = placement fixed by the GOAD lab</span>
+        </div>
+        <div id="tplTopoFindings"></div>
+      </div>
+
+      <div id="tplVmTableView" style="display:none;">
+        <div id="tplVmList"></div>
+        <button class="btn btn-sm btn-outline" onclick="addTemplateVM()" style="margin-top: 0.5rem;">+ Add VM</button>
+      </div>
+
+      <h4 style="margin: 1.5rem 0 0.5rem;">Phantom Assets (appear in profile only)</h4>
+      <div id="tplPhantomList"></div>
+      <button class="btn btn-sm btn-outline" onclick="addTemplatePhantom()" style="margin-top: 0.5rem;">+ Add Phantom Host</button>
+      </div><!-- /tplBuilderSections -->
+
+      <input type="hidden" id="tplEditId" value="">
+      <button class="btn btn-primary" onclick="saveTemplate()" style="width: 100%; margin-top: 1.5rem;">Save Template</button>
+    </div>
+  </div>
+
+  <!-- Live Lane Topology (read-only) -->
+  <div class="modal-overlay" id="laneTopologyModal">
+    <div class="modal-content" style="width:92%; max-width:1000px;">
+      <div class="modal-header">
+        <h3 id="laneTopologyTitle">Topology</h3>
+        <button class="modal-close" onclick="closeLaneTopology()">&times;</button>
+      </div>
+      <p id="laneTopologyMeta" style="font-size:0.78rem; color:var(--text-muted); margin:0 0 0.6rem;"></p>
+      <div class="topo-canvas" id="laneTopologyCanvas" style="min-height:440px; border:1px solid var(--border-color); border-radius:var(--border-radius);"></div>
+      <div class="topo-legend" style="border:1px solid var(--border-color); border-top:none; border-radius:0 0 var(--border-radius) var(--border-radius);">
+        <span><i class="topo-lg-ext"></i> External / Attacker</span>
+        <span><i class="topo-lg-int"></i> Internal / Corp</span>
+        <span>Amber border = not running</span>
+        <span>Attachments read live from Proxmox, not from the challenge spec</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Deploy Confirmation Modal -->
+  <div class="modal-overlay" id="deployConfirmModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Confirm Deployment</h3>
+        <button class="modal-close" onclick="closeModal('deployConfirmModal')">&times;</button>
+      </div>
+      <div id="deployConfirmBody" style="font-size: 0.9rem;"></div>
+      <div style="display: flex; gap: 0.75rem; margin-top: 1.25rem;">
+        <button class="btn btn-outline" onclick="closeModal('deployConfirmModal')" style="flex: 1;">Cancel</button>
+        <button class="btn btn-primary" id="deployConfirmBtn" style="flex: 1;">Confirm Deploy</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Broadcast Confirmation Modal -->
+  <!-- Not showDeployConfirmation(): that helper hard-codes VM counts and its
+       modal says "Confirm Deploy". Same shape, different content. -->
+  <div class="modal-overlay" id="broadcastConfirmModal">
+    <div class="modal-content" style="max-width: 640px;">
+      <div class="modal-header">
+        <h3 id="broadcastConfirmTitle">Send this broadcast?</h3>
+        <button class="modal-close" onclick="closeModal('broadcastConfirmModal')">&times;</button>
+      </div>
+      <div id="broadcastConfirmBody" style="font-size: 0.9rem;"></div>
+      <div style="display: flex; gap: 0.75rem; margin-top: 1.25rem;">
+        <button class="btn btn-outline" onclick="closeModal('broadcastConfirmModal')" style="flex: 1;">Cancel</button>
+        <button class="btn btn-primary" id="broadcastConfirmBtn" style="flex: 1;">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Crucible Event Modal -->
+  <div class="modal-overlay" id="crucibleEventModal">
+    <div class="modal-content" style="width:90%; max-width:560px;">
+      <div class="modal-header">
+        <h3 id="crucibleEventModalTitle">New Crucible Event</h3>
+        <button class="modal-close" onclick="closeModal('crucibleEventModal')">&times;</button>
+      </div>
+      <input type="hidden" id="crucibleEventId">
+      <div style="display:flex; flex-direction:column; gap:1rem; margin-top:1rem;">
+        <div class="form-group">
+          <label>Event Name *</label>
+          <input type="text" id="crucibleEventName" placeholder="e.g. Weekly CTF — Week 22">
+        </div>
+        <div class="form-group">
+          <label>Challenge Type *</label>
+          <select id="crucibleEventType">
+            <option value="weekly">📅 Weekly Challenges</option>
+            <option value="vuln">💀 Vulnerable Boxes</option>
+            <option value="groupctf">🏁 Group CTF</option>
+            <option value="koth">👑 King of the Hill</option>
+            <option value="redvsblue">⚔️ Red vs Blue</option>
+            <option value="ir">🚨 Incident Response / SOC Sim</option>
+            <option value="ctf_event">🎯 CTF Events</option>
+            <option value="byoctf">🛠️ BYO CTF</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Description</label>
+          <textarea id="crucibleEventDesc" rows="2" placeholder="Brief description of the event..."></textarea>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+          <div class="form-group">
+            <label>Start Date/Time</label>
+            <input type="datetime-local" id="crucibleEventStart">
+          </div>
+          <div class="form-group">
+            <label>End Date/Time</label>
+            <input type="datetime-local" id="crucibleEventEnd">
+          </div>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+          <div class="form-group">
+            <label>Max Players</label>
+            <input type="number" id="crucibleEventMaxPlayers" placeholder="Leave blank for unlimited" min="1">
+          </div>
+          <div class="form-group" style="justify-content:flex-end; padding-top:1.5rem;">
+            <label style="display:flex; align-items:center; gap:0.5rem; cursor:pointer; font-weight:normal;">
+              <input type="checkbox" id="crucibleEventPublic" checked> Publicly visible
+            </label>
+          </div>
+        </div>
+        <p style="font-size:0.8rem; color:var(--gray-500); margin:0;">Events start in <strong>Draft</strong> status. Activate them from the events list when ready for users to see.</p>
+      </div>
+      <div style="display:flex; gap:0.75rem; margin-top:1.5rem;">
+        <button class="btn btn-outline" onclick="closeModal('crucibleEventModal')" style="flex:1;">Cancel</button>
+        <button class="btn btn-primary" onclick="saveCrucibleEvent()" style="flex:1;">Save Event</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script src="/js/layout.js"></script>
+  <!-- Topology canvas. Vendored, not CDN: CSP is scriptSrc 'self' and offline
+       mode is a supported deployment. lodash and cytoscape must both precede
+       edgehandles — see public/vendor/README.md. -->
+  <script src="/vendor/lodash.min.js"></script>
+  <script src="/vendor/cytoscape.min.js"></script>
+  <script src="/vendor/cytoscape-edgehandles.js"></script>
+  <!-- Loaded before the editor: topology-editor.js reads
+       window.CyberCoreAdDomainRules at call time, not load time, but keeping the
+       rulebook first means a console error here is unambiguous. -->
+  <script src="/js/topology/ad-domain-rules.js"></script>
+  <script src="/js/topology/topology-icons.js"></script>
+  <script src="/js/topology/topology-render.js"></script>
+  <script src="/js/topology/topology-editor.js"></script>
+  <script src="/js/topology/topology-seed.js"></script>
+  <script src="/js/admin/admin-core.js"></script>
+  <script src="/js/admin/admin-connections.js"></script>
+  <script src="/js/admin/admin-users.js"></script>
+  <script src="/js/admin/admin-sessions.js"></script>
+  <script src="/js/admin/admin-lanes.js"></script>
+  <script src="/js/admin/admin-wazuh.js"></script>
+  <script src="/js/admin/admin-audit.js"></script>
+  <script src="/js/admin/admin-challenges.js"></script>
+  <script src="/js/admin/admin-vuln-scripts.js"></script>
+  <script src="/js/admin/admin-workstation-templates.js"></script>
+  <script src="/js/admin/admin-crucible-events.js"></script>
+  <script src="/js/admin/admin-settings.js"></script>
+  <!-- After admin-challenges.js: the Topology tab reuses its GOAD catalog
+       helpers (loadGoadCatalog, findGoadLab), difficultyLabel and escHtml.
+       goad-extensions.js is the same pair for the extension catalog and must
+       precede admin-topology.js, which calls into it.
+
+       The dependency also runs the OTHER way now: admin-topology.js owns the
+       shared GOAD card ("GOAD CARD — ONE implementation, two surfaces") that
+       admin-challenges.js's template-editor modal binds to. That is safe in this
+       order because classic scripts share one global scope and every one of
+       those calls happens on a user gesture, long after both files evaluate. -->
+  <script src="/js/admin/goad-extensions.js"></script>
+  <script src="/js/admin/admin-topology.js"></script>
+  <script src="/js/admin/admin-broadcast.js"></script>
+  <script src="/js/admin/admin-tickets.js"></script>
+  <script src="/js/admin/admin-init.js"></script>
+</body>
+</html>

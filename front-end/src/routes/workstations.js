@@ -1,0 +1,1006 @@
+/**
+ * ============================================================================
+ * User Workstations
+ * Self-service workstation VMs: browse templates, deploy, power control,
+ * snapshots, and rollback. Supports both QEMU VMs and LXC containers —
+ * provider_type in cybercore_template_catalog controls which API paths are used.
+ * ============================================================================
+ */
+
+const express = require('express');
+const router = express.Router();
+const { authenticateToken, requireRole } = require('../middleware/auth');
+const { cybercoreQuery } = require('../utils/cybercore-db');
+const { proxmoxAPI, waitForTask, findTemplateNode } = require('../utils/proxmox');
+const { vmApiBase } = require('../utils/vm-paths');
+const { selectBestNode } = require('../utils/node-selector');
+const { guacAPI, ensureGuacAccount } = require('../utils/guacamole');
+const { getDefaultTemplateNode } = require('../utils/site-config');
+const createLogger = require('../utils/logger');
+const log = createLogger('workstations');
+const audit = require('../utils/audit');
+
+// Self-service deploy is staff-only. Students use lane VMs and the workstations
+// their instructor provisions for them; they do not mint their own cluster VMs.
+// Allowlist, never a denylist: the DB default role is 'user', not 'student'
+// (001_init_db.sql:27), so a `role !== 'student'` check would quietly keep the
+// feature for every legacy 'user' row.
+const staffOnly = requireRole('instructor', 'admin');
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+/** Sanitize a string to a Proxmox-safe VM/CT name: lowercase, hyphens only, max 63 chars. */
+function sanitizeVmName(s) {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .substring(0, 63);
+}
+
+// vmApiBase is imported from utils/vm-paths above. It used to be defined here as
+// well as in lane-deployer.js; one definition means the qemu/lxc decision cannot
+// drift between the two.
+
+/**
+ * Verify caller can access this workstation VM; returns the vm row or throws.
+ * Admins bypass the ownership filter and can target any non-destroyed workstation.
+ */
+async function getOwnedWorkstation(userId, vmId, isAdmin = false) {
+  const sql = isAdmin
+    ? `
+      SELECT
+        vi.vm_instance_id, vi.provider_node, vi.provider_vmid,
+        vi.power_state, vi.metadata AS vi_metadata,
+        r.resource_id, r.name AS vm_name, r.module_key,
+        r.status AS resource_status,
+        r.metadata->>'provider_type' AS provider_type,
+        -- Owner, for the audit trail: an admin acting on someone else's
+        -- workstation is otherwise indistinguishable from self-service.
+        (SELECT a.user_id FROM cybercore_allocation a
+          WHERE a.resource_id = r.resource_id
+            AND (a.ends_at IS NULL OR a.ends_at > NOW())
+          ORDER BY a.starts_at DESC LIMIT 1) AS owner_user_id
+      FROM cybercore_vm_instance vi
+      JOIN cybercore_resource r ON r.resource_id = vi.resource_id
+      WHERE vi.vm_instance_id = $1
+        AND vi.destroyed_at IS NULL
+        AND (r.metadata->>'vm_category') = 'workstation'
+    `
+    : `
+      SELECT
+        vi.vm_instance_id, vi.provider_node, vi.provider_vmid,
+        vi.power_state, vi.metadata AS vi_metadata,
+        r.resource_id, r.name AS vm_name, r.module_key,
+        r.status AS resource_status,
+        r.metadata->>'provider_type' AS provider_type,
+        a.user_id AS owner_user_id
+      FROM cybercore_vm_instance vi
+      JOIN cybercore_resource r ON r.resource_id = vi.resource_id
+      JOIN cybercore_allocation a
+        ON  a.resource_id = r.resource_id
+        AND a.user_id     = $1
+        AND (a.ends_at IS NULL OR a.ends_at > NOW())
+      WHERE vi.vm_instance_id = $2
+        AND vi.destroyed_at IS NULL
+        AND (r.metadata->>'vm_category') = 'workstation'
+    `;
+  const params = isAdmin ? [vmId] : [userId, vmId];
+  const result = await cybercoreQuery(sql, params);
+
+  if (!result.rows.length) throw Object.assign(new Error('Workstation not found or not yours'), { status: 404 });
+  return result.rows[0];
+}
+
+/**
+ * Fetch the first non-loopback IPv4 from the Proxmox guest agent or LXC interfaces API.
+ * Polls with retries to wait for the guest agent to come online after boot.
+ */
+async function getVmIp(node, vmid, providerType, retries = 12, delayMs = 10000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      if (providerType === 'lxc') {
+        const ifaces = await proxmoxAPI('GET', `/api2/json/nodes/${node}/lxc/${vmid}/interfaces`);
+        for (const iface of (Array.isArray(ifaces) ? ifaces : [])) {
+          if (iface.name === 'lo') continue;
+          const ip = (iface.inet || '').split('/')[0];
+          if (ip && !ip.startsWith('127.') && !ip.startsWith('169.254.')) return ip;
+        }
+      } else {
+        const data = await proxmoxAPI('GET', `/api2/json/nodes/${node}/qemu/${vmid}/agent/network-get-interfaces`);
+        const ifaces = data?.result || (Array.isArray(data) ? data : []);
+        for (const iface of ifaces) {
+          if (iface.name === 'lo') continue;
+          for (const addr of (iface['ip-addresses'] || [])) {
+            const ip = addr['ip-address'];
+            if (addr['ip-address-type'] === 'ipv4' && ip &&
+                !ip.startsWith('127.') && !ip.startsWith('169.254.')) {
+              return ip;
+            }
+          }
+        }
+      }
+    } catch (_) {}
+    if (i < retries - 1) await new Promise(r => setTimeout(r, delayMs));
+  }
+  return null;
+}
+
+/**
+ * Get next available VMID >= 800000, serialized so concurrent deploy requests
+ * don't all receive the same ID before any VM is created on Proxmox.
+ *
+ * Queries live cluster resources to build the full set of existing VMIDs, then
+ * walks forward from 800000 skipping anything taken on Proxmox or reserved
+ * in-flight by another pending deploy in this process.
+ */
+const _pendingVmids = new Set();
+let   _vmidMutex   = Promise.resolve();
+
+async function nextVmId() {
+  const work = async () => {
+    const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
+    const existing  = new Set((resources || []).map(r => Number(r.vmid)));
+
+    let candidate = 800000;
+    while (existing.has(candidate) || _pendingVmids.has(candidate)) {
+      candidate++;
+    }
+    _pendingVmids.add(candidate);
+    return candidate;
+  };
+
+  // Pass `work` as BOTH handlers so the chain runs whether the previous link
+  // resolved or rejected, and keep a never-rejecting promise as the new head.
+  // Assigning the raw result would poison the chain permanently: one failed
+  // proxmoxAPI call and every future deploy replays that same rejection without
+  // ever running this function again.
+  const result = _vmidMutex.then(work, work);
+  _vmidMutex = result.catch(() => {});
+  return result;
+}
+
+/**
+ * Per-template clone serialization. Proxmox locks the template (LXC or QEMU)
+ * during the disk-copy phase of a clone; concurrent clones of the same
+ * template fail with "CT is locked (disk)". We chain clones of the same
+ * template through this map and actively poll the template's lock status
+ * rather than waiting a fixed time. Different templates clone in parallel.
+ */
+const _templateCloneMutex = new Map(); // `${node}:${vmid}` → Promise chain
+
+async function waitForTemplateUnlock(node, vmid, providerType, maxWaitMs = 300000) {
+  const start = Date.now();
+  const apiBase = vmApiBase(node, vmid, providerType);
+  let lastLock = null;
+  while (Date.now() - start < maxWaitMs) {
+    try {
+      const status = await proxmoxAPI('GET', `${apiBase}/status/current`);
+      if (!status?.lock) return;
+      if (status.lock !== lastLock) {
+        log.info(`Template ${vmid} on ${node} locked (${status.lock}) — waiting for unlock…`);
+        lastLock = status.lock;
+      }
+    } catch (err) {
+      log.warn(`Template ${vmid} lock check failed (will retry): ${err.message}`);
+    }
+    await new Promise(r => setTimeout(r, 3000));
+  }
+  throw new Error(`Timed out after ${maxWaitMs}ms waiting for template ${vmid} on ${node} to unlock`);
+}
+
+/**
+ * Serializes the LOCKED phase of cloning a single template. Waits for prior
+ * clones to clear, kicks off the new clone, then holds the mutex until the
+ * template's disk lock clears again — at which point the next clone is safe
+ * to start. Returns the clone task UPID; caller still awaits the full task.
+ */
+async function cloneTemplateSerialized(templateNode, templateVmid, providerType, cloneBody) {
+  const key  = `${templateNode}:${templateVmid}`;
+  const prev = _templateCloneMutex.get(key) || Promise.resolve();
+  const next = prev.then(async () => {
+    await waitForTemplateUnlock(templateNode, templateVmid, providerType);
+    const upid = await proxmoxAPI(
+      'POST',
+      `${vmApiBase(templateNode, templateVmid, providerType)}/clone`,
+      cloneBody
+    );
+    // Give Proxmox a moment to actually acquire the lock after returning UPID,
+    // then wait for it to clear (= disk copy phase complete, safe for next clone)
+    await new Promise(r => setTimeout(r, 2000));
+    await waitForTemplateUnlock(templateNode, templateVmid, providerType);
+    return upid;
+  });
+  // Always advance the chain even on failure so a stuck error doesn't block subsequent clones
+  _templateCloneMutex.set(key, next.catch(() => {}));
+  return next;
+}
+
+/**
+ * Bulk-sync power_state for a list of vm_instance rows using a single
+ * cluster/resources call.  Updates the DB in parallel; never throws — errors
+ * are swallowed so callers always get a response even if Proxmox is unreachable.
+ * Returns the same rows with power_state patched to the live value.
+ */
+async function syncPowerStates(rows) {
+  if (!rows.length) return rows;
+  try {
+    // No ?type=vm filter — that returns both qemu and lxc in Proxmox
+    const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
+    const byVmid = {};
+    for (const r of (resources || [])) byVmid[String(r.vmid)] = r;
+
+    const updates = [];
+    for (const row of rows) {
+      // Skip VMs still being provisioned — background deploy task owns their state
+      if (row.power_state === 'deploying' || !row.provider_vmid) continue;
+      const r = byVmid[String(row.provider_vmid)];
+      if (!r) continue;
+      const live = r.status === 'running' ? 'running' : r.status === 'stopped' ? 'stopped' : r.status;
+      if (live !== row.power_state) {
+        updates.push(cybercoreQuery(
+          `UPDATE cybercore_vm_instance
+             SET power_state = $1, last_seen_at = now(), last_state_change = now()
+           WHERE vm_instance_id = $2`,
+          [live, row.vm_instance_id]
+        ));
+        row.power_state = live;
+      } else {
+        updates.push(cybercoreQuery(
+          `UPDATE cybercore_vm_instance SET last_seen_at = now() WHERE vm_instance_id = $1`,
+          [row.vm_instance_id]
+        ));
+      }
+    }
+    await Promise.allSettled(updates);
+  } catch (err) {
+    log.warn('Proxmox state sync failed, using cached states:', err.message);
+  }
+  return rows;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// GET /api/workstations/templates
+// Lists the active workstation templates a caller may deploy from. Staff only:
+// this is the catalog behind the hub's "Available" tab, and students are not
+// permitted to provision their own VMs.
+// ──────────────────────────────────────────────────────────────────────────────
+router.get('/templates', authenticateToken, staffOnly, async (req, res) => {
+  try {
+    const result = await cybercoreQuery(`
+      SELECT
+        id              AS template_id,
+        template_key,
+        os_name         AS name,
+        description,
+        os_family,
+        os_version,
+        provider_type,
+        template_vmid,
+        node,
+        module_key,
+        max_instances,
+        metadata
+      FROM cybercore_template_catalog
+      WHERE template_type = 'workstation'
+        AND is_active     = TRUE
+        AND status        = 'active'
+      ORDER BY os_name ASC
+    `);
+    res.json({ templates: result.rows });
+  } catch (err) {
+    log.error('GET /templates error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// GET /api/workstations/mine
+// Lists the caller's deployed workstation VMs. Admins receive every active
+// workstation in the cluster (with owner_email on each row) so they can
+// monitor / control the full fleet from one view. Non-admins always get the
+// per-user filter regardless of query params.
+// ──────────────────────────────────────────────────────────────────────────────
+router.get('/mine', authenticateToken, async (req, res) => {
+  try {
+    const isAdmin = req.user.role === 'admin';
+    const showAll = isAdmin && req.query.scope !== 'mine';
+
+    const sql = showAll
+      ? `
+        SELECT
+          vi.vm_instance_id                  AS vm_instance_id,
+          vi.vm_instance_id                  AS vm_id,
+          r.name                              AS vm_name,
+          r.module_key,
+          r.status                            AS resource_status,
+          vi.power_state,
+          vi.provider_node,
+          vi.provider_vmid,
+          vi.created_at,
+          vi.last_seen_at,
+          r.metadata->>'template_name'        AS template_name,
+          r.metadata->>'dev_deploy'           AS dev_deploy,
+          r.metadata->>'provider_type'        AS provider_type,
+          r.metadata->>'guac_connection_id'   AS guac_connection_id,
+          vi.metadata->>'guac_connection_id'  AS guac_connection_id_vi,
+          owner.email                         AS owner_email,
+          owner.user_id                       AS owner_id
+        FROM cybercore_vm_instance vi
+        JOIN cybercore_resource r ON r.resource_id = vi.resource_id
+        LEFT JOIN LATERAL (
+          SELECT u.user_id, u.email
+          FROM cybercore_allocation a
+          JOIN cybercore_user u ON u.user_id = a.user_id
+          WHERE a.resource_id = r.resource_id
+            AND (a.ends_at IS NULL OR a.ends_at > NOW())
+          ORDER BY a.starts_at ASC
+          LIMIT 1
+        ) owner ON TRUE
+        WHERE vi.destroyed_at IS NULL
+          AND (r.metadata->>'vm_category') = 'workstation'
+        ORDER BY vi.created_at DESC
+      `
+      : `
+        SELECT
+          vi.vm_instance_id                  AS vm_instance_id,
+          vi.vm_instance_id                  AS vm_id,
+          r.name                              AS vm_name,
+          r.module_key,
+          r.status                            AS resource_status,
+          vi.power_state,
+          vi.provider_node,
+          vi.provider_vmid,
+          vi.created_at,
+          vi.last_seen_at,
+          r.metadata->>'template_name'        AS template_name,
+          r.metadata->>'dev_deploy'           AS dev_deploy,
+          r.metadata->>'provider_type'        AS provider_type,
+          r.metadata->>'guac_connection_id'   AS guac_connection_id,
+          vi.metadata->>'guac_connection_id'  AS guac_connection_id_vi
+        FROM cybercore_vm_instance vi
+        JOIN cybercore_resource r ON r.resource_id = vi.resource_id
+        JOIN cybercore_allocation a
+          ON  a.resource_id = r.resource_id
+          AND a.user_id     = $1
+          AND (a.ends_at IS NULL OR a.ends_at > NOW())
+        WHERE vi.destroyed_at IS NULL
+          AND (r.metadata->>'vm_category') = 'workstation'
+        ORDER BY vi.created_at DESC
+      `;
+    const params = showAll ? [] : [req.user.userId];
+    const result = await cybercoreQuery(sql, params);
+
+    const synced = await syncPowerStates(result.rows);
+
+    const vms = synced.map(r => ({
+      vmId:         r.vm_id,
+      name:         r.vm_name,
+      moduleKey:    r.module_key,
+      powerState:   r.power_state || 'unknown',
+      providerType: r.provider_type || 'qemu',
+      node:         r.provider_node,
+      vmid:         r.provider_vmid,
+      templateName: r.template_name,
+      devDeploy:    r.dev_deploy === 'true',
+      createdAt:    r.created_at,
+      lastSeenAt:   r.last_seen_at,
+      hasConsole:   !!(r.guac_connection_id || r.guac_connection_id_vi),
+      ...(showAll ? { ownerEmail: r.owner_email || null, ownerId: r.owner_id || null } : {}),
+    }));
+
+    res.json({ vms, scope: showAll ? 'all' : 'mine' });
+  } catch (err) {
+    log.error('GET /mine error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// GET /api/workstations/:vmId/status
+// Live power state for a single VM — queries Proxmox and updates the DB.
+// ──────────────────────────────────────────────────────────────────────────────
+router.get('/:vmId/status', authenticateToken, async (req, res) => {
+  try {
+    const vm = await getOwnedWorkstation(req.user.userId, req.params.vmId, req.user.role === 'admin');
+    const status = await proxmoxAPI(
+      'GET',
+      `${vmApiBase(vm.provider_node, vm.provider_vmid, vm.provider_type)}/status/current`
+    );
+    const live = status.status === 'running' ? 'running'
+               : status.status === 'stopped' ? 'stopped'
+               : status.status || 'unknown';
+
+    await cybercoreQuery(
+      `UPDATE cybercore_vm_instance
+         SET power_state       = $1,
+             last_seen_at      = now(),
+             last_state_change = CASE WHEN power_state != $1 THEN now() ELSE last_state_change END
+       WHERE vm_instance_id = $2`,
+      [live, req.params.vmId]
+    );
+
+    res.json({
+      vmId:       req.params.vmId,
+      powerState: live,
+      uptime:     status.uptime ?? null,
+      cpu:        status.cpu    ?? null,
+      mem:        status.mem    ?? null,
+      maxmem:     status.maxmem ?? null,
+    });
+  } catch (err) {
+    log.error('GET /status error:', err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// POST /api/workstations/:templateId/deploy
+// Validates, creates DB records immediately, responds 202, then clones/starts
+// in the background — same non-blocking pattern as DELETE.
+// ──────────────────────────────────────────────────────────────────────────────
+router.post('/:templateId/deploy', authenticateToken, staffOnly, async (req, res) => {
+  const { templateId } = req.params;
+
+  // Admins can deploy on behalf of another user (e.g. CLE bulk provisioning)
+  const userId = (req.user.role === 'admin' && req.body.forUserId) ? req.body.forUserId : req.user.userId;
+
+  try {
+    // 1. Fetch and validate template
+    const tplRes = await cybercoreQuery(`
+      SELECT id, template_key, os_family, os_name, template_vmid, node, provider_type,
+             module_key, max_instances, metadata
+      FROM cybercore_template_catalog
+      WHERE id = $1 AND template_type = 'workstation' AND is_active = TRUE AND status = 'active'
+    `, [templateId]);
+
+    if (!tplRes.rows.length) return res.status(404).json({ error: 'Template not found' });
+    const tpl = tplRes.rows[0];
+
+    if (tpl.metadata?.analysis_profile === 'malware') {
+      return res.status(409).json({ error: 'Malware workstations require a dedicated environment with a lane gateway. Deploy this template through the course environment controls.' });
+    }
+
+    if (!tpl.template_vmid) return res.status(400).json({ error: 'Template has no Proxmox VMID configured' });
+    if (!tpl.node)          return res.status(400).json({ error: 'Template has no node assigned — sync nodes in admin first' });
+
+    const providerType = tpl.provider_type || 'qemu';
+
+    // 2. Check max_instances
+    const countRes = await cybercoreQuery(`
+      SELECT COUNT(*) AS cnt FROM cybercore_resource
+      WHERE (metadata->>'catalog_template_id') = $1 AND status NOT IN ('retired', 'error')
+    `, [templateId]);
+    if (tpl.max_instances && parseInt(countRes.rows[0].cnt, 10) >= tpl.max_instances) {
+      return res.status(409).json({ error: `Max instances (${tpl.max_instances}) reached for this template` });
+    }
+
+    // 3. Validate skipLane
+    if (req.body.skipLane === true && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'skipLane is restricted to admins' });
+    }
+    const skipLane = req.body.skipLane === true && req.user.role === 'admin';
+
+    // 4. Build VM name now (no Proxmox calls needed for this)
+    const vmName = sanitizeVmName(`wks-${tpl.template_key}-${userId.slice(0, 8)}`);
+
+    // 5. Create DB records immediately so the UI can show the deploying state
+    const resourceRes = await cybercoreQuery(`
+      INSERT INTO cybercore_resource (type, module_key, name, status, metadata)
+      VALUES ('vm', $1, $2, 'provisioning', $3::jsonb)
+      RETURNING resource_id
+    `, [
+      tpl.module_key || null,
+      vmName,
+      JSON.stringify({
+        vm_category:         'workstation',
+        provider_type:       providerType,
+        catalog_template_id: templateId,
+        template_name:       tpl.os_name,
+        template_key:        tpl.template_key,
+        ...(skipLane ? { dev_deploy: true, network_mode: 'local_dev' } : {}),
+      }),
+    ]);
+    const resourceId = resourceRes.rows[0].resource_id;
+
+    // proxmox_name matches the resource name here (the clone below uses vmName
+    // verbatim), but recording it keeps dashboards on one field regardless of
+    // which deployer created the row.
+    const vmRes = await cybercoreQuery(`
+      INSERT INTO cybercore_vm_instance
+        (resource_id, provider, power_state, metadata)
+      VALUES ($1, 'proxmox', 'deploying', $2::jsonb)
+      RETURNING vm_instance_id
+    `, [resourceId, JSON.stringify({ proxmox_name: vmName })]);
+    const vmId = vmRes.rows[0].vm_instance_id;
+
+    await cybercoreQuery(`
+      INSERT INTO cybercore_allocation (resource_id, user_id, purpose)
+      VALUES ($1, $2, 'workstation')
+    `, [resourceId, userId]);
+
+    // 6. Reserve VMID now so concurrent bulk-deploys each get a unique ID
+    const newVmid = await nextVmId();
+
+    // 7. Respond immediately — client shows "Deploying…" card
+    audit.log({
+      req,
+      action: 'workstation.deployed',
+      target:     { type: 'vm', id: vmId, label: vmName },
+      targetUser: { id: userId },
+      metadata: {
+        template_id: templateId, template_key: tpl.template_key,
+        os_name: tpl.os_name, provider_type: providerType,
+        skip_lane: skipLane,
+        on_behalf_of: userId !== req.user.userId,
+      },
+    });
+
+    res.status(202).json({ success: true, vmId, name: vmName, providerType });
+
+    // 8. Clone + start in background
+    (async () => {
+      try {
+        const templateNode = await findTemplateNode(
+          tpl.template_vmid,
+          tpl.node || getDefaultTemplateNode()
+        );
+        const bestNodeInfo = await selectBestNode();
+        const bestNode     = bestNodeInfo.node;
+
+        log.info(`Deploying ${tpl.template_vmid} (${providerType}) ${templateNode} → ${bestNode} VMID ${newVmid} "${vmName}"${skipLane ? ' [DEV]' : ''}`);
+
+        const cloneBody = providerType === 'lxc'
+          ? { newid: newVmid, hostname: vmName, full: 1, target: bestNode,
+              description: `Workstation: ${tpl.os_name}\nUser: ${userId}\nTemplate: ${tpl.template_key}` }
+          : { newid: newVmid, name: vmName, full: 1, target: bestNode,
+              description: `Workstation: ${tpl.os_name}\nUser: ${userId}\nTemplate: ${tpl.template_key}` };
+
+        // Serialized per-template: waits for any prior clone's disk-copy phase
+        // to release the template lock before starting (and before next clone starts)
+        const cloneUpid = await cloneTemplateSerialized(
+          templateNode,
+          tpl.template_vmid,
+          providerType,
+          cloneBody
+        );
+        // Cloning large templates can take 5–10 minutes — give it plenty of headroom
+        await waitForTask(templateNode, cloneUpid, 600000);
+        // VMID is now committed on Proxmox — release reservation so future deploys don't skip it
+        _pendingVmids.delete(newVmid);
+
+        if (skipLane) {
+          log.warn(`DEV DEPLOY by admin ${userId} — overriding net0 to vmbr0`);
+          const net0Value = providerType === 'lxc'
+            ? 'name=eth0,bridge=vmbr0,firewall=0'
+            : 'virtio,bridge=vmbr0,firewall=0';
+          await proxmoxAPI('PUT', `${vmApiBase(bestNode, newVmid, providerType)}/config`, { net0: net0Value });
+        }
+
+        // Update DB with real Proxmox location now that clone succeeded
+        await cybercoreQuery(`
+          UPDATE cybercore_vm_instance
+             SET provider_node = $1, provider_vmid = $2
+           WHERE vm_instance_id = $3
+        `, [bestNode, String(newVmid), vmId]);
+        await cybercoreQuery(`
+          UPDATE cybercore_resource SET status = 'allocated', updated_at = now()
+           WHERE resource_id = $1
+        `, [resourceId]);
+
+        // Start VM/CT
+        try {
+          const startUpid = await proxmoxAPI(
+            'POST',
+            `${vmApiBase(bestNode, newVmid, providerType)}/status/start`
+          );
+          await waitForTask(bestNode, startUpid);
+        } catch (startErr) {
+          log.warn(`Start after clone had a warning: ${startErr.message}`);
+        }
+
+        await cybercoreQuery(`
+          UPDATE cybercore_vm_instance
+             SET power_state = 'running', started_at = now()
+           WHERE vm_instance_id = $1
+        `, [vmId]);
+
+        log.info(`Workstation deployed and running`, { vmId, vmid: newVmid, node: bestNode });
+
+        // Create Guacamole RDP connection if Guacamole is enabled
+        if (process.env.GUAC_ENABLED === 'true') {
+          try {
+            const vmIp = await getVmIp(bestNode, newVmid, providerType);
+            if (vmIp) {
+              // cloud_init_user is read as well as default_rdp_user. Migrations
+              // 025/026 moved bake-pinned Windows accounts from the latter to
+              // the former, and this path never learned about the move — so for
+              // every migrated template it published a connection with NO
+              // username and NO password at all (buildGuacParameters-style
+              // spreads drop falsy values), which reaches the user as a bare RDP
+              // prompt rather than as any kind of error.
+              //
+              // No password is generated here: unlike the lane path this route
+              // does not inject cloud-init credentials, so it can only report
+              // the account name and let the user supply the password they were
+              // given.
+              const rdpUser = tpl.metadata?.default_rdp_user || tpl.metadata?.cloud_init_user || null;
+              const rdpPass = tpl.metadata?.default_rdp_pass || null;
+              const connName = `${vmName}-${newVmid}`;
+              const connBody = {
+                name: connName,
+                protocol: 'rdp',
+                parentIdentifier: 'ROOT',
+                parameters: {
+                  hostname: vmIp,
+                  port: '3389',
+                  ...(rdpUser ? { username: rdpUser } : {}),
+                  ...(rdpPass ? { password: rdpPass } : {}),
+                  // Windows is forced to 'any' so guacd negotiates whatever the
+                  // guest offers. Pinning 'tls' fails against NLA-only Windows,
+                  // and the admin template form used to write rdp_security on
+                  // every save whether or not anyone chose it — see
+                  // migrations/023_clear_pinned_rdp_security.sql. Matches
+                  // buildGuacParameters in utils/lane-deployer.js; non-Windows
+                  // still honours an explicit override.
+                  security: String(tpl.os_family || '').startsWith('windows')
+                    ? 'any'
+                    : (tpl.metadata?.rdp_security || 'any'),
+                  'ignore-cert': 'true',
+                  width: '1920',
+                  height: '1080',
+                  dpi: '96',
+                  'enable-wallpaper': 'true',
+                  'enable-theming': 'true',
+                  'enable-font-smoothing': 'true',
+                  'color-depth': '24',
+                  'resize-method': 'display-update',
+                },
+                attributes: { 'max-connections': '5', 'max-connections-per-user': '2' },
+              };
+
+              // Refresh an existing connection rather than blindly POSTing.
+              // Guacamole's schema carries UNIQUE (connection_name, parent_id),
+              // so redeploying onto a reused VMID makes the POST fail and leaves
+              // the OLD connection live with stale parameters — a credential
+              // that quietly stops matching the guest. Same idiom as
+              // utils/lane-deployer.createGuacConnection.
+              let connId = null;
+              const existingConns = await guacAPI('GET', '/connections').catch(() => null);
+              if (existingConns && typeof existingConns === 'object') {
+                for (const [id, c] of Object.entries(existingConns)) {
+                  if (c && c.name === connName) { connId = id; break; }
+                }
+              }
+              if (connId) {
+                await guacAPI('PUT', `/connections/${encodeURIComponent(connId)}`, connBody);
+              } else {
+                const conn = await guacAPI('POST', '/connections', connBody);
+                connId = conn?.identifier || null;
+              }
+              if (connId) {
+                // Resolve Guacamole user credentials.
+                // Priority: user-level guac_password (set at registration or prior sync)
+                // → old VM-metadata guac_password (legacy deploys)
+                // → ensureGuacAccount (creates/resets the Guac account and stores the password).
+                const userRes = await cybercoreQuery(
+                  `SELECT email,
+                     CASE WHEN guac_password IS NOT NULL
+                          THEN pgp_sym_decrypt(guac_password, $2)::text
+                     END AS guac_password
+                   FROM cybercore_user WHERE user_id = $1`,
+                  [userId, process.env.GUAC_ENCRYPT_KEY || '']
+                );
+                const userEmail = userRes.rows[0]?.email;
+                let guacPassword = userRes.rows[0]?.guac_password || null;
+
+                if (userEmail && !guacPassword) {
+                  // Fall back to old per-VM metadata (users who deployed before migration)
+                  const existingPw = await cybercoreQuery(`
+                    SELECT vi.metadata->>'guac_password' AS pw
+                    FROM cybercore_vm_instance vi
+                    JOIN cybercore_resource r ON r.resource_id = vi.resource_id
+                    JOIN cybercore_allocation a
+                      ON  a.resource_id = r.resource_id AND a.user_id = $1
+                    WHERE vi.metadata->>'guac_password' IS NOT NULL
+                      AND vi.destroyed_at IS NULL
+                    LIMIT 1
+                  `, [userId]);
+                  guacPassword = existingPw.rows[0]?.pw || null;
+
+                  if (!guacPassword) {
+                    guacPassword = await ensureGuacAccount(userEmail).catch(() => null);
+                  }
+
+                  if (guacPassword && process.env.GUAC_ENCRYPT_KEY) {
+                    await cybercoreQuery(
+                      'UPDATE cybercore_user SET guac_password = pgp_sym_encrypt($1, $2) WHERE user_id = $3',
+                      [guacPassword, process.env.GUAC_ENCRYPT_KEY, userId]
+                    ).catch(() => {});
+                  }
+                }
+
+                // Grant READ on this connection to the VM owner's Guacamole account
+                if (userEmail) {
+                  try {
+                    await guacAPI('PATCH', `/users/${encodeURIComponent(userEmail)}/permissions`, [
+                      { op: 'add', path: `/connectionPermissions/${connId}`, value: 'READ' },
+                    ]);
+                  } catch (permErr) {
+                    log.warn(`Could not grant Guac permissions for ${vmName}: ${permErr.message}`);
+                  }
+                }
+
+                // Store connection ID and owner email in vm_instance metadata.
+                // guac_password is intentionally excluded — it lives only in the
+                // encrypted cybercore_user.guac_password column.
+                const guacMeta = {
+                  guac_connection_id: connId,
+                  ...(userEmail ? { guac_user: userEmail } : {}),
+                };
+                await cybercoreQuery(
+                  `UPDATE cybercore_vm_instance
+                      SET metadata = COALESCE(metadata, '{}') || $1::jsonb
+                    WHERE vm_instance_id = $2`,
+                  [JSON.stringify(guacMeta), vmId]
+                );
+
+                log.info(`Guacamole connection ${connId} created for ${vmName} (${vmIp})`, { vmId });
+              }
+            } else {
+              log.warn(`VM ${vmName} IP not available after 2 min — Guac connection skipped`, { vmId });
+            }
+          } catch (guacErr) {
+            log.warn(`Guacamole setup failed for ${vmName}: ${guacErr.message}`, { vmId });
+          }
+        }
+
+      } catch (err) {
+        _pendingVmids.delete(newVmid);
+        log.error(`Background deploy failed for ${vmId}: ${err.message}`, err);
+        await cybercoreQuery(`
+          UPDATE cybercore_vm_instance SET power_state = 'failed' WHERE vm_instance_id = $1
+        `, [vmId]).catch(() => {});
+        await cybercoreQuery(`
+          UPDATE cybercore_resource SET status = 'error', updated_at = now() WHERE resource_id = $1
+        `, [resourceId]).catch(() => {});
+      }
+    })().catch(err => log.error(`Unhandled error in deploy background task for ${vmId}`, err));
+
+  } catch (err) {
+    log.error('Deploy error:', err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// POST /api/workstations/:vmId/action
+// Power actions: start | stop | reboot | shutdown
+// ──────────────────────────────────────────────────────────────────────────────
+router.post('/:vmId/action', authenticateToken, async (req, res) => {
+  const ALLOWED_ACTIONS = ['start', 'stop', 'reboot', 'shutdown'];
+  const { action } = req.body;
+
+  if (!ALLOWED_ACTIONS.includes(action)) {
+    return res.status(400).json({ error: `action must be one of: ${ALLOWED_ACTIONS.join(', ')}` });
+  }
+
+  try {
+    const vm = await getOwnedWorkstation(req.user.userId, req.params.vmId, req.user.role === 'admin');
+
+    if (!vm.provider_node || !vm.provider_vmid) {
+      return res.status(400).json({ error: 'VM has no Proxmox location recorded' });
+    }
+
+    const upid = await proxmoxAPI(
+      'POST',
+      `${vmApiBase(vm.provider_node, vm.provider_vmid, vm.provider_type)}/status/${action}`
+    );
+
+    const newState = action === 'start' ? 'running'
+                   : (action === 'stop' || action === 'shutdown') ? 'stopped'
+                   : 'running';
+    await cybercoreQuery(
+      `UPDATE cybercore_vm_instance SET power_state = $1, last_state_change = now() WHERE vm_instance_id = $2`,
+      [newState, req.params.vmId]
+    );
+
+    audit.log({
+      req,
+      action: 'workstation.action',
+      target:     { type: 'vm', id: req.params.vmId, label: vm.vm_name },
+      targetUser: { id: vm.owner_user_id || null },
+      metadata: {
+        action, new_state: newState, node: vm.provider_node, vmid: vm.provider_vmid,
+        on_behalf_of: !!vm.owner_user_id && vm.owner_user_id !== req.user.userId,
+      },
+    });
+
+    res.json({ success: true, action, upid });
+  } catch (err) {
+    log.error(`Action ${action} error:`, err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// GET /api/workstations/:vmId/snapshots
+// ──────────────────────────────────────────────────────────────────────────────
+router.get('/:vmId/snapshots', authenticateToken, async (req, res) => {
+  try {
+    const vm = await getOwnedWorkstation(req.user.userId, req.params.vmId, req.user.role === 'admin');
+    const data = await proxmoxAPI(
+      'GET',
+      `${vmApiBase(vm.provider_node, vm.provider_vmid, vm.provider_type)}/snapshot`
+    );
+    const snapshots = (data.data || data || []).filter(s => s.name !== 'current');
+    res.json({ snapshots });
+  } catch (err) {
+    log.error('GET /snapshots error:', err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// POST /api/workstations/:vmId/snapshot
+// Create a new snapshot. Body: { name, description }
+// ──────────────────────────────────────────────────────────────────────────────
+router.post('/:vmId/snapshot', authenticateToken, async (req, res) => {
+  const { name, description } = req.body;
+  if (!name || !/^[a-zA-Z0-9_-]{1,40}$/.test(name)) {
+    return res.status(400).json({ error: 'Snapshot name must be 1–40 alphanumeric/dash/underscore characters' });
+  }
+
+  try {
+    const vm = await getOwnedWorkstation(req.user.userId, req.params.vmId, req.user.role === 'admin');
+    const upid = await proxmoxAPI(
+      'POST',
+      `${vmApiBase(vm.provider_node, vm.provider_vmid, vm.provider_type)}/snapshot`,
+      { snapname: name, description: description || '' }
+    );
+    await waitForTask(vm.provider_node, upid);
+    res.json({ success: true, snapname: name });
+  } catch (err) {
+    log.error('POST /snapshot error:', err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// POST /api/workstations/:vmId/rollback
+// Roll back VM/CT to a snapshot. Body: { snapname }
+// ──────────────────────────────────────────────────────────────────────────────
+router.post('/:vmId/rollback', authenticateToken, async (req, res) => {
+  const { snapname } = req.body;
+  if (!snapname) return res.status(400).json({ error: 'snapname is required' });
+
+  try {
+    const vm = await getOwnedWorkstation(req.user.userId, req.params.vmId, req.user.role === 'admin');
+    const upid = await proxmoxAPI(
+      'POST',
+      `${vmApiBase(vm.provider_node, vm.provider_vmid, vm.provider_type)}/snapshot/${encodeURIComponent(snapname)}/rollback`
+    );
+    await waitForTask(vm.provider_node, upid);
+    await cybercoreQuery(
+      `UPDATE cybercore_vm_instance SET power_state = 'stopped', last_state_change = now() WHERE vm_instance_id = $1`,
+      [req.params.vmId]
+    );
+    res.json({ success: true, snapname });
+  } catch (err) {
+    log.error('POST /rollback error:', err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// DELETE /api/workstations/:vmId
+// Destroy and deregister a user's workstation VM/CT.
+// ──────────────────────────────────────────────────────────────────────────────
+router.delete('/:vmId', authenticateToken, async (req, res) => {
+  const vmId   = req.params.vmId;
+  const userId = req.user.userId;
+
+  let vm;
+  try {
+    vm = await getOwnedWorkstation(userId, vmId, req.user.role === 'admin');
+  } catch (err) {
+    return res.status(err.status || 500).json({ error: err.message });
+  }
+
+  const providerType = vm.provider_type || 'qemu';
+
+  await cybercoreQuery(
+    `UPDATE cybercore_vm_instance SET power_state = 'deleting' WHERE vm_instance_id = $1`,
+    [vmId]
+  );
+  await cybercoreQuery(
+    `UPDATE cybercore_resource SET status = 'deleting', updated_at = now() WHERE resource_id = $1`,
+    [vm.resource_id]
+  );
+
+  audit.log({
+    req,
+    action: 'workstation.destroyed',
+    target:     { type: 'vm', id: vmId, label: vm.vm_name },
+    targetUser: { id: vm.owner_user_id || null },
+    metadata: {
+      provider_type: providerType, node: vm.provider_node, vmid: vm.provider_vmid,
+      on_behalf_of: !!vm.owner_user_id && vm.owner_user_id !== req.user.userId,
+    },
+  });
+
+  res.json({ success: true, status: 'deleting' });
+
+  (async () => {
+    try {
+      try {
+        const stopUpid = await proxmoxAPI(
+          'POST',
+          `${vmApiBase(vm.provider_node, vm.provider_vmid, providerType)}/status/stop`,
+          providerType === 'lxc' ? null : { timeout: 30 }
+        );
+        await waitForTask(vm.provider_node, stopUpid, 45000);
+      } catch (stopErr) {
+        log.warn(`Stop before delete did not complete cleanly (proceeding): ${stopErr.message}`);
+      }
+
+      try {
+        const delUpid = await proxmoxAPI(
+          'DELETE',
+          `${vmApiBase(vm.provider_node, vm.provider_vmid, providerType)}?purge=1`
+        );
+        if (typeof delUpid === 'string' && delUpid.startsWith('UPID:')) {
+          await waitForTask(vm.provider_node, delUpid, 180000);
+        }
+      } catch (delErr) {
+        log.warn(`Proxmox delete returned an error (marking destroyed anyway): ${delErr.message}`);
+      }
+
+      await cybercoreQuery(
+        `UPDATE cybercore_vm_instance SET destroyed_at = now(), power_state = 'stopped' WHERE vm_instance_id = $1`,
+        [vmId]
+      );
+      await cybercoreQuery(
+        `UPDATE cybercore_resource SET status = 'retired', updated_at = now() WHERE resource_id = $1`,
+        [vm.resource_id]
+      );
+      // When admins destroy a workstation belonging to another user, the
+      // allocation row is keyed to the owner, not the admin — end ALL open
+      // allocations on this resource instead of just the caller's.
+      await cybercoreQuery(
+        `UPDATE cybercore_allocation SET ends_at = now()
+         WHERE resource_id = $1 AND (ends_at IS NULL OR ends_at > NOW())`,
+        [vm.resource_id]
+      );
+
+      // Clean up Guacamole connection
+      const guacConnId = vm.vi_metadata?.guac_connection_id;
+      if (guacConnId && process.env.GUAC_ENABLED === 'true') {
+        try {
+          await guacAPI('DELETE', `/connections/${encodeURIComponent(guacConnId)}`);
+          log.info(`Guacamole connection ${guacConnId} deleted`, { vmId });
+        } catch (guacErr) {
+          log.warn(`Guac cleanup failed for ${vmId}: ${guacErr.message}`);
+        }
+      }
+
+      log.info(`Workstation destroyed`, { vmId, node: vm.provider_node, vmid: vm.provider_vmid, providerType });
+
+    } catch (err) {
+      log.error(`Background delete failed for ${vmId}: ${err.message}`, err);
+      await cybercoreQuery(
+        `UPDATE cybercore_vm_instance SET destroyed_at = now(), power_state = 'stopped' WHERE vm_instance_id = $1`,
+        [vmId]
+      ).catch(() => {});
+      await cybercoreQuery(
+        `UPDATE cybercore_resource SET status = 'retired', updated_at = now() WHERE resource_id = $1`,
+        [vm.resource_id]
+      ).catch(() => {});
+    }
+  })().catch(err => log.error(`Unhandled error in delete background task for ${vmId}`, err));
+});
+
+module.exports = router;

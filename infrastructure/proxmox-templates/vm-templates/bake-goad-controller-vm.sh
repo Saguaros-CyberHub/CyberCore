@@ -1,0 +1,2597 @@
+#!/bin/bash
+# ============================================================================
+# bake-goad-controller-vm.sh
+# ----------------------------------------------------------------------------
+# Bakes QEMU VM template 1700: the GOAD ansible controller, using upstream
+# GOAD's playbooks/roles/lab data. Each lane clones this template, gets its
+# admin credentials/network injected via Proxmox cloud-init, and runs the
+# upstream playbook chain over WinRM against the lane's Windows VMs.
+#
+# This is the VM version of the controller (was previously an LXC). VMs
+# expose the qemu-guest-agent /agent/exec endpoint over the Proxmox HTTPS
+# API, so admin.js can drive provisioning without SSH-to-node — same auth
+# path as Kali and the Windows lane VMs.
+#
+# Run on any Proxmox node with internet access. Idempotent: refuses if 1700
+# already exists. To re-bake, destroy first:
+#   qm destroy 1700 --purge
+# (or `pct destroy 1700 --purge` if the old LXC version is still there)
+#
+# ----------------------------------------------------------------------------
+# ROLLBACK — READ THIS BEFORE YOU RE-BAKE
+# ----------------------------------------------------------------------------
+# 1700 is the LIVE deploy target. front-end/src/utils/goad-deploy.js pins
+# CONTROLLER_TEMPLATE_VMID = 1700 and every lane full-clones it. Proxmox cannot
+# renumber a VMID, so "keep the old template around" necessarily means keeping a
+# SECOND template at a second id. That id is ROLLBACK_TEMPLATE_VMID below.
+#
+# STEP 1 — freeze the working template BEFORE destroying it. Once 1700 is
+# purged there is nothing to copy, and the tree inside it is not reproducible:
+# cloud-init git-fetches GOAD_REF and ansible-galaxy resolves requirements.yml
+# at bake time, so a re-bake is a NEW build, not the same build again.
+#     qm clone 1700 1701 --name goad-controller-template-frozen --full --storage vmpool
+#     qm template 1701
+#     qm set 1701 --description "FROZEN <date>: last known-good GOAD controller"
+#   A template can be cloned while it is a template; the clone lands as a normal
+#   VM, which is why the 'qm template' line is needed to re-freeze it. Do NOT
+#   boot 1701 — booting it runs cloud-init against a stale instance-id.
+#
+# STEP 2 — re-bake:
+#     qm destroy 1700 --purge && ./bake-goad-controller-vm.sh
+#
+# STEP 3 — IF THE NEW BAKE MISBEHAVES, revert the deploy target. One line, no
+# re-bake, no restore, no Proxmox surgery:
+#     front-end/src/utils/goad-deploy.js
+#       const CONTROLLER_TEMPLATE_VMID = 1700;   ->   = 1701;
+#     then restart the node process. New lanes clone the frozen template again.
+#     Already-deployed lanes are unaffected: each holds a FULL clone, not a link
+#     to the template, so nothing in flight depends on which id is current.
+#
+# The rollback is a source constant on purpose. The Proxmox-side alternative —
+# destroy 1700 and clone the frozen copy back onto that id — has to destroy the
+# live target while lanes may be mid-clone, and it is not undoable if the
+# "known good" copy turns out not to be.
+#
+# ----------------------------------------------------------------------------
+# CHANGING run.sh REQUIRES A RE-BAKE. THERE IS NO HOT PATCH.
+# ----------------------------------------------------------------------------
+# /opt/goad-light/run.sh is not a tracked file that a deploy copies out. It
+# exists ONLY as the cloud-init write_files heredoc below, so the ONLY way it
+# reaches a lane is by being baked into template 1700 and full-cloned. Editing
+# run.sh in this script changes NOTHING until you re-bake, and every lane
+# deployed before that re-bake keeps the run.sh it was cloned with, forever.
+#
+# That asymmetry is why each capability run.sh gains also gets a marker file
+# (.cc-per-lab-playbooks, .cc-extension-install): the orchestrator has to be
+# able to ask an ALREADY-DEPLOYED controller what it understands, because the
+# answer differs per lane depending on when that lane was cloned.
+#
+# So a run.sh change is a full template turn, and the freeze comes FIRST --
+# once 1700 is purged the old run.sh is unrecoverable:
+#     qm clone 1700 1701 --name goad-controller-template-frozen --full --storage vmpool
+#     qm template 1701
+#     qm set 1701 --description "FROZEN <date>: last known-good GOAD controller"
+#     qm destroy 1700 --purge && ./bake-goad-controller-vm.sh
+# and if the new one misbehaves, CONTROLLER_TEMPLATE_VMID = 1701 in
+# front-end/src/utils/goad-deploy.js, then restart the node process.
+# ============================================================================
+set -euo pipefail
+
+VMID=1700
+# FROZEN PREVIOUS-GENERATION TEMPLATE — the one-line rollback target.
+# This script bakes onto $VMID and nothing else; ROLLBACK_TEMPLATE_VMID is never
+# written to, only checked for existence (section 0b) and printed. It exists so
+# the id is stated ONCE, in the file that destroys the thing it protects, rather
+# than living only in someone's shell history. Full procedure: header, ROLLBACK.
+ROLLBACK_TEMPLATE_VMID=1701
+NAME="goad-controller-template"
+STORAGE="vmpool"                                  # where the VM disk + cloudinit drive live
+SNIPPET_STORAGE="${SNIPPET_STORAGE:-}"            # auto-detected if empty; override to force a specific storage
+BAKE_BRIDGE="${BAKE_BRIDGE:-vmbr0}"
+BAKE_VLAN="${BAKE_VLAN:-20}"                      # bake-time VLAN for internet (set empty to disable)
+# Explicit DNS for the bake VM — avoids depending on whatever DHCP advertises
+# (FreeIPA at 100.100.20.20 has been the default and dies sometimes; OPNsense
+# Unbound at 100.100.0.1 is the orchestrator's resolver and recurses externally).
+BAKE_DNS="${BAKE_DNS:-100.100.0.1}"
+# CyberSaguaros fork of GOAD — carries the re-themed GOAD-Light lab data
+# (ad/GOAD-Light/). Override with GOAD_REPO=... to bake from a different repo.
+GOAD_REPO="${GOAD_REPO:-https://github.com/joshmp087/GOAD.git}"
+# PINNED COMMIT, not a branch. This default used to be 'main', which made
+# "immutable versioned bakes" false at the root: template 1700 is baked once and
+# every lane clones it, but a RE-bake months later would silently pick up a
+# different role library — new required item.value keys, renamed roles, changed
+# ACL vocabularies — under lane data that was authored against the old one. The
+# failure mode is not a build error; it is a lane that provisions green with
+# vulns that were never planted (see the never_emit notes in the vendored
+# manifest for how quietly these roles fail).
+#
+# GOAD-main/ is gitignored, so the working copy is NOT the record. The record is
+# front-end/modules/crucible/plugins/ciab/data/goad-role-manifest.json, whose
+# goad_ref field must equal this SHA. Moving this pin means re-vendoring that
+# manifest in the same commit, or the validator built on it describes a GOAD the
+# controller no longer runs.
+# Includes ELK fixes, controller-side forest renaming, and the pinned SSMS installer.
+GOAD_REF="${GOAD_REF:-48b62c77b2d0bce82f6eb595ba5e1afd9526d50c}"
+MEMORY=2048
+CORES=2
+DISK_GB=10
+CLOUD_IMG_URL="${CLOUD_IMG_URL:-https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2}"
+CLOUD_IMG_LOCAL="/var/lib/vz/template/iso/debian-13-genericcloud-amd64.qcow2"
+
+# A throwaway password baked into the template's default user. Per-clone,
+# admin.js can override via cloud-init `cipassword`. Mostly we don't log in
+# to this VM at all — qemu-guest-agent does the work.
+TEMPLATE_PASSWORD="bake-debug"
+
+# ---------- 0. Sanity ----------
+if qm status $VMID >/dev/null 2>&1; then
+  echo "ERROR: VM $VMID already exists. Destroy first: qm destroy $VMID --purge"
+  exit 1
+fi
+if pct status $VMID >/dev/null 2>&1; then
+  echo "ERROR: LXC $VMID exists (likely the old LXC controller template)."
+  echo "       Destroy first: pct destroy $VMID --purge"
+  exit 1
+fi
+
+# ---------- 0b. Rollback safety net ----------
+# Warn loudly rather than refuse. The FIRST bake on a fresh cluster has nothing
+# to freeze, and a hard failure there would be unfixable without editing this
+# script — but every bake after that one replaces a template lanes are cloning
+# right now, and that bake must not proceed unnoticed without a way back.
+# Checked here, after the "1700 must not exist" guard, because by the time you
+# run this you have already destroyed 1700: if the freeze did not happen, the
+# last known-good tree is already gone and the only honest thing left to do is
+# say so before spending 25 minutes on the replacement.
+if qm status $ROLLBACK_TEMPLATE_VMID >/dev/null 2>&1; then
+  echo "==> Rollback template $ROLLBACK_TEMPLATE_VMID present — revert path is one line in goad-deploy.js."
+else
+  echo ""
+  echo "==================================================================="
+  echo "  WARNING: no frozen rollback template at $ROLLBACK_TEMPLATE_VMID"
+  echo "==================================================================="
+  echo "  If a previous $VMID existed, it is gone and this bake has no way back."
+  echo "  To freeze a WORKING $VMID (do this BEFORE 'qm destroy $VMID --purge'):"
+  echo "    qm clone $VMID $ROLLBACK_TEMPLATE_VMID --name goad-controller-template-frozen --full --storage $STORAGE"
+  echo "    qm template $ROLLBACK_TEMPLATE_VMID"
+  echo "  Then rollback is: CONTROLLER_TEMPLATE_VMID = $ROLLBACK_TEMPLATE_VMID in"
+  echo "  front-end/src/utils/goad-deploy.js, and restart the node process."
+  echo "==================================================================="
+  echo ""
+fi
+
+# ---------- Pick a storage with 'snippets' content enabled ----------
+# Cloud-init custom user-data has to live on a storage with content=snippets.
+# Default Proxmox storages don't have it on. We auto-detect; if none has it,
+# enable on `local` (the safe default that always exists).
+pick_snippet_storage() {
+  # User override always wins
+  if [ -n "${SNIPPET_STORAGE:-}" ]; then
+    if pvesm status -content snippets 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$SNIPPET_STORAGE"; then
+      echo "$SNIPPET_STORAGE"; return 0
+    fi
+    echo "ERROR: SNIPPET_STORAGE='$SNIPPET_STORAGE' set but that storage doesn't have 'snippets' content enabled." >&2
+    echo "       Run: pvesm set $SNIPPET_STORAGE --content <existing>,snippets" >&2
+    return 1
+  fi
+
+  # Otherwise: pick the first storage advertising snippets
+  local first
+  first=$(pvesm status -content snippets 2>/dev/null | awk 'NR>1 {print $1}' | head -1)
+  if [ -n "$first" ]; then
+    echo "$first"; return 0
+  fi
+
+  # No storage has snippets enabled — turn it on for `local`.
+  echo "==> No storage has 'snippets' content enabled. Enabling on 'local'..." >&2
+  local cur
+  cur=$(awk '/^[a-z]+: local$/{flag=1} flag && /^\s*content/{print $2; flag=0}' /etc/pve/storage.cfg)
+  if [ -z "$cur" ]; then cur="iso,vztmpl,backup"; fi
+  if [[ "$cur" != *snippets* ]]; then
+    pvesm set local --content "${cur},snippets" >&2
+  fi
+  echo "local"
+}
+
+SNIPPET_STORAGE=$(pick_snippet_storage)
+echo "==> Snippet storage: $SNIPPET_STORAGE"
+
+# ---------- Generate the controller<->gateway SSH keypair ----------
+# This keypair is the trust link used by run.sh inside the controller to
+# talk to the lane's gateway (the lane subnet's .1) and write DHCP reservations.
+# The private key is baked into the controller template; the public key
+# must be added to the gateway template's /root/.ssh/authorized_keys.
+# Persist the keypair on this Proxmox node so re-runs are consistent.
+DEPLOY_KEY_DIR=/root/.ssh
+DEPLOY_KEY_PATH="$DEPLOY_KEY_DIR/goad-controller-deploy.key"
+mkdir -p "$DEPLOY_KEY_DIR"
+chmod 700 "$DEPLOY_KEY_DIR"
+if [ ! -f "$DEPLOY_KEY_PATH" ]; then
+  echo "==> Generating GOAD controller→gateway SSH keypair at $DEPLOY_KEY_PATH..."
+  ssh-keygen -t ed25519 -N "" -f "$DEPLOY_KEY_PATH" -C "goad-controller-deploy" >/dev/null
+fi
+chmod 600 "$DEPLOY_KEY_PATH"
+DEPLOY_PRIVKEY="$(cat "$DEPLOY_KEY_PATH")"
+DEPLOY_PUBKEY="$(cat "${DEPLOY_KEY_PATH}.pub")"
+echo "==> Using SSH keypair: $DEPLOY_KEY_PATH (public: ${DEPLOY_PUBKEY:0:50}...)"
+echo "==> GOAD source: $GOAD_REPO @ $GOAD_REF"
+echo "==> Bake-time NIC: bridge=$BAKE_BRIDGE${BAKE_VLAN:+ vlan=$BAKE_VLAN}"
+
+# ---------- 1. Download cloud image (cached) ----------
+if [ ! -f "$CLOUD_IMG_LOCAL" ]; then
+  echo "==> Downloading Debian 13 genericcloud qcow2..."
+  mkdir -p "$(dirname "$CLOUD_IMG_LOCAL")"
+  wget --progress=dot:giga -O "$CLOUD_IMG_LOCAL.tmp" "$CLOUD_IMG_URL"
+  mv "$CLOUD_IMG_LOCAL.tmp" "$CLOUD_IMG_LOCAL"
+fi
+echo "==> Cloud image: $CLOUD_IMG_LOCAL ($(du -h "$CLOUD_IMG_LOCAL" | cut -f1))"
+
+# ---------- 2. Build cloud-init user-data snippet ----------
+# Cloud-init runs this on first boot inside the VM: install packages, clone
+# upstream GOAD, install ansible-galaxy collections, write our run.sh, then
+# power off. The bake script waits for the power-off and converts to template.
+# `pvesm path <storage>:snippets/<file>` returns the host filesystem path
+# even for files that don't exist yet, which is what we need to write to.
+USERDATA_FILE="goad-controller-bake-${VMID}.yml"
+USERDATA_PATH="$(pvesm path "${SNIPPET_STORAGE}:snippets/${USERDATA_FILE}" 2>/dev/null)"
+if [ -z "$USERDATA_PATH" ]; then
+  # Fallback for storages where pvesm path doesn't synthesize for missing files
+  case "$SNIPPET_STORAGE" in
+    local)   USERDATA_PATH="/var/lib/vz/snippets/${USERDATA_FILE}" ;;
+    cephfs)  USERDATA_PATH="/mnt/pve/cephfs/snippets/${USERDATA_FILE}" ;;
+    *)       USERDATA_PATH="/var/lib/vz/snippets/${USERDATA_FILE}" ;;
+  esac
+fi
+mkdir -p "$(dirname "$USERDATA_PATH")"
+
+cat > "$USERDATA_PATH" << SNIPPET
+#cloud-config
+hostname: $NAME
+manage_etc_hosts: true
+
+# Force /etc/resolv.conf to a known-good resolver. manage_resolv_conf gets
+# cloud-init to write resolv.conf in modules:config — backup if bootcmd missed.
+manage_resolv_conf: true
+resolv_conf:
+  nameservers:
+    - $BAKE_DNS
+    - 1.1.1.1
+  searchdomains: []
+  domain: ""
+
+# bootcmd MUST be fast and non-blocking. Any blocking command (e.g.,
+# 'systemctl reload') will hang cloud-init at init-local stage, since cloud-init
+# runs bootcmd synchronously with capture=False. We intentionally do NOT do:
+#   - systemctl operations  (can block on service deps at this early stage)
+#   - operations that need network  (network not fully up yet)
+# Just set the root password (debug login) and force resolv.conf (so subsequent
+# package install at modules:final can resolve hosts).
+bootcmd:
+  - [ sh, -c, 'echo "root:$TEMPLATE_PASSWORD" | chpasswd; rm -f /etc/resolv.conf; printf "nameserver $BAKE_DNS\nnameserver 1.1.1.1\n" > /etc/resolv.conf; exit 0' ]
+
+# chpasswd as defense-in-depth — if bootcmd missed for any reason, this
+# config-stage run sets it again. Plus enables ssh password auth properly.
+chpasswd:
+  list: |
+    root:$TEMPLATE_PASSWORD
+  expire: false
+ssh_pwauth: true
+disable_root: false
+
+# qemu-guest-agent ships in the genericcloud image but isn't enabled by default.
+package_update: true
+packages:
+  - ansible
+  - python3-winrm
+  - python3-requests-kerberos
+  - python3-requests-ntlm
+  - python3-cryptography
+  - python3-yaml
+  - python3-jmespath
+  - python3-netaddr
+  - krb5-user
+  - openssh-server
+  # sshpass: upstream lists it as a prerequisite for install_extension.
+  # CyberCore does not depend on it -- the extension servers are reached with
+  # the controller's OWN ed25519 key (see the /root/.ssh/id_ed25519 entry in
+  # write_files, and the EXT_SSH_KEY block in run.sh). It is installed anyway
+  # because ansible's ssh connection plugin hard-fails with "you must install
+  # the sshpass program" the instant ANY host resolves a non-empty
+  # ansible_password under connection=ssh, and a future extension shipping a
+  # password-based inventory would otherwise die at the last step of a
+  # 90-minute deploy, on a missing 200KB package.
+  - sshpass
+  - git
+  - curl
+  - jq
+  - rsync
+  - locales
+  - qemu-guest-agent
+
+# Default locale (matches the LXC version — ansible refuses to start without UTF-8)
+locale: C.UTF-8
+
+write_files:
+  - path: /etc/profile.d/locale.sh
+    permissions: '0755'
+    content: |
+      export LANG=C.UTF-8
+      export LC_ALL=C.UTF-8
+      export PYTHONUTF8=1
+
+  - path: /etc/environment
+    append: true
+    content: |
+      LANG=C.UTF-8
+      LC_ALL=C.UTF-8
+
+  # SSH private key for the controller→gateway link. Used by run.sh to
+  # write DHCP reservations on the lane gateway (whatever \${GW_IP} resolves
+  # to per-lane — v2: 10.<vxh>.<vxl>.1, unique per lane) without
+  # the orchestrator needing any SSH access. The corresponding public key
+  # must be in the gateway template's /root/.ssh/authorized_keys (added by
+  # ../sdn-templates/patch-goad-gateway-key.sh for 1692; ../sdn-templates/
+  # v2_gateway/bake.sh inherits it for 1694 via the clone-from-1692 chain).
+  - path: /root/.ssh/id_ed25519
+    permissions: '0600'
+    content: |
+$(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
+
+  - path: /root/.ssh/id_ed25519.pub
+    permissions: '0644'
+    content: |
+      $DEPLOY_PUBKEY
+
+  # ----- Python helper scripts called by run.sh -----
+  # These live in standalone files (not inline heredocs in run.sh) so the
+  # outer YAML block scalar doesn't choke on column-0 Python lines. The
+  # 'content: |' block stripped by 6 spaces gives Python source at column 0
+  # — correct for module-level statements.
+  - path: /opt/goad-light/render-inventory.py
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env python3
+      # Render a GOAD inventory template THE WAY UPSTREAM DOES.
+      #
+      # WHY THIS EXISTS. run.sh used to render extension inventories with sed,
+      # substituting {{ip_range}} and nothing else. That is enough for elk,
+      # wazuh, lx01 and guacamole, whose inventories are plain -- and wrong for
+      # ws01 and exchange, which carry Jinja CONTROL BLOCKS:
+      #
+      #     {% if provider_name == 'aws' or provider_name == 'azure' %}
+      #     ws01 ansible_host={{ip_range}}.31 ... ansible_user=ansible ...
+      #     {% else %}
+      #     ws01 ansible_host={{ip_range}}.31 dns_domain=dc01 dict_key=ws01
+      #     {% endif %}
+      #
+      # sed passes those {% %} lines through verbatim and ansible's ini parser
+      # chokes on them minutes into a run. run.sh previously REFUSED rather than
+      # emit that, which was honest but made ws01 undeployable.
+      #
+      # goad/instance.py:302 renders every inventory through Jinja with exactly
+      # three variables -- lab_name, ip_range, provider_name -- so that is what
+      # this does. jinja2 is a hard dependency of ansible-core, which is already
+      # on this controller, so nothing new is installed.
+      #
+      # provider_name is 'proxmox': not one upstream ships (its providers/ tree
+      # has vmware/virtualbox/aws/azure/ludus), which is exactly right -- every
+      # {% if %} in these templates tests FOR aws/azure, so an unknown provider
+      # deterministically takes the else branch, which is the bare-metal shape
+      # CyberCore wants.
+      import os, sys, argparse
+      try:
+          from jinja2 import Environment, FileSystemLoader
+      except ImportError:
+          sys.stderr.write('render-inventory: jinja2 missing. It ships with '
+                           'ansible-core; if that is gone, so is the whole run.\n')
+          raise SystemExit(1)
+
+      ap = argparse.ArgumentParser()
+      ap.add_argument('src')
+      ap.add_argument('dst')
+      ap.add_argument('--lab', required=True)
+      ap.add_argument('--ip-range', required=True)
+      ap.add_argument('--provider', default='proxmox')
+      # "50:24" -- upstream octet to CyberCore octet, applied to ansible_host=
+      # only. Kept as an ARGUMENT rather than a rule in here so the one place
+      # that knows why elk moves off .50 stays run.sh, next to the lane
+      # addressing it belongs to.
+      ap.add_argument('--rewrite-octet', default='')
+      a = ap.parse_args()
+
+      src = os.path.abspath(a.src)
+      env = Environment(loader=FileSystemLoader(os.path.dirname(src)),
+                        keep_trailing_newline=True)
+      out = env.get_template(os.path.basename(src)).render(
+          lab_name=a.lab, ip_range=a.ip_range, provider_name=a.provider)
+
+      if a.rewrite_octet:
+          frm, to = a.rewrite_octet.split(':', 1)
+          old = 'ansible_host=' + a.ip_range + '.' + frm
+          new = 'ansible_host=' + a.ip_range + '.' + to
+          # Hard-fail rather than silently skip. If upstream ever moves elk off
+          # .50, a quiet no-op here puts two machines on one address and dnsmasq
+          # refuses to start -- DHCP down for the whole lane.
+          if old not in out:
+              sys.stderr.write('render-inventory: expected "%s" in the rendered '
+                               '%s and it is not there. Upstream may have changed '
+                               'the octet; check extensions/*/inventory.\n'
+                               % (old, a.src))
+              raise SystemExit(1)
+          out = out.replace(old, new)
+
+      # Nothing unrendered may reach ansible's ini parser. This is the check the
+      # old sed renderer could not make, and it is why the refusal it replaced
+      # existed at all.
+      if '{%' in out or '{{' in out:
+          sys.stderr.write('render-inventory: unrendered Jinja remains in %s -- '
+                           'it may reference a variable upstream passes that we '
+                           'do not (we pass lab_name, ip_range, provider_name).\n'
+                           % a.src)
+          raise SystemExit(1)
+
+      with open(a.dst, 'w') as fh:
+          fh.write(out)
+
+  - path: /opt/goad-light/patch-winlogbeat.py
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env python3
+      # THE SAME BUG patch-mssql.py exists for, in a second role.
+      #
+      # roles/logs_windows renders winlogbeat.yml with win_template. On
+      # ansible-core 2.20+ win_template SILENTLY DOES NOT RENDER JINJA -- the
+      # placeholders reach the target verbatim, the beat refuses to start, and the
+      # whole elk extension is reported failed on its very last task:
+      #
+      #   Invalid host param set: {{ hostvars['elk'].ansible_host }}:9200
+      #   invalid character "{" in host name
+      #
+      # Observed on a real lane AFTER the ELK server installed cleanly
+      # (elk: ok=18 changed=16 failed=0), so only the Windows agent config was
+      # wrong -- and that was enough to fail the extension.
+      #
+      # Fix, identical to the mssql one: render with the LINUX template module on
+      # the controller, delegate_to localhost, then win_copy to Windows.
+      #
+      # LINE-BASED, NOT A REGEX, AND src/dest ARE COPIED VERBATIM. dest holds
+      # Windows path separators inside a YAML scalar, and this file reaches the
+      # guest through a cloud-init heredoc; every retyped backslash would pass
+      # through two more rounds of escaping. Copying the lines means the escaping
+      # stays whatever upstream already made work, and this script needs no
+      # escape sequence of its own.
+      import sys
+
+      path = sys.argv[1]
+      text = open(path).read()
+      MARK = 'cybercore-winlogbeat-render'
+      if MARK in text:
+          sys.stderr.write('  patch-winlogbeat: already patched (skip)' + chr(10))
+          raise SystemExit(0)
+
+      lines = text.split(chr(10))
+      start = -1
+      for i, ln in enumerate(lines):
+          if ln.strip() == '- name: Configure winlogbeat':
+              start = i
+              break
+      if start < 0:
+          sys.stderr.write('  patch-winlogbeat: task not found -- upstream may have fixed or renamed it. Left alone.' + chr(10))
+          raise SystemExit(0)
+
+      indent = lines[start][:len(lines[start]) - len(lines[start].lstrip())]
+      src_line = None
+      dest_line = None
+      notify_line = None
+      end = start
+      for j in range(start + 1, len(lines)):
+          st = lines[j].strip()
+          if st.startswith('- name:'):
+              break
+          if st and not lines[j].startswith(indent + ' '):
+              break
+          end = j
+          if st.startswith('src:'):
+              src_line = st[len('src:'):].strip()
+          elif st.startswith('dest:'):
+              dest_line = st[len('dest:'):].strip()
+          elif st.startswith('notify:'):
+              # Carried onto the win_copy task below. Without it the beat keeps
+              # running with the config it had before this task rewrote it.
+              notify_line = st
+
+      if not src_line or not dest_line:
+          sys.stderr.write('  patch-winlogbeat: task has no src/dest -- left alone.' + chr(10))
+          raise SystemExit(0)
+
+      # Per-host staging path: the role runs against every host in [domain] at
+      # once, so one shared filename would race.
+      staged = chr(34) + "/tmp/winlogbeat.yml.{{ inventory_hostname }}" + chr(34)
+
+      new = [
+          indent + '- name: Configure winlogbeat (' + MARK + ' - rendered on the controller)',
+          indent + '  ansible.builtin.template:',
+          indent + '    src: ' + src_line,
+          indent + '    dest: ' + staged,
+          indent + '  delegate_to: localhost',
+          indent + '',
+          indent + '- name: Copy rendered winlogbeat config to windows',
+          indent + '  ansible.windows.win_copy:',
+          indent + '    src: ' + staged,
+          indent + '    dest: ' + dest_line,
+          indent + '    force: yes',
+      ]
+      if notify_line:
+          new.append(indent + '  ' + notify_line)
+
+      lines[start:end + 1] = new
+      # newline='' so Python's text-mode translation cannot rewrite the whole
+      # file to CRLF. Moot on this controller (Linux), but this script is also
+      # the way the vendored copy is prepared for a push upstream, and there it
+      # turned a 5-line change into a 67-line whole-file diff.
+      open(path, 'w', newline='').write(chr(10).join(lines))
+      sys.stderr.write('  patch-winlogbeat: win_template -> template(delegate_to localhost) + win_copy in ' + path + chr(10))
+
+  - path: /opt/goad-light/patch-mssql.py
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env python3
+      # Two patches to upstream's mssql role:
+      #
+      # (1) Replace win_template (which silently fails to render Jinja in
+      #     ansible-core 2.20+) with: render locally then win_copy. The
+      #     lambda passed to re.sub avoids Python's re module trying to
+      #     interpret backslash escapes (\\s, \\1) in the replacement when
+      #     it contains Windows paths.
+      #
+      # (2) Make the SQL Server install task tolerant of the benign
+      #     "No features were installed" exit (rc=2226323458 / 0x84B40002).
+      #     The Windows VM template (vmid 1004) ships with SQLEXPRESS
+      #     already pre-installed, so the bootstrapper has nothing to
+      #     install and bails. Subsequent role tasks (service config, db
+      #     seed, GPO for ports) still run against the pre-installed
+      #     instance and that's what makes Kerberoasting actually
+      #     exploitable end-to-end.
+      import re, sys
+      path = sys.argv[1]
+      content = open(path).read()
+
+      # ---------- Patch 1: win_template -> template + win_copy ----------
+      old1 = re.compile(
+          r'- name: create the configuration file\s*\n'
+          r'\s*win_template:\s*\n'
+          r'\s*src:.*\n'
+          r'\s*dest:.*sql_conf\.ini',
+      )
+      NEW1 = """- name: create the configuration file (rendered locally)
+        ansible.builtin.template:
+          src: sql_conf.ini.{{sql_version}}.j2
+          dest: "/tmp/sql_conf.ini.{{ inventory_hostname }}"
+        delegate_to: localhost
+
+      - name: copy rendered configuration file to windows
+        ansible.windows.win_copy:
+          src: "/tmp/sql_conf.ini.{{ inventory_hostname }}"
+          dest: 'c:\\setup\\mssql\\sql_conf.ini'
+          force: yes"""
+      content_v1 = old1.sub(lambda m: NEW1, content)
+      if content_v1 != content:
+          print(f"  Patch 1: replaced win_template with template+win_copy in {path}", file=sys.stderr)
+      else:
+          print(f"  Patch 1: WARNING — win_template pattern not matched (may already be patched)", file=sys.stderr)
+      content = content_v1
+
+      # ---------- Patch 2: tolerate "No features were installed" ----------
+      # Match the install task by its NAME ("Install the database") rather
+      # than by command content, since upstream's setup.exe invocation may
+      # span multiple lines or use template vars (no literal "setup.exe" +
+      # "sql_conf.ini" on the same line).
+      #
+      # If the task already has its own 'register:' (upstream typically
+      # registers as something like 'install_result'), reuse that name in
+      # our failed_when expression — this avoids the duplicate-mapping-key
+      # warning that would otherwise appear at task evaluation.
+      lines = content.splitlines(keepends=True)
+      task_start = None
+      for i, line in enumerate(lines):
+          if re.match(r'^[ \t]*- name:\s*Install the database\s*$', line):
+              task_start = i
+              break
+
+      if task_start is None:
+          print(f"  Patch 2: 'Install the database' task not found in {path} — skipping", file=sys.stderr)
+      else:
+          task_indent = re.match(r'^([ \t]*)-', lines[task_start]).group(1)
+          attr_indent = task_indent + '  '
+
+          # Walk down to the end of this task (next sibling at same indent,
+          # first dedented line, or EOF).
+          task_end = task_start
+          j = task_start + 1
+          while j < len(lines):
+              if re.match(rf'^{re.escape(task_indent)}-[ \t]', lines[j]):
+                  break
+              if lines[j].strip() and not lines[j].startswith((' ', '\t')):
+                  break
+              if lines[j].strip():
+                  task_end = j
+              j += 1
+
+          task_block = ''.join(lines[task_start:task_end + 1])
+          if 'cybercore-mssql-tolerate' in task_block:
+              print(f"  Patch 2: install task already tolerant (skip)", file=sys.stderr)
+          else:
+              # Detect existing 'register: <var>' inside the task body and
+              # reuse the var name. Falls back to our own name if upstream
+              # doesn't register this task.
+              existing_register = None
+              for k in range(task_start + 1, task_end + 1):
+                  m = re.match(r'^\s+register:\s+(\S+)\s*$', lines[k])
+                  if m:
+                      existing_register = m.group(1)
+                      break
+
+              register_name = existing_register or 'cybercore_mssql_install'
+
+              # Detect existing failed_when — if upstream already has one,
+              # don't add a duplicate (we'd create a YAML duplicate-key error).
+              has_failed_when = any(
+                  re.match(r'^\s+failed_when:', lines[k])
+                  for k in range(task_start + 1, task_end + 1)
+              )
+
+              addition = [
+                  f"{attr_indent}# cybercore-mssql-tolerate: SQLEXPRESS already in template\n",
+              ]
+              if existing_register is None:
+                  addition.append(f"{attr_indent}register: {register_name}\n")
+              if not has_failed_when:
+                  addition.append(f"{attr_indent}failed_when:\n")
+                  addition.append(f"{attr_indent}  - {register_name}.rc not in [0, 2226323458]\n")
+                  addition.append(f"{attr_indent}  - \"'No features were installed' not in {register_name}.stdout\"\n")
+                  lines[task_end + 1:task_end + 1] = addition
+                  content = ''.join(lines)
+                  msg_register = (
+                      f"reused existing register='{existing_register}'"
+                      if existing_register else "added register"
+                  )
+                  print(f"  Patch 2: added failed_when tolerance ({msg_register})", file=sys.stderr)
+              else:
+                  # Upstream has its own failed_when — leave it alone, just
+                  # drop a marker comment so we don't keep retrying.
+                  lines[task_end + 1:task_end + 1] = addition
+                  content = ''.join(lines)
+                  print(f"  Patch 2: upstream already has failed_when; left alone (added marker)", file=sys.stderr)
+
+      open(path, 'w').write(content)
+
+  - path: /opt/goad-light/patch-child-domain.py
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env python3
+      # Replace upstream's win_reboot in child_domain role with wait_for_connection,
+      # so we don't try a fresh WinRM session while the SAM is sealed pending reboot.
+      import re, sys
+      path = sys.argv[1]
+      content = open(path).read()
+      old = re.compile(
+          r'- name:\s*Reboot\s*\n\s*win_reboot:\s*\n(?:\s*\w+:.*\n)+\s*when:\s*child_result\.changed',
+      )
+      new = (
+          '- name: "cybercore: wait for child DC to reboot post-promotion"\n'
+          '  ansible.builtin.wait_for_connection:\n'
+          '    delay: 60\n'
+          '    timeout: 900\n'
+          '  when: child_result.changed'
+      )
+      out = old.sub(new, content)
+      if out != content:
+          open(path, 'w').write(out)
+          print(f"  Replaced win_reboot with wait_for_connection in {path}", file=sys.stderr)
+
+  # prep.sh writes DHCP reservations on the gateway. Run BEFORE the
+  # Windows VMs come up (or before they renew DHCP) so they pick up
+  # their reserved IPs. Orchestrator (admin.js / goad-deploy.js) calls
+  # this before waitForWinRM, then restarts the Windows VMs to force
+  # fresh DHCP, then runs run.sh for the actual playbook.
+  #
+  # IT WRITES ITS OWN FILE — /etc/dnsmasq.d/goad-lane-reservations.conf — and
+  # never lane-reservations.conf. That one belongs to challenge-lane-deployer.js
+  # (writeLaneReservations), which renders the WHOLE lane before any guest boots:
+  # Kali on the external .50, an extension host such as elk on .24, the consoles,
+  # the GOAD roster, the lane's DNS. prep.sh only ever knew the GOAD roster plus
+  # the controller and Kali, so writing that path with a plain 'cat >' — a
+  # TRUNCATING overwrite — deleted every line it had never heard of. Found on a
+  # live lane the file's header read "written by /opt/goad-light/prep.sh" and it
+  # had no elk line at all, so elk kept .24 only until its next renewal — and
+  # every Windows host ships winlogbeat at a hardcoded <subnet>.24:9200. Two
+  # files that cannot overwrite each other is the fix; dnsmasq reads every *.conf
+  # in /etc/dnsmasq.d, so both sets are served.
+  - path: /opt/goad-light/prep.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # Usage: prep.sh HOST_MAP
+      #   HOST_MAP = "name|ip|mac,name|ip|mac,..." (pipe-separated triples)
+      set -e
+      if [ \$# -lt 1 ]; then
+        echo "Usage: \$0 HOST_MAP"
+        echo "  HOST_MAP — comma-separated 'name|ip|mac' triples"
+        exit 1
+      fi
+      HOST_MAP="\$1"
+
+      FIRST="\$(echo "\$HOST_MAP" | cut -d',' -f1)"
+      FIRST_IP="\$(echo "\$FIRST" | cut -d'|' -f2)"
+      IP_RANGE="\$(echo "\$FIRST_IP" | awk -F. '{print \$1"."\$2"."\$3}')"
+      GW_IP="\${IP_RANGE}.1"
+
+      RUNTIME=/var/lib/goad-run
+      mkdir -p "\$RUNTIME"
+
+      echo "[prep.sh] Writing DHCP reservations to gateway \${GW_IP}..."
+      SSH_OPTS="-i /root/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts -o ConnectTimeout=15 -o BatchMode=yes"
+      # Staged under the destination's own name, so an operator debugging on the
+      # controller cannot mistake it for the orchestrator's lane-reservations.conf.
+      RESV_FILE="\$RUNTIME/goad-lane-reservations.conf"
+      {
+        echo "# GOAD lane DHCP reservations — written by /opt/goad-light/prep.sh"
+        echo "\$HOST_MAP" | tr ',' '\n' | while IFS='|' read -r hname hip hmac; do
+          [ -z "\$hname" ] && continue
+          echo "dhcp-host=\$hmac,\$hip,\$hname"
+        done
+      } > "\$RESV_FILE"
+      cat "\$RESV_FILE"
+
+      # Push the reservations onto the gateway. TWO rules, both learned from live
+      # lanes, and the second is why this is more than a redirect:
+      #
+      #  1. OUR OWN FILE (see the header above), never the orchestrator's.
+      #
+      #  2. NO ADDRESS IS CLAIMED TWICE. dnsmasq refuses to start when two
+      #     dhcp-host lines claim one address — in one file or across two — and
+      #     every restart branch below ends in '|| true', so that failure is
+      #     silent and total: nothing on the lane gets a lease while the deploy
+      #     still reports success. On a challenge lane the orchestrator's table is
+      #     a SUPERSET of this one (same roster, same macForOctet MACs, same
+      #     addresses), so writing ours blind would duplicate every line of it.
+      #     Skip the ones another file already serves — matched on address and on
+      #     MAC, the rule lane-deployer.js neutralizeConflictingReservations uses
+      #     — and keep them as comments so the file records what it decided.
+      #
+      # The remote script is a SINGLE-QUOTED heredoc: nothing in it expands on the
+      # controller, so every \$ below belongs to the gateway's shell, and the
+      # reservations arrive on stdin instead of being interpolated into an ssh
+      # command line where a shell metacharacter would land in a config file.
+      ssh \$SSH_OPTS root@\$GW_IP "\$(cat <<'GWSCRIPT'
+      set -u
+      OURS=/etc/dnsmasq.d/goad-lane-reservations.conf
+      CAND=/tmp/goad-lane-reservations.cand
+      CLAIMED=/tmp/goad-lane-reservations.claimed
+      cat > "\$CAND"
+
+      # Every reservation some OTHER file already serves, normalised to
+      # ",mac,ip,name," so a whole-field match cannot half-match an address.
+      # A commented-out line is deliberately not a claim: installLaneReservations
+      # supersedes the gateway's baked entries by prefixing them with '#'.
+      #
+      # Lowercased on both sides rather than matched with grep -i, because the
+      # two writers spell MAC hex in whatever case they were handed and 'grep -iF'
+      # is not portable — the combination aborts outright on some builds.
+      : > "\$CLAIMED"
+      for f in /etc/dnsmasq.conf /etc/dnsmasq.d/*.conf; do
+        [ -f "\$f" ] || continue
+        [ "\$f" = "\$OURS" ] && continue
+        sed -n 's/^[[:space:]]*dhcp-host=/,/p' "\$f" | sed 's/\$/,/' | tr 'A-Z' 'a-z' >> "\$CLAIMED"
+      done
+
+      {
+        echo "# GOAD lane DHCP reservations - written by /opt/goad-light/prep.sh"
+        echo "# lane-reservations.conf belongs to the orchestrator and is never"
+        echo "# written from here. A reservation another drop-in already serves is"
+        echo "# kept as a comment: two dhcp-host lines claiming one address stop"
+        echo "# dnsmasq, and that takes DHCP down for the whole lane."
+        while IFS= read -r line; do
+          case "\$line" in
+            dhcp-host=*) ;;
+            *) continue ;;
+          esac
+          hmac="\$(echo "\$line" | cut -d= -f2- | cut -d, -f1 | tr 'A-Z' 'a-z')"
+          hip="\$(echo "\$line" | cut -d, -f2)"
+          if grep -qF ",\$hip," "\$CLAIMED" || grep -qF ",\$hmac," "\$CLAIMED"; then
+            echo "# served by another dnsmasq.d file: \$line"
+          else
+            echo "\$line"
+          fi
+        done < "\$CAND"
+      } > "\$OURS"
+      cat "\$OURS"
+
+      # Wipe stale leases so a renewal cannot hand a guest back the dynamic
+      # address it grabbed before any reservation existed. The orchestrator
+      # restarts the Windows VMs immediately after this call for the same reason.
+      : > /var/lib/misc/dnsmasq.leases 2>/dev/null || true
+      rc-service dnsmasq restart 2>/dev/null || /etc/init.d/dnsmasq restart 2>/dev/null || systemctl restart dnsmasq 2>/dev/null || true
+
+      # Prove dnsmasq is serving rather than assume it — the restart above cannot
+      # report failure. If it is down, the file we just wrote is the only thing
+      # that changed, so take it back out: the lane keeps whatever reservations it
+      # already had, which is strictly better than no DHCP at all.
+      if pgrep dnsmasq >/dev/null 2>&1 || pidof dnsmasq >/dev/null 2>&1; then
+        echo "[prep.sh/gw] dnsmasq is serving; \$OURS installed"
+      else
+        echo "[prep.sh/gw] dnsmasq did NOT come back — removing \$OURS"
+        dnsmasq --test 2>&1 | head -5
+        rm -f "\$OURS"
+        rc-service dnsmasq restart 2>/dev/null || /etc/init.d/dnsmasq restart 2>/dev/null || systemctl restart dnsmasq 2>/dev/null || true
+        if pgrep dnsmasq >/dev/null 2>&1 || pidof dnsmasq >/dev/null 2>&1; then
+          echo "[prep.sh/gw] dnsmasq recovered without our file"
+        else
+          rm -f "\$CAND" "\$CLAIMED"
+          echo "[prep.sh/gw] FATAL: this lane has no DHCP server. Every guest will"
+          echo "[prep.sh/gw] sit without an address and waitForWinRM would time out"
+          echo "[prep.sh/gw] thirty minutes from now with nothing naming the cause."
+          exit 1
+        fi
+      fi
+      rm -f "\$CAND" "\$CLAIMED"
+      GWSCRIPT
+      )" < "\$RESV_FILE"
+      echo "[prep.sh] Reservations applied."
+
+  # ----- Receiving directory for pushed lab trees -----
+  # THE CONTRACT. Stated here because the other half lives in another tree
+  # (front-end/modules/crucible/plugins/ciab/utils/goad-lab-push.js) and this
+  # is the half that actually runs on the lane.
+  #
+  # There are TWO delivery routes and they deliberately end in the same state:
+  #
+  #   ROUTE A (goad-lab-push.js) streams base64 chunks over the guest agent,
+  #     stages under a work directory, and rename()s the finished tree onto
+  #     /opt/goad/ad/<LAB>/ as its LAST act. Nothing here has to run for it.
+  #
+  #   ROUTE B (this directory) is for a delivery that arrives as one file —
+  #     an scp onto the node, a guest file-write, a manual copy while
+  #     debugging. Layout:
+  #
+  #       /opt/goad-inbox/                    root:root 0755, created at bake
+  #                                           time (runcmd, below) so it exists
+  #                                           in every clone before any push
+  #       /opt/goad-inbox/<LAB>/              <LAB> is exactly run.sh's LAB argv
+  #                                           and the ad/ directory name
+  #       /opt/goad-inbox/<LAB>/lab.tar.gz    gzipped tar of the lab directory's
+  #                                           CONTENTS, not of the directory:
+  #                                             tar -czf lab.tar.gz -C <dir> .
+  #       /opt/goad-inbox/<LAB>/.cc-manifest  WRITTEN LAST
+  #
+  # .cc-manifest — same grammar in both routes, because extract-lab.sh copies
+  # the inbox manifest into the lab directory on success, and goad-lab-push.js
+  # writes the same file from its side. One token per line, 'key=value', no
+  # spaces, so it can be matched with grep -qxF and no sha or lab name can leak
+  # a regex metacharacter:
+  #
+  #   schema=1                (informational)
+  #   lab=<LAB>               must equal the directory name   (route B: checked)
+  #   tree_sha256=<64 hex>    content address of the payload  (route B: of the
+  #                           tarball; route A: of its own deterministic tar)
+  #   bytes=<n>               size of lab.tar.gz     (route B only, optional)
+  #   goad_ref=<sha>          the GOAD ref the tree was generated against
+  #
+  # ad/<LAB>/.cc-manifest is therefore the ONE record of what is installed,
+  # whichever route delivered it — which is what makes 'is this already
+  # delivered?' a single grep for both halves.
+  #
+  # WHY THE MANIFEST IS THE COMMIT POINT AND THE PAYLOAD IS NOT:
+  # a transfer that dies halfway leaves lab.tar.gz PRESENT and SHORT. Presence,
+  # size and mtime cannot tell that apart from a complete file, and a truncated
+  # data/ tree still parses and still provisions — the only things missing are
+  # the objects nobody notices are missing, which is this pipeline's dominant
+  # failure mode. So nothing about the payload is ever allowed to mean 'done'.
+  # The manifest means done, it is written last, and extract-lab.sh refuses
+  # every other state.
+  - path: /opt/goad-light/extract-lab.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # extract-lab.sh LAB — idempotent receiver for a lab tree pushed as one
+      # tarball (route B; see the contract block in the bake script).
+      #
+      #   exit 0  /opt/goad/ad/<LAB> is present and matches the inbox manifest,
+      #           OR there is nothing in the inbox for <LAB> — which is the case
+      #           for every lab baked into the image (GOAD-Light, GOAD, NHA...)
+      #           and for anything delivered by route A
+      #   exit 1  a bundle IS present but is incomplete, corrupt or misaddressed
+      #
+      # Called by run.sh on every provisioning run, and safe to call directly
+      # after a push.
+      set -euo pipefail
+
+      LAB="\${1:-}"
+      if [ -z "\$LAB" ]; then
+        echo "Usage: \$0 LAB" >&2
+        exit 1
+      fi
+      # The lab name indexes a path on BOTH sides of the contract, so a name
+      # with a slash escapes the inbox and the ad/ tree in the same step.
+      # Rejected here rather than at either join, so there is one guard to read.
+      case "\$LAB" in
+        .|*/*|*..*)
+          echo "extract-lab: refusing unsafe lab name '\$LAB'" >&2
+          exit 1
+          ;;
+      esac
+
+      INBOX="/opt/goad-inbox/\$LAB"
+      BUNDLE="\$INBOX/lab.tar.gz"
+      MANIFEST="\$INBOX/.cc-manifest"
+      AD_ROOT="/opt/goad/ad"
+      DEST="\$AD_ROOT/\$LAB"
+      # The installed record, shared with route A. NOT a second stamp file:
+      # two records of the same fact drift, and the one that drifts is always
+      # the one the next reader trusts.
+      DEST_MANIFEST="\$DEST/.cc-manifest"
+
+      # Nothing pushed for this lab. NOT an error: run.sh calls this
+      # unconditionally, for baked-in labs and route-A deliveries alike.
+      if [ ! -d "\$INBOX" ]; then
+        exit 0
+      fi
+
+      if [ ! -f "\$MANIFEST" ]; then
+        echo "extract-lab: \$INBOX exists but \$MANIFEST does not." >&2
+        echo "  The pusher writes .cc-manifest LAST, so this is an INCOMPLETE push." >&2
+        echo "  Refusing to extract a partial tree. Re-push, then re-run." >&2
+        exit 1
+      fi
+      if [ ! -f "\$BUNDLE" ]; then
+        echo "extract-lab: \$MANIFEST is present but \$BUNDLE is missing." >&2
+        exit 1
+      fi
+
+      # 'key=value', first match wins. Unknown keys are ignored on purpose, so
+      # the pusher can add fields without breaking an older controller.
+      manifest_get() {
+        awk -F= -v k="\$1" '\$1 == k { print \$2; exit }' "\$MANIFEST"
+      }
+
+      WANT_SHA="\$(manifest_get tree_sha256 || true)"
+      WANT_LAB="\$(manifest_get lab || true)"
+      WANT_BYTES="\$(manifest_get bytes || true)"
+
+      if [ -z "\$WANT_SHA" ]; then
+        echo "extract-lab: \$MANIFEST carries no tree_sha256 line — cannot prove the push completed." >&2
+        exit 1
+      fi
+      if [ -n "\$WANT_LAB" ] && [ "\$WANT_LAB" != "\$LAB" ]; then
+        echo "extract-lab: manifest says lab='\$WANT_LAB' but this is '\$LAB' — misaddressed push." >&2
+        exit 1
+      fi
+      if [ -n "\$WANT_BYTES" ]; then
+        HAVE_BYTES="\$(wc -c < "\$BUNDLE" | tr -d ' ')"
+        if [ "\$HAVE_BYTES" != "\$WANT_BYTES" ]; then
+          echo "extract-lab: \$BUNDLE is \$HAVE_BYTES bytes, manifest says \$WANT_BYTES — truncated push." >&2
+          exit 1
+        fi
+      fi
+
+      HAVE_SHA="\$(sha256sum "\$BUNDLE" | awk '{print \$1}')"
+      if [ "\$HAVE_SHA" != "\$WANT_SHA" ]; then
+        echo "extract-lab: tree_sha256 mismatch on \$BUNDLE — corrupt or still being written." >&2
+        echo "  manifest: \$WANT_SHA" >&2
+        echo "  on disk:  \$HAVE_SHA" >&2
+        exit 1
+      fi
+
+      # IDEMPOTENCE, matched exactly the way the pusher's own probe matches it:
+      # grep -qxF on the whole line, fixed string. A hit is a hard no-op, not a
+      # cheap re-extract — run.sh and goad-deploy.js both patch roles and data
+      # IN PLACE after delivery (the mssql win_template fix, the child_domain
+      # reboot fix), and re-unpacking identical bytes would silently revert
+      # those edits mid-chain.
+      if [ -f "\$DEST_MANIFEST" ] && grep -qxF "tree_sha256=\$WANT_SHA" "\$DEST_MANIFEST"; then
+        echo "extract-lab: \$DEST already at \$WANT_SHA — nothing to do."
+        exit 0
+      fi
+
+      # Stage, validate, THEN swap. Untarring over \$DEST in place would leave a
+      # half-written lab in the exact directory run.sh is about to read — which
+      # is precisely the state this helper exists to make unreachable.
+      STAGE="\$AD_ROOT/.incoming-\$LAB.\$\$"
+      rm -rf "\$STAGE"
+      mkdir -p "\$STAGE"
+      tar -xzf "\$BUNDLE" -C "\$STAGE"
+
+      # run.sh needs exactly these two directories. Failing here names the
+      # missing piece; failing in run.sh a few lines later says only
+      # "Lab not found", which sends the reader to the wrong machine.
+      if [ ! -d "\$STAGE/data" ] || [ ! -d "\$STAGE/providers/proxmox" ]; then
+        echo "extract-lab: bundle for '\$LAB' has no data/ and/or providers/proxmox/." >&2
+        echo "  Tar the CONTENTS of the lab dir: tar -czf lab.tar.gz -C <labdir> ." >&2
+        rm -rf "\$STAGE"
+        exit 1
+      fi
+      # The manifest goes in LAST here too, and it goes in BEFORE the rename —
+      # so it becomes visible at the same instant the tree does, and never
+      # describes a directory that is still being assembled.
+      cp "\$MANIFEST" "\$STAGE/.cc-manifest"
+
+      # rename(2) within one filesystem, so the window in which \$DEST does not
+      # exist is a single syscall and no reader can observe a partial tree.
+      PREV=""
+      if [ -e "\$DEST" ]; then
+        PREV="\$AD_ROOT/.replaced-\$LAB.\$\$"
+        mv "\$DEST" "\$PREV"
+      fi
+      mv "\$STAGE" "\$DEST"
+      if [ -n "\$PREV" ]; then
+        rm -rf "\$PREV"
+      fi
+      echo "extract-lab: extracted '\$LAB' at \$WANT_SHA -> \$DEST"
+      exit 0
+
+  # ----- Capability marker: this run.sh reads ad/<LAB>/playbooks.yml -----
+  # The pusher has to decide FROM OUTSIDE whether the controller it is talking
+  # to honours a per-lab chain, because a lane cloned from the previous
+  # template does not, and a lab delivered to one of those with no shared-file
+  # merge silently inherits playbooks.yml 'default' — the 16-play chain, most
+  # of an hour burned, then plays against empty groups.
+  #
+  # Its fallback test is a grep of run.sh for a line carrying both 'LAB' and
+  # 'playbooks.yml', which our LAB_PLAYBOOKS_YML= line happens to satisfy. That
+  # is a COINCIDENCE OF SPELLING, not a contract: rename the variable and the
+  # probe silently answers 'no' forever after. This file is the contract, and
+  # its presence is the whole assertion.
+  # Consumed as /opt/goad-light/.cc-per-lab-playbooks by
+  # ciab/utils/goad-lab-push.js (cmdSupportsPerLabPlaybooks). Neither half moves
+  # without the other.
+  - path: /opt/goad-light/.cc-per-lab-playbooks
+    permissions: '0644'
+    content: |
+      # Presence of this file asserts the capability; the content is
+      # informational. See run.sh, section 'Which playbook chain?'.
+      capability=per_lab_playbooks_yml
+      path=ad/<LAB>/playbooks.yml
+      shapes=bare list, or a mapping keyed by <LAB> with a default fallback
+
+  # ----- Capability marker: this run.sh accepts a 5th EXTENSIONS argument -----
+  # Same job as the marker above, for a different capability, and for the same
+  # reason: run.sh only reaches a lane by being baked into template 1700, so
+  # "does this controller install extensions?" is a per-lane question whose
+  # answer was fixed at clone time. A lane cloned from the previous template
+  # IGNORES a 5th argument -- it binds \$1..\$4 and never looks further. That is
+  # deliberate (an older controller must not break on a longer argv) and it is
+  # exactly why the orchestrator cannot infer support from a run that exited 0:
+  # an extension that was never installed looks identical to one that was,
+  # right up until an instructor opens Kibana in front of a class.
+  #
+  # The fallback test for a controller baked before this file existed is a grep
+  # of run.sh for a line carrying EXTENSIONS, which our EXTENSIONS= binding
+  # satisfies. That is a COINCIDENCE OF SPELLING, not a contract: rename the
+  # variable and the probe answers 'no' forever after, silently, in the
+  # safe-looking direction. This file is the contract, and its presence is the
+  # whole assertion.
+  #
+  # Presence is VERIFIED, not asserted: a runcmd at the end of this bake
+  # DELETES this file if /opt/goad/extensions/<key>/ did not actually land in
+  # the image, so the marker can never claim a capability the tree cannot
+  # deliver.
+  - path: /opt/goad-light/.cc-extension-install
+    permissions: '0644'
+    content: |
+      # Presence of this file asserts the capability; the content is
+      # informational. See run.sh, section 'GOAD extensions'.
+      capability=install_extension_argv5
+      argv=run.sh LAB HOST_MAP INITIAL_USER INITIAL_PASSWORD [EXTENSIONS]
+      extensions=comma-separated keys in install order, e.g. elk or elk,wazuh
+      absent_or_empty=byte-identical to a controller with no extension support
+      inventory=/var/lib/goad-run/inventory_ext_<key> from extensions/<key>/inventory
+      playbook=/opt/goad/extensions/<key>/ansible/install.yml, run from that dir
+      elk_octet=24
+      unknown_key=hard failure, before the lab chain starts
+      exit_2=lab chain succeeded and at least one extension playbook failed
+      available=see /opt/goad-light/extensions-available.txt
+
+  # The lane HOST_MAP owns extension IPs; the main inventory base is internal on v3.
+  - path: /opt/goad-light/apply-host-map.py
+    permissions: '0755'
+    content: |
+      import ipaddress
+      import re
+      import sys
+      from pathlib import Path
+
+      inventory = Path(sys.argv[1])
+      addresses = {}
+      for triple in sys.argv[2].split(','):
+          fields = triple.split('|')
+          if len(fields) != 3:
+              raise SystemExit('Invalid HOST_MAP triple')
+          name, address, _ = fields
+          if not re.fullmatch(r'[A-Za-z0-9_-]+', name):
+              raise SystemExit('Invalid HOST_MAP hostname')
+          ipaddress.IPv4Address(address)
+          addresses[name.lower()] = address
+
+      count = 0
+      def replace(match):
+          global count
+          name = match.group(1).lower()
+          if name not in addresses:
+              return match.group(0)
+          count += 1
+          return match.group(1) + match.group(2) + addresses[name]
+
+      original = inventory.read_text()
+      updated = re.sub(r'(?m)^([A-Za-z0-9_-]+)([^\r\n]*?\bansible_host=)(\S+)', replace, original)
+      if not count:
+          raise SystemExit('Extension inventory has no host matching HOST_MAP')
+      inventory.write_text(updated)
+
+  - path: /opt/goad-light/run.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # Render per-lab inventory, run upstream playbook chain over WinRM.
+      # Assumes prep.sh has already been called (DHCP reservations on gateway,
+      # Windows VMs at correct IPs).
+      #
+      # Architecture: follows upstream GOAD's two-account scheme (with one
+      # tweak — see password note below).
+      #   - Windows VM template ships with Administrator (bake-time password)
+      #   - We use Administrator ONLY for an initial 'preflight-vagrant.yml'
+      #     play that creates a 'vagrant' user in Administrators group.
+      #   - All subsequent plays (preflight-dns + upstream chain) connect as
+      #     'vagrant' with a policy-compliant password (BootstrapPwd!1 — the
+      #     literal upstream value 'vagrant' fails Windows local password
+      #     policy: too short, no complexity, contains username substring).
+      #     The vagrant user is the scaffolding that survives ad-servers.yml's
+      #     password rotation of the Administrator account (which gets rotated
+      #     to lab.hosts[X].local_admin_password from upstream's config.json —
+      #     different per host, preserving PTH teaching value).
+      #   - We do NOT patch config.json. Per-host local_admin_password and
+      #     per-domain domain_password come from upstream's data verbatim.
+      #
+      # Usage: run.sh LAB HOST_MAP INITIAL_USER INITIAL_PASSWORD [EXTENSIONS]
+      #   HOST_MAP        = "name|ip|mac,name|ip|mac,..." (pipe-separated triples)
+      #   INITIAL_USER    = bake-time Administrator user, typically 'Administrator'
+      #   INITIAL_PASSWORD= bake-time Administrator password from the Win template
+      #   EXTENSIONS      = OPTIONAL. Comma-separated GOAD extension keys, in the
+      #                     order they should be installed: "elk", "wazuh",
+      #                     "elk,wazuh". ABSENT OR EMPTY MUST BEHAVE EXACTLY AS
+      #                     IT DID BEFORE EXTENSIONS EXISTED -- every lane in
+      #                     flight depends on that, and an OLDER controller
+      #                     handed a 5th argument simply ignores it rather than
+      #                     breaking, which is the other half of the same
+      #                     contract.
+      set -e
+      if [ \$# -lt 4 ]; then
+        echo "Usage: \$0 LAB HOST_MAP INITIAL_USER INITIAL_PASSWORD [EXTENSIONS]"
+        echo "  LAB              — GOAD-Light | GOAD | GOAD-Mini | NHA | SCCM | DRACARYS"
+        echo "  HOST_MAP         — comma-separated 'name|ip|mac' triples"
+        echo "  INITIAL_USER     — bake-time Win template admin user (typically 'Administrator')"
+        echo "  INITIAL_PASSWORD — bake-time Win template admin password"
+        echo "  EXTENSIONS       — optional: elk | wazuh | elk,wazuh (empty = none)"
+        exit 1
+      fi
+      LAB="\$1"; HOST_MAP="\$2"; INITIAL_USER="\$3"; INITIAL_PASSWORD="\$4"
+      # The 5th argument, and the only optional one. Written \${5:-} rather than
+      # \$5 so it is empty-not-unset however the shell was invoked, and so a
+      # future 'set -u' cannot turn every four-argument call -- which is every
+      # caller alive today -- into an instant failure.
+      EXTENSIONS="\${5:-}"
+
+      GOAD_ROOT=/opt/goad
+      LAB_ROOT="\$GOAD_ROOT/ad/\$LAB"
+      LAB_DATA="\$LAB_ROOT/data"
+      LAB_PROVIDER="\$LAB_ROOT/providers/proxmox"
+      ANSIBLE_DIR="\$GOAD_ROOT/ansible"
+      # Upstream's shared chain map: ONE mutable file keyed by every lab name.
+      # Still the fallback, no longer the only source — see LAB_PLAYBOOKS_YML.
+      PLAYBOOKS_YML="\$GOAD_ROOT/playbooks.yml"
+      # v2 contract, both optional, both shipped INSIDE the lab tree so they are
+      # versioned with the data they drive and a push is one atomic operation:
+      #   playbooks.yml   this lab's own chain      (see 'Which playbook chain?')
+      #   extra_vars.yml  this lab's own overlay    (see 'extra-vars overlay')
+      LAB_PLAYBOOKS_YML="\$LAB_ROOT/playbooks.yml"
+      LAB_EXTRA_VARS="\$LAB_ROOT/extra_vars.yml"
+
+      # ---------- GOAD extensions: addressing and reachability ----------
+      # Upstream's flow is 'install_extension <name>' against a lab that is
+      # already installed: add one Linux server, layer that extension's
+      # inventory on top of the lab's, run extensions/<name>/ansible/install.yml.
+      # See goad/provisioner/ansible/ansible.py, run_extension() -- inventory
+      # layering plus one playbook run, and nothing else. What follows is that
+      # same thing expressed in the -i flags this script already builds.
+      #
+      # WHY THE ELK OCTET MOVES. extensions/elk/inventory pins
+      # elk ansible_host={{ip_range}}.50. On v3 that was free, because Kali
+      # lives on the EXTERNAL segment while a SIEM sits internally, so the two
+      # addresses were never on one wire. On v1/v2 there is ONE flat lan0 and
+      # .50 is the Kali box (INFRA_IP_OCTETS.Kali in
+      # front-end/src/utils/goad-deploy.js). Two dhcp-host lines claiming one
+      # address make dnsmasq REFUSE TO START, which takes DHCP down for the
+      # WHOLE lane -- not just those two machines. So CyberCore places elk at
+      # .24, which is free in every lab we ship and is exactly what
+      # GOAD_EXTENSIONS.elk.ipOctet already declares on the orchestrator side.
+      # THE TWO HALVES MUST AGREE: the octet below decides where ansible looks,
+      # goad-deploy.js decides where the machine actually is, and nothing
+      # cross-checks them at runtime -- a mismatch is a silent connection
+      # timeout at the end of a 90-minute deploy.
+      #
+      # The rewrite happens when the extension inventory is RENDERED (below),
+      # inside the same sed pass that substitutes {{ip_range}}. That keeps the
+      # vendored upstream file pristine and puts the CyberCore-specific choice
+      # in the one place that already owns lane addressing.
+      EXT_ELK_OCTET=24
+      EXT_ELK_UPSTREAM_OCTET=50
+      # wazuh keeps upstream's own .51: free on v1/v2, so nothing to rewrite.
+      #
+      # HOW THE EXTENSION SERVER IS REACHED. Its inventory line says
+      # ansible_connection=ssh and carries no credentials at all -- upstream
+      # supplies those from its global inventory. Ours come from
+      # inventory_overrides, the same file every other connection variable in
+      # this script lives in. Key-based, never a password: the controller's own
+      # /root/.ssh/id_ed25519, the same key prep.sh uses for the
+      # controller-to-gateway link, whose public half the Linux base image
+      # carries in authorized_keys.
+      # Both are env-overridable so a differently-baked image (a cloud-init
+      # account that is not root, a second key) can be accommodated WITHOUT a
+      # controller re-bake -- which is otherwise the only way to change
+      # anything in this file.
+      EXT_SSH_USER="\${EXT_SSH_USER:-root}"
+      EXT_SSH_KEY="\${EXT_SSH_KEY:-/root/.ssh/id_ed25519}"
+      # Validated keys, filled in by the rendering loop below and read by the
+      # install loop at the very end. Empty for every run that passes no 5th
+      # argument, which is every lane in flight today.
+      EXT_KEYS=""
+
+      # Land any pushed tree for this lab BEFORE the existence check below —
+      # a generated lab does not exist in the image, it arrives in the inbox.
+      # No-op for every baked-in lab (no inbox entry), and a hard failure for a
+      # push that did not complete. Unconditional on purpose: guarding it with
+      # a [ -x ] test would turn a missing helper into a silent skip, and then
+      # into "lab not found" pointing at the wrong half of the contract.
+      /opt/goad-light/extract-lab.sh "\$LAB"
+
+      if [ ! -d "\$LAB_DATA" ] || [ ! -d "\$LAB_PROVIDER" ]; then
+        echo "ERROR: Lab '\$LAB' not found at \$LAB_DATA / \$LAB_PROVIDER"
+        ls "\$GOAD_ROOT/ad/" | grep -v TEMPLATE
+        exit 1
+      fi
+
+      FIRST="\$(echo "\$HOST_MAP" | cut -d',' -f1)"
+      FIRST_IP="\$(echo "\$FIRST" | cut -d'|' -f2)"
+      IP_RANGE="\$(echo "\$FIRST_IP" | awk -F. '{print \$1"."\$2"."\$3}')"
+      GW_IP="\${IP_RANGE}.1"
+
+      RUNTIME=/var/lib/goad-run
+      mkdir -p "\$RUNTIME"
+
+      # NOTE: we deliberately do NOT modify upstream's config.json. Each host's
+      # local_admin_password and each domain's domain_password are upstream's
+      # per-host static values (e.g. dc01='8dCT-DJjgScp', dc02='NgtI75cKV+Pu').
+      # The upstream invariant lab.hosts[parent_dc].local_admin_password ==
+      # lab.domains[parent_domain].domain_password is what makes child-DC
+      # dcpromo authentication work; touching either side breaks it.
+
+      # Render proxmox provider inventory ({{ip_range}} is a sed placeholder)
+      sed -e "s|{{ip_range}}|\${IP_RANGE}|g" "\$LAB_PROVIDER/inventory" > "\$RUNTIME/inventory_proxmox"
+
+      # Two override files for two phases:
+      #
+      #   inventory_overrides_initial — used ONLY by the two preflights
+      #     (preflight-network.yml, then preflight-vagrant.yml), which fix
+      #     routes/DNS and create the vagrant scaffolding user. After those two
+      #     plays this inventory is never used again.
+      #     THE VERSION WRITTEN HERE IS A PLACEHOLDER. It is overwritten in full,
+      #     before its first use, by the per-host credential probe further down —
+      #     which is where the accounts actually come from, because one lane can
+      #     hold two Windows templates with different baked credentials. Kept
+      #     here so the file exists no matter which path the script takes.
+      #
+      #   inventory_overrides — used for everything else (preflight-dns +
+      #     full upstream chain). Connects as vagrant/vagrant. The vagrant
+      #     user persists through ad-servers.yml's password rotation of
+      #     Administrator (because ad-servers.yml only touches Administrator,
+      #     not vagrant), so WinRM keeps working all the way through.
+      #
+      # ansible_port=5985 is critical — without it pywinrm picks port based
+      # on transport defaults (which can resolve to 5986/HTTPS even when
+      # ansible_winrm_transport=ntlm is set), and our gateway only opens 5985.
+      cat > "\$RUNTIME/inventory_overrides_initial" <<INIT
+      [all:vars]
+      ansible_user=\${INITIAL_USER}
+      ansible_password=\${INITIAL_PASSWORD}
+      ansible_connection=winrm
+      ansible_port=5985
+      ansible_winrm_scheme=http
+      ansible_winrm_transport=ntlm
+      ansible_winrm_server_cert_validation=ignore
+      ansible_winrm_operation_timeout_sec=400
+      ansible_winrm_read_timeout_sec=500
+
+      [localhost]
+      localhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3
+      INIT
+
+      cat > "\$RUNTIME/inventory_overrides" <<OVR
+      [all:vars]
+      ansible_user=vagrant
+      # NOTE: Windows local password policy requires 8+ chars + 3-of-4 char
+      # classes (upper/lower/digit/symbol) and rejects passwords containing
+      # the username (case-insensitive). 'vagrant' fails on every count, so
+      # we use a policy-compliant string that doesn't contain 'vagrant'.
+      ansible_password=BootstrapPwd!1
+      ansible_connection=winrm
+      ansible_port=5985
+      ansible_winrm_scheme=http
+      ansible_winrm_transport=ntlm
+      ansible_winrm_server_cert_validation=ignore
+      ansible_winrm_operation_timeout_sec=400
+      ansible_winrm_read_timeout_sec=500
+      force_dns_server=yes
+      dns_server=\${GW_IP}
+      two_adapters=no
+
+      # Carve out localhost — upstream's wait*.yml playbooks target localhost
+      # for sleep tasks, but [all:vars] above would otherwise force ansible to
+      # WinRM-connect to localhost:5985 (which doesn't run WinRM here).
+      [localhost]
+      localhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3
+      OVR
+
+      # ---------- Render each requested extension's inventory ----------
+      # One file per extension, \$RUNTIME/inventory_ext_<key>, produced by the
+      # SAME sed that produced inventory_proxmox above. Rendering happens HERE,
+      # before a single playbook runs, so an unknown or incomplete extension
+      # key fails in the first seconds of a deploy rather than ninety minutes
+      # later, with the forest built and only the SIEM left to do.
+      if [ -n "\$EXTENSIONS" ]; then
+        echo "==> Extensions requested: \$EXTENSIONS"
+        for ext in \$(echo "\$EXTENSIONS" | tr ',' ' '); do
+          # The key indexes a path, so a name with a slash escapes the
+          # extensions tree. Rejected here rather than at either join, so
+          # there is one guard to read (same shape as extract-lab.sh's).
+          case "\$ext" in
+            .|*/*|*..*)
+              echo "ERROR: refusing unsafe extension key '\$ext'" >&2
+              exit 1
+              ;;
+          esac
+          EXT_DIR="\$GOAD_ROOT/extensions/\$ext"
+          EXT_INV_SRC="\$EXT_DIR/inventory"
+          EXT_PLAYBOOK="\$EXT_DIR/ansible/install.yml"
+          # An unknown key FAILS LOUDLY. The alternative -- skip it, carry on --
+          # returns a green deploy for a lane that has no SIEM in it, and
+          # nobody finds out until an instructor opens Kibana.
+          if [ ! -d "\$EXT_DIR" ]; then
+            echo "ERROR: extension '\$ext' has no directory at \$EXT_DIR" >&2
+            echo "  Extensions present in this image:" >&2
+            ls "\$GOAD_ROOT/extensions" 2>/dev/null | sed 's/^/    /' >&2
+            exit 1
+          fi
+          if [ ! -f "\$EXT_INV_SRC" ] || [ ! -f "\$EXT_PLAYBOOK" ]; then
+            echo "ERROR: extension '\$ext' is incomplete; both of these are required:" >&2
+            echo "         \$EXT_INV_SRC" >&2
+            echo "         \$EXT_PLAYBOOK" >&2
+            exit 1
+          fi
+          # RENDERED WITH JINJA, NOT SED -- see /opt/goad-light/render-inventory.py.
+          # extensions/ws01 and extensions/exchange carry {% if %} blocks that
+          # branch on provider_name, and sed passed those through verbatim for
+          # ansible's ini parser to choke on minutes later. An earlier revision
+          # REFUSED any inventory containing '{%', which was honest and made
+          # ws01 undeployable ("extension 'ws01' inventory uses Jinja control
+          # blocks"). goad/instance.py:302 renders these with exactly
+          # lab_name / ip_range / provider_name, so we do the same.
+          #
+          # The elk octet rewrite moved into the renderer as an explicit
+          # argument. It can no longer ride a sed on the {{ip_range}} PLACEHOLDER
+          # because Jinja substitutes that before we ever see the text -- so the
+          # renderer matches the rendered 'ansible_host=<ip_range>.50' and fails
+          # loudly if it is absent, rather than no-oping its way to two machines
+          # on one address.
+          EXT_OCTET_ARG=""
+          if [ "\$ext" = "elk" ]; then
+            EXT_OCTET_ARG="--rewrite-octet \${EXT_ELK_UPSTREAM_OCTET}:\${EXT_ELK_OCTET}"
+          fi
+          if ! python3 /opt/goad-light/render-inventory.py \\
+                 "\$EXT_INV_SRC" "\$RUNTIME/inventory_ext_\$ext" \\
+                 --lab "\$LAB" --ip-range "\${IP_RANGE}" --provider proxmox \\
+                 \$EXT_OCTET_ARG; then
+            echo "ERROR: could not render the inventory for extension '\$ext'." >&2
+            echo "       Source: \$EXT_INV_SRC" >&2
+            exit 1
+          fi
+          python3 /opt/goad-light/apply-host-map.py "\$RUNTIME/inventory_ext_\$ext" "\$HOST_MAP"
+          echo "==> Rendered extension inventory: \$RUNTIME/inventory_ext_\$ext"
+          grep -E 'ansible_host=' "\$RUNTIME/inventory_ext_\$ext" | sed 's/^/    /' || true
+          # ---------- Connection variables for this extension's server ----
+          # Appended to inventory_overrides -- the file layered LAST, which is
+          # what stands in for upstream's global inventory. GROUP-scoped, never
+          # [all:vars]: 'all' is the least specific group ansible knows, so a
+          # <key>_server block beats the WinRM block above it for the SIEM host
+          # while leaving every Windows host untouched. No extension requested
+          # means the group is never created and this file stays byte-for-byte
+          # what it has always been.
+          #
+          # ansible_port is the one that bites. [all:vars] pins 5985 for WinRM,
+          # and without an override ansible would open an SSH connection to
+          # port 5985 on the SIEM and sit there until the connect timeout.
+          # ansible_password is emptied for the same class of reason: a
+          # non-empty password under connection=ssh makes ansible shell out to
+          # sshpass instead of using the key.
+          #
+          # ansible_ssh_common_args MATCHES the extension inventory's own
+          # host-level value rather than fighting it. A host var outranks a
+          # group var, so upstream's '-o StrictHostKeyChecking=no' wins here no
+          # matter what this line says; saying the same thing keeps the two
+          # readable together, saying something else would look effective and
+          # quietly not be.
+          # GUARDED, and this guard is the whole point rather than a nicety.
+          #
+          # A [<group>:vars] section for a group that is not defined IN THE SAME FILE is
+          # a HARD PARSE ERROR for ansible's ini plugin -- not a warning, not a skipped
+          # section. It rejects the entire file:
+          #
+          #   Failed to parse inventory: Section [ws01_server:vars] not valid for
+          #   undefined group 'ws01_server'.
+          #   Unable to parse /var/lib/goad-run/inventory_overrides as an inventory source
+          #
+          # inventory_overrides is the file carrying the WinRM credentials, the
+          # force_dns_server / dns_server / two_adapters vars the GOAD roles read, and
+          # the [localhost] carve-out. Losing it costs EVERY host all of them -- and
+          # the run keeps going, because data/inventory still parses, so the damage is
+          # silent. Seen on a real lane: the whole chain ran with those vars absent.
+          #
+          # elk and wazuh declare [elk_server] / [wazuh_server]. ws01 and lx01 do NOT:
+          # they are domain MEMBERS, reached over WinRM like every other Windows host,
+          # and they need no ssh override at all. So the block is written only when the
+          # group it configures actually exists.
+          if grep -q "^\[\${ext}_server\]" "\$RUNTIME/inventory_ext_\$ext"; then
+            {
+              echo ""
+              echo "# ---- \$ext extension server, appended by run.sh ----"
+              echo "[\${ext}_server:vars]"
+              echo "ansible_connection=ssh"
+              echo "ansible_user=\${EXT_SSH_USER}"
+              echo "ansible_password="
+              echo "ansible_port=22"
+              echo "ansible_ssh_private_key_file=\${EXT_SSH_KEY}"
+              echo "ansible_python_interpreter=/usr/bin/python3"
+              echo "ansible_ssh_common_args=-o StrictHostKeyChecking=no"
+            } >> "\$RUNTIME/inventory_overrides"
+            echo "    [\${ext}_server] ssh overrides appended to inventory_overrides"
+          else
+            echo "    \$ext declares no [\${ext}_server] group -- no ssh overrides needed"
+            echo "    (a domain member reached over WinRM, not a Linux server)"
+          fi
+          EXT_KEYS="\$EXT_KEYS \$ext"
+        done
+      fi
+
+      export ANSIBLE_CONFIG=\$ANSIBLE_DIR/ansible.cfg
+      export LANG=C.UTF-8
+      export LC_ALL=C.UTF-8
+      cd "\$ANSIBLE_DIR"
+
+      # ---------- Which playbook chain? ----------
+      # PREFERENCE ORDER:
+      #   1. ad/<LAB>/playbooks.yml   the lab's OWN chain, shipped in its tree
+      #   2. /opt/goad/playbooks.yml  upstream's shared map — unchanged
+      #                               behaviour for every lab that ships no
+      #                               chain of its own
+      #
+      # WHY 1 EXISTS. Upstream's file is a single mutable map keyed by lab name.
+      # A generated lab that used it would have to read-modify-write shared
+      # state inside the guest on every push: concurrent pushes race, a failed
+      # push leaves a key pointing at a tree that is not there, and no key is
+      # traceable to the lab that added it. Owning the file removes the shared
+      # mutable state instead of synchronising it.
+      #
+      # WHY IT IS NOT COSMETIC. A miss on data.get(LAB) falls through to
+      # 'default', and 'default' is the FULL GOAD chain: 16 playbooks including
+      # a hard five-minute wait5m.yml plus child-domain, trust, gmsa and laps
+      # plays. A single-domain generated lab needs none of them — and they do
+      # not skip. They run, and fail 15-25 minutes in, on reciprocal data
+      # (parent/child domain passwords, trust endpoints) that a single-domain
+      # lab has no way to make consistent. The failure lands ~95% of the way
+      # through a ~90-minute bake, which is the most expensive place in this
+      # entire pipeline to discover a data problem.
+      if [ -f "\$LAB_PLAYBOOKS_YML" ]; then
+        CHAIN_SRC="\$LAB_PLAYBOOKS_YML"
+      else
+        CHAIN_SRC="\$PLAYBOOKS_YML"
+      fi
+      echo "==> Playbook chain source: \$CHAIN_SRC"
+      PLAYBOOKS=\$(python3 - <<PY
+      import yaml
+      with open("\$CHAIN_SRC") as f:
+          data = yaml.safe_load(f)
+      # A per-lab file may be a bare LIST — the whole file IS this lab's chain,
+      # which is the shape a generator should emit, because it cannot then name
+      # the wrong key. The shared file is a MAPPING keyed by lab name with a
+      # 'default' fallback; that read is deliberately byte-for-byte what it has
+      # always been, since every shipped lab still goes through it.
+      if isinstance(data, list):
+          chain = data
+      else:
+          chain = (data or {}).get("\$LAB") or (data or {}).get("default") or []
+      print(" ".join(chain))
+      PY
+      )
+      if [ -z "\$PLAYBOOKS" ]; then
+        echo "ERROR: no playbook chain found for lab '\$LAB' in \$CHAIN_SRC"
+        exit 1
+      fi
+
+      # Build an extra-vars file (YAML for safe handling of special chars in
+      # the password). --extra-vars beats inventory vars at any level, which
+      # we need because upstream's data/inventory may try to override our
+      # connection settings via host_vars / play vars.
+      cat > "\$RUNTIME/extra_vars.yml" <<EXTRA
+      domain_name: "\$LAB"
+      # NOTE: do NOT set data_path here. Each upstream playbook sets it via
+      # 'import_playbook: data.yml vars: data_path: "../ad/{{domain_name}}/data/"'
+      # so that data.yml's 'vars_files: {{data_path}}/config.json' loads the
+      # upstream config. --extra-vars has the highest precedence, so any value
+      # here overrides the per-playbook data_path and breaks 'lab' loading.
+      # admin_user is what upstream's plays use as the prefix for domain admin
+      # principals (admin_user@domain). After ad-parent_domain.yml promotes
+      # DC01, the domain admin account is named 'administrator' (from the
+      # local Administrator account that became the domain admin during
+      # promotion). Always lowercase 'administrator' in upstream's data.
+      admin_user: "administrator"
+      # GOAD owns these Windows identities after bootstrap. The fork's hostname
+      # role retires Cloudbase-Init before renaming so a later reboot cannot
+      # restore the owner-suffixed Proxmox name and break domain membership.
+      cybercore_manage_hostname: true
+      enable_http_proxy: "no"
+      # Single-NIC topology: upstream's data.yml expects a "nat_adapter" (the
+      # second NIC for outbound NAT) plus a "domain_adapter" (the lane NIC).
+      # Our Windows VMs only have one NIC, so we hardcode both to "Ethernet"
+      # (the default connection name on fresh Win Server 2019 with virtio/
+      # e1000) and force two_adapters=false. Bypasses the adapter detection
+      # logic, which has a string-vs-bool bug for single-NIC.
+      nat_adapter: "Ethernet"
+      domain_adapter: "Ethernet"
+      two_adapters: false
+      number_of_interfaces: 1
+      # Defensive defaults for vars referenced by upstream plays but missing
+      # from GOAD-Light's data/inventory. Mirrors upstream's globalsettings.ini
+      # (the canonical fallback values). Other lab variants (GOAD-Mini, full
+      # GOAD, NHA) include these in their own data/inventory; GOAD-Light's
+      # is just an upstream omission.
+      add_route: "no"
+      # GW_IP is computed earlier in run.sh from the FIRST HOST_MAP triple's
+      # /24 base + ".1" — derived per lane, so it needs no scheme knowledge
+      # without modification. The literal \${GW_IP} below is preserved
+      # through the cloud-init heredoc into run.sh, which expands it at
+      # runtime to whatever the lane's actual gateway IP is.
+      route_gateway: "\${GW_IP}"
+      route_network: "10.0.0.0/8"
+      http_proxy: "no"
+      # DNS forwarder must be the lane gateway (\${GW_IP}), NOT a public
+      # resolver. After DC promotion Windows pins DC's primary DNS to
+      # 127.0.0.1; that local DNS service then forwards externally to
+      # whatever dns_server_forwarder we set. The lane gateway's FORWARD
+      # chain only allows lan0 → upstream via dnsmasq; lan0 → 1.1.1.1:53
+      # is dropped. Routing through the lane gateway's dnsmasq keeps DNS
+      # in the allowed path.
+      dns_server_forwarder: "\${GW_IP}"
+      # Keyboard layout hex codes — first one is the default. US only here;
+      # add other codes (e.g. "0000040C" for French) if needed.
+      keyboard_layouts: ["00000409"]
+      # Proxy defaults (unused since enable_http_proxy=no, but referenced)
+      proxy_ip: "x.x.x.x"
+      proxy_port: "8080"
+      ad_http_proxy: "http://x.x.x.x:8080"
+      ad_https_proxy: "http://x.x.x.x:8080"
+      EXTRA
+
+      # ---------- Optional per-lab extra-vars overlay ----------
+      # If the lab tree ships ad/<LAB>/extra_vars.yml, its contents are APPENDED
+      # to the file above, verbatim. Appending is the whole mechanism: ansible
+      # loads --extra-vars '@file' as one YAML document and PyYAML's mapping
+      # loader keeps the LAST occurrence of a duplicate key, so an overlay key
+      # wins over the block above without the pusher having to rewrite run.sh's
+      # own file — which is the read-modify-write we are removing everywhere
+      # else in this contract.
+      #
+      # PRECEDENCE WARNING, and it cuts both ways:
+      #   --extra-vars OUTRANKS EVERY INVENTORY LEVEL — host_vars, group_vars,
+      #   play vars, role defaults, and upstream's own data/inventory. Nothing
+      #   in the overlay is a default; each key is a hard override that no
+      #   playbook downstream can walk back. Put a variable here only when it
+      #   must hold for the entire chain.
+      #   In particular do NOT set data_path (see the note in the block above):
+      #   each upstream playbook sets it per-import, and overriding it globally
+      #   breaks 'lab' loading for every play at once.
+      if [ -f "\$LAB_EXTRA_VARS" ]; then
+        echo "==> Appending per-lab extra-vars overlay: \$LAB_EXTRA_VARS"
+        {
+          echo ""
+          echo "# ---- appended by run.sh from \$LAB_EXTRA_VARS ----"
+          cat "\$LAB_EXTRA_VARS"
+          echo ""
+        } >> "\$RUNTIME/extra_vars.yml"
+      fi
+
+      # ---------- Inventory flag sets ----------
+      # THE PREFLIGHTS SEE THE EXTENSION INVENTORIES. THE LAB CHAIN DOES NOT.
+      # That asymmetry is the whole point of this block; both halves are argued
+      # below because each one looks like a bug from the other's side.
+
+      # Every rendered extension inventory, in the order the keys were requested.
+      # Empty string when no 5th argument was passed -- which is every lane in
+      # flight today -- so the two flag strings below stay byte-identical to what
+      # they have always been for those lanes.
+      INV_EXT_FLAGS=""
+      for ext in \$EXT_KEYS; do
+        INV_EXT_FLAGS="\$INV_EXT_FLAGS -i \$RUNTIME/inventory_ext_\$ext"
+      done
+
+      # Hosts only, no credential overlay at all. The credential probe below
+      # layers its own single-candidate overlay on top of this, one candidate at
+      # a time, so it must NOT inherit a set of credentials from anywhere else.
+      INV_FLAGS_HOSTS="-i \$LAB_DATA/inventory -i \$RUNTIME/inventory_proxmox\$INV_EXT_FLAGS"
+
+      # The two preflights. INCLUDES the extension inventories, and must.
+      # extensions/ws01/inventory is the ONLY place ws01 exists -- it is in no
+      # lab inventory and in no provider inventory. Without these flags ws01 is
+      # not a member of 'domain', so preflight-network.yml never clears its
+      # stale baked default route or repoints its baked 8.8.8.8 DNS, and
+      # preflight-vagrant.yml never creates the 'vagrant' account on it. The
+      # extension install at the end then connects as vagrant/BootstrapPwd!1 to
+      # a host where that account does not exist and reports "ntlm: the
+      # specified credentials were rejected by the server". Observed on a real
+      # GOAD-Mini lane, ninety minutes into a deploy, with the forest built.
+      # inventory_overrides_initial stays LAST: it carries per-host credentials
+      # as host vars, and the last source to set a host var wins.
+      INV_FLAGS_INITIAL="\$INV_FLAGS_HOSTS -i \$RUNTIME/inventory_overrides_initial"
+
+      # The lab chain. DELIBERATELY WITHOUT the extension inventories.
+      # DO NOT "FIX" THIS BY ADDING \$INV_EXT_FLAGS. It is not an oversight, and
+      # the cost of finding that out is a built forest.
+      #
+      # ws01's host data -- lab.hosts['ws01'], and with it hostname, domain,
+      # local_admin_password, local_groups -- lives in the EXTENSION's own
+      # extensions/ws01/data/config.json. It is merged into 'lab' by a play
+      # INSIDE extensions/ws01/ansible/install.yml ("Read local config file",
+      # lab|combine(lab_extension, recursive=True)). The lab chain never runs
+      # that merge. So the moment ws01 is a member of 'domain' for a LAB play --
+      # and every ad-*.yml play targets 'domain' or a child of it -- that play
+      # evaluates lab.hosts[dict_key] for ws01, finds it undefined, and fails,
+      # after the forest is already built.
+      #
+      # The preflights are safe from exactly that, and only because they touch
+      # NO lab data: they fix routes and DNS and create one local user, and
+      # neither file references 'lab' anywhere. Read both before deciding this
+      # line is wrong.
+      INV_FLAGS="-i \$LAB_DATA/inventory -i \$RUNTIME/inventory_proxmox -i \$RUNTIME/inventory_overrides"
+
+      # ---------- Patch upstream's mssql role: broken win_template + bad path ----
+      # Two stacked bugs in upstream's mssql role:
+      #   (1) sql_conf.ini.MSSQL_*.j2 lives in roles/mssql/files/ but
+      #       win_template looks in templates/. Wrong location.
+      #   (2) Even after moving to templates/, win_template + ansible-core 2.20+
+      #       silently fails to render Jinja for this .ini (the {% if %} block
+      #       and {{ var }} placeholders pass through verbatim, evidenced by
+      #       Templar.do_template / set_temporary_context deprecation warnings).
+      # Fix: use Linux 'template' on the controller (which renders Jinja
+      # correctly) then 'win_copy' the rendered file to Windows.
+      MSSQL_ROLE=\$GOAD_ROOT/ansible/roles/mssql
+      if [ -d "\$MSSQL_ROLE/files" ] && ls "\$MSSQL_ROLE/files"/*.j2 >/dev/null 2>&1; then
+        echo "==> Relocating mssql .j2 templates from files/ to templates/..."
+        mkdir -p "\$MSSQL_ROLE/templates"
+        mv "\$MSSQL_ROLE/files"/*.j2 "\$MSSQL_ROLE/templates/" 2>/dev/null || true
+      fi
+      # Replace the buggy win_template task with: render locally → win_copy.
+      # The Python script lives at /opt/goad-light/patch-mssql.py (written by
+      # cloud-init at bake time). Calling it from a file avoids the YAML-vs-
+      # Python indentation conflict that breaks inline heredocs in user-data.
+      if grep -q 'win_template:' "\$MSSQL_ROLE/tasks/main.yml" 2>/dev/null; then
+        echo "==> Patching mssql role: render config locally then win_copy..."
+        python3 /opt/goad-light/patch-mssql.py "\$MSSQL_ROLE/tasks/main.yml"
+      fi
+
+      # ---------- Patch upstream's child_domain role for self-healing reboot ----
+      # After Install-ADDSDomain on DC02, the local SAM seals pending reboot —
+      # any new WinRM session as 'vagrant' gets "credentials rejected". Upstream's
+      # win_reboot task opens a fresh session for the reboot command and dies
+      # there. Fix: schedule the reboot from INSIDE the running win_powershell
+      # session (where vagrant still works), then replace win_reboot with
+      # wait_for_connection. Idempotent — sed exits 0 if pattern already gone.
+      CHILD_ROLE=\$GOAD_ROOT/ansible/roles/child_domain/tasks/main.yml
+      if [ -f "\$CHILD_ROLE" ] && grep -q 'NoRebootOnCompletion' "\$CHILD_ROLE" && \\
+         ! grep -q 'cybercore-self-reboot' "\$CHILD_ROLE"; then
+        echo "==> Patching child_domain role for post-promotion self-reboot..."
+        # Append a reboot trigger inside the same win_powershell session,
+        # right before the script exits (after Install-ADDSDomain succeeds).
+        sed -i 's|-Force -NoRebootOnCompletion|-Force -NoRebootOnCompletion\\n        # cybercore-self-reboot: schedule reboot from in-session\\n        Start-Process shutdown -ArgumentList "/r","/t","30","/f" -NoNewWindow -ErrorAction SilentlyContinue|' "\$CHILD_ROLE"
+        # Replace win_reboot with wait_for_connection (no auth needed).
+        python3 /opt/goad-light/patch-child-domain.py "\$CHILD_ROLE"
+      fi
+
+      echo "================================================================="
+      echo " GOAD provisioning: \$LAB"
+      echo " Lane subnet: \${IP_RANGE}.0/24   Gateway: \${GW_IP}"
+      echo " Hosts: \${HOST_MAP}"
+      echo " Playbook chain: \${PLAYBOOKS}"
+      echo "================================================================="
+
+      # Preflight #0: clean stale baked default route, verify egress.
+      # The Windows VM template (vmid 1004) was baked while attached to the
+      # v1 lane subnet (192.18.0.0/24) with gateway 192.18.0.1. That stale
+      # default route persists in clones even after DHCP hands out a fresh IP
+      # in the v2 subnet (10.<vxh>.<vxl>.0/24), so all internet egress dies
+      # in routing — Install-PackageProvider/NuGet bootstrap fails silently
+      # in the upstream chain ("NoMatchFoundForProvider").
+      #
+      # This preflight self-derives the correct lane gateway from each host's
+      # own IPv4 (.1 of its /24), so it works for v1 and v2 without depending
+      # on extra_vars or knowing the subnet ahead of time. Connects via the
+      # bake-time Administrator (vagrant scaffolding user doesn't exist yet).
+      # NOTE on \$ escaping: the outer cloud-init heredoc is unquoted (<< SNIPPET),
+      # so EVERY PowerShell \$var inside this YAML body must be escaped as \\\$
+      # in the bake source. After bake-time bash expansion, run.sh sees \$var.
+      # The inner heredoc terminator <<'PFN' is single-quoted so no further
+      # expansion happens at run.sh execution time — \$var lands literally in
+      # preflight-network.yml as PowerShell expects.
+      cat > "\$RUNTIME/preflight-network.yml" <<'PFN'
+      ---
+      - name: "Preflight: fix stale default route, verify egress"
+        hosts: domain
+        gather_facts: no
+        tasks:
+          # Some Windows hosts (notably srv02) bring WinRM up later than the
+          # DCs. If the play starts before a host's WinRM listener is ready,
+          # Ansible marks it 'unreachable' on the very first task and the whole
+          # GOAD chain fails — even though the host comes up fine seconds later.
+          # wait_for_connection polls the connection and rides out a slow boot
+          # (it catches the not-yet-reachable state and retries to 'timeout'),
+          # so a laggy host is WAITED FOR instead of instantly failed. Runs
+          # per-host in parallel, so hosts already up don't pay the wait.
+          - name: Wait for WinRM to come up (slow boots get marked unreachable, e.g. srv02)
+            ansible.builtin.wait_for_connection:
+              delay: 5
+              sleep: 10
+              timeout: 300
+
+          - name: Compute lane gateway from host's IPv4 (.1 of /24)
+            win_shell: |
+              \$ip = (Get-NetIPAddress -AddressFamily IPv4 |
+                Where-Object { \$_.IPAddress -like '10.*' -or \$_.IPAddress -like '192.*' } |
+                Where-Object { \$_.PrefixOrigin -ne 'WellKnown' } |
+                Select-Object -First 1).IPAddress
+              if (-not \$ip) { throw "no usable IPv4 address found on host" }
+              \$parts = \$ip.Split('.')
+              "\$(\$parts[0]).\$(\$parts[1]).\$(\$parts[2]).1"
+            register: lane_gw_out
+            changed_when: false
+
+          - name: Set lane_gw fact
+            set_fact:
+              lane_gw: "{{ lane_gw_out.stdout_lines[0] }}"
+
+          - name: Show computed lane gateway
+            debug:
+              msg: "Lane gateway computed as {{ lane_gw }} (from this host's IPv4 /24)"
+
+          - name: Remove stale default routes (any nexthop that isn't the lane gateway)
+            win_shell: |
+              \$expected = '{{ lane_gw }}'
+              \$stale = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object { \$_.NextHop -ne \$expected -and \$_.NextHop -ne '0.0.0.0' }
+              foreach (\$r in \$stale) {
+                Write-Host "Removing stale default route via \$(\$r.NextHop) on ifIndex \$(\$r.ifIndex)"
+                Remove-NetRoute -DestinationPrefix '0.0.0.0/0' -NextHop \$r.NextHop -Confirm:\$false -ErrorAction SilentlyContinue
+              }
+              if (-not \$stale) { Write-Host "No stale default routes" }
+
+          - name: Ensure correct default route exists via the lane gateway
+            win_shell: |
+              \$expected = '{{ lane_gw }}'
+              \$exists = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object { \$_.NextHop -eq \$expected }
+              if (-not \$exists) {
+                \$iface = Get-NetIPAddress -AddressFamily IPv4 |
+                  Where-Object { \$_.IPAddress -like '10.*' -or \$_.IPAddress -like '192.*' } |
+                  Where-Object { \$_.PrefixOrigin -ne 'WellKnown' } |
+                  Select-Object -First 1
+                Write-Host "Adding default route via \$expected on ifIndex \$(\$iface.InterfaceIndex)"
+                New-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceIndex \$iface.InterfaceIndex -NextHop \$expected -RouteMetric 0 -ErrorAction SilentlyContinue | Out-Null
+              } else {
+                Write-Host "Default route via \$expected already present"
+              }
+
+          # The Windows template (1004) bakes a STATIC DNS of 8.8.8.8 (see
+          # bake-win-server-template.sh) so the VM is reachable during packer
+          # build. In a deployed lane that public resolver is usually
+          # unreachable — the lab's OPNsense egress filter blocks outbound DNS
+          # to anything but its own resolver — so name resolution times out and
+          # the egress check below fails even though the gateway has internet.
+          # Point DNS at the lane gateway (its dnsmasq forwards to the lab's
+          # sanctioned resolver). This is the SAME thing the GOAD common role
+          # does later (force_dns_server / dns_server=GW_IP); the preflight just
+          # needs it FIRST, before it tests egress.
+          - name: Point DNS at the lane gateway (template bakes 8.8.8.8, which the lab blocks)
+            win_shell: |
+              \$gw = '{{ lane_gw }}'
+              \$ifs = Get-NetIPAddress -AddressFamily IPv4 |
+                Where-Object { \$_.IPAddress -like '10.*' -or \$_.IPAddress -like '192.*' } |
+                Where-Object { \$_.PrefixOrigin -ne 'WellKnown' }
+              foreach (\$i in \$ifs) {
+                Set-DnsClientServerAddress -InterfaceIndex \$i.InterfaceIndex -ServerAddresses \$gw -ErrorAction SilentlyContinue
+              }
+              Clear-DnsClientCache -ErrorAction SilentlyContinue
+              Write-Host "DNS set to \$gw on \$((\$ifs | Measure-Object).Count) adapter(s)"
+            changed_when: false
+
+          # Egress to PSGallery is INTERMITTENT on a cold lane: a deployed lane
+          # resolves + egresses fine once settled (verified by hand), but the
+          # preflight runs in an early-boot window — gateway still finishing its
+          # Tailscale bootstrap / netfilter reconcile, DC's route+DNS just
+          # changed — and the first attempt can hang past the timeout. Don't
+          # fail the whole 30-min GOAD chain on one cold-start blip: RETRY.
+          # Invoke-WebRequest -TimeoutSec keeps each attempt short (the old
+          # WebClient.DownloadString had a ~100s default timeout, so a single
+          # miss burned ~100s); 'until'/retries rides out the transient.
+          - name: Verify outbound HTTPS to PSGallery (TLS 1.2, retried through cold-start)
+            win_shell: |
+              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+              Invoke-WebRequest -UseBasicParsing -Uri 'https://www.powershellgallery.com/api/v2/' -TimeoutSec 15 | Out-Null
+              'EGRESS_OK'
+            register: egress_test
+            until: egress_test is succeeded
+            retries: 10
+            delay: 12
+            changed_when: false
+            # On final exhaustion the task fails with the IWR error; that, plus
+            # this name, makes a genuine (non-transient) egress outage obvious.
+
+          - name: Show egress result
+            debug:
+              msg: "{{ egress_test.stdout_lines | join(' | ') }}"
+
+          # ROOT CAUSE of the GOAD regression: GOAD "used to deploy fine" because
+          # the OLD Windows template had NuGet + PowerShellGet + the DSC/PKI
+          # modules PRE-INSTALLED, so upstream's online installs were all no-ops.
+          # The new sysprep-generalized template (bake-win-server-template.sh,
+          # vmid 1004) is clean, so those tasks now RUN online — and the very
+          # first, 'Install-PackageProvider -Name NuGet -Force', FAILS headlessly
+          # ("NoMatchFoundForProvider" + "NonInteractive mode ... Prompt
+          # functionality is not available"): bare '-Force' does NOT bootstrap the
+          # provider non-interactively — it needs '-ForceBootstrap'.
+          #
+          # Fix in ONE place: as Administrator (before the upstream roles run as
+          # vagrant), bootstrap NuGet correctly, trust PSGallery, and PRE-STAGE
+          # every PSGallery module the GOAD chain installs, machine-wide. The
+          # upstream 'win_psmodule' / 'Install-Module' tasks then find each module
+          # already present (state: present) and no-op — restoring the old
+          # template's behavior without re-baking Windows. Module list = every
+          # name from 'grep win_psmodule|Install-Module' across the GOAD roles:
+          #   common:               ComputerManagementDsc, xNetworking
+          #   domain_controller/child_domain: xDnsServer, ActiveDirectoryDSC
+          #   adcs:                 PSPKI, xAdcsDeployment
+          # (PowerShellGet upgrade is left to upstream — it succeeds once NuGet is
+          # present.) PSGallery egress is verified just above. Retried for the
+          # same cold-start reason as the egress check.
+          - name: Pre-stage GOAD PS deps (NuGet + DSC/PKI modules) so upstream installs no-op
+            win_shell: |
+              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+              Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -ForceBootstrap -Scope AllUsers | Out-Null
+              Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+              foreach (\$m in 'ComputerManagementDsc','xNetworking','xDnsServer','ActiveDirectoryDSC','PSPKI','xAdcsDeployment') {
+                if (-not (Get-Module -ListAvailable -Name \$m)) {
+                  Install-Module -Name \$m -Repository PSGallery -Force -AllowClobber -Scope AllUsers -ErrorAction Stop | Out-Null
+                }
+              }
+              'PSDEPS_OK'
+            register: psdeps
+            until: psdeps is succeeded
+            retries: 5
+            delay: 12
+            changed_when: false
+      PFN
+      # ---------- Which initial credential does EACH Windows host accept? -----
+      # preflight-vagrant.yml (further down) SETS vagrant's password to
+      # BootstrapPwd!1. That makes run.sh NON-IDEMPOTENT in the worst way: any
+      # deploy that reached that play and then failed LATER leaves every Windows
+      # VM holding a password INITIAL_PASSWORD no longer matches, so a retry
+      # against those same VMs can never authenticate again. The symptom is
+      # "ntlm: the specified credentials were rejected by the server" on an
+      # account that plainly exists, is enabled, and sits on a host whose
+      # sysprep GeneralizationState is 7. Observed on a real lane, and the lane
+      # was unrecoverable without re-cloning every Windows VM by hand.
+      #
+      # So ask rather than assume -- and ask PER HOST, because ONE LANE CAN HOLD
+      # TWO WINDOWS TEMPLATES WITH DIFFERENT BAKED ACCOUNTS:
+      #
+      #   template 1004  Windows Server 2019 -- every dc*/srv* host.
+      #                  Administrator/vagrant AND vagrant/vagrant, both baked.
+      #                  (bake-win-server-template.sh, "Default credentials
+      #                   baked in")
+      #   template 1006  Windows 11 -- the ws01 extension's workstation.
+      #                  Administrator/CyberCore!Bake1 only, plus a
+      #                  cloudbase-init account named 'Admin' whose password is
+      #                  injected per clone and is therefore NOT probeable.
+      #                  THERE IS NO vagrant ACCOUNT ON IT AT ALL: the string
+      #                  'vagrant' does not appear anywhere in
+      #                  bake-win-client-template.sh.
+      #                  (that script's ADMIN_PASSWORD default, its
+      #                   Autounattend AdministratorPassword, and its
+      #                   cloudbase-init conf)
+      #
+      # THE PREVIOUS PROBE COULD NOT COPE WITH THAT, structurally. It wrote ONE
+      # [all:vars] block and pinged the whole 'domain' group, and
+      # 'ansible ... -m win_ping' exits non-zero if ANY host fails. With two
+      # templates in one lane no single credential can satisfy it, so the probe
+      # burned its entire timeout and then refused to start the chain. Per-host
+      # credentials are REQUIRED here, not a nicety.
+      #
+      # CANDIDATE ACCOUNTS, not just passwords. An earlier cut tried three
+      # passwords against ONE user and missed the actual cause: the spec names
+      # 'Administrator', and the built-in Administrator does NOT stay enabled
+      # through sysprep /generalize /oobe on the SERVER template. That is
+      # precisely why goad-deploy.js defaults initialUser to 'vagrant' -- but
+      # three separate UIs hardcode admin_user: 'Administrator' into every spec
+      # they write, so that default has never once applied.
+      #
+      # Order is deliberate:
+      #   1. what the spec asked for, so a deliberate override that IS correct
+      #      still wins;
+      #   2. the account template 1004 bakes and keeps enabled;
+      #   3. that same account after preflight-vagrant rotated its password --
+      #      the retry-on-a-used-lane case;
+      #   4. template 1006's baked Administrator, which is the only thing ws01
+      #      has. Last because it is the narrowest: exactly one host per lane.
+      #
+      # Pairs are passed as TWO ARGUMENTS, never a delimited string: a password
+      # containing the delimiter would split in the wrong place, and that is the
+      # kind of bug that only ever shows up on the one password that has it.
+      BOOTSTRAP_PASSWORD="BootstrapPwd!1"
+      # A bake-time constant of a DIFFERENT template than the one INITIAL_PASSWORD
+      # describes, so it gets its own env override rather than riding on argv:
+      # bake-win-client-template.sh itself reads ADMIN_PASSWORD from the
+      # environment, so someone will re-bake 1006 with another password, and that
+      # must not require a controller re-bake to say so.
+      WIN_CLIENT_INITIAL_PASSWORD="\${WIN_CLIENT_INITIAL_PASSWORD:-CyberCore!Bake1}"
+
+      # ---------- Enumerate the Windows hosts to authenticate to --------------
+      # 'ansible <pattern> --list-hosts' rather than 'ansible-inventory --list':
+      # both resolve the pattern through the identical inventory-merge path, but
+      # --list-hosts answers exactly the question being asked ("which hosts does
+      # 'domain' contain?"), one name per line, with no JSON and therefore no jq
+      # or python in the middle of the one step that has to work before anything
+      # else can. It short-circuits before any module runs, so it connects to
+      # nothing. Output is a "  hosts (N):" header followed by indented names,
+      # hence the '1d' and the whitespace strip.
+      #
+      # INV_FLAGS_HOSTS carries the extension inventories -- see the block where
+      # it is built. ws01 exists in no other inventory, so without them this list
+      # silently omits the one host whose credentials differ from every other
+      # host's, which is the entire bug this section exists to fix.
+      ansible \$INV_FLAGS_HOSTS domain --list-hosts \\
+        > "\$RUNTIME/.domain_hosts.out" 2> "\$RUNTIME/.domain_hosts.err" || true
+      WIN_HOSTS="\$(sed -e '1d' -e 's/[[:space:]]//g' "\$RUNTIME/.domain_hosts.out" | grep -v '^\$' || true)"
+      if [ -z "\$WIN_HOSTS" ]; then
+        # HARD FAILURE. An empty 'domain' does not mean "small lab"; every lab we
+        # ship has Windows hosts in it. It means the inventories did not merge --
+        # and ansible's ini plugin rejects a WHOLE SOURCE on one bad line, so a
+        # single typo in one file removes every host in it. Every play below
+        # targets 'domain' or a child of it, so continuing buys nothing but a
+        # less legible failure later.
+        echo "ERROR: the 'domain' group resolved to ZERO hosts." >&2
+        echo "       Inventories consulted:\$INV_FLAGS_HOSTS" >&2
+        echo "       ansible said:" >&2
+        sed 's/^/         /' "\$RUNTIME/.domain_hosts.err" >&2 || true
+        echo "       Exit 1 = no forest." >&2
+        exit 1
+      fi
+      echo "==> Windows hosts to authenticate:" \$WIN_HOSTS
+
+      probe_host_pw() {   # \$1 = host, \$2 = user, \$3 = password
+        # Heredoc body and terminator at the BASE indent: cloud-init dedents this
+        # block scalar by 6, so 6 becomes column 0 -- where a heredoc terminator
+        # must be. At 8 it lands at column 2 and PROBE never terminates.
+        cat > "\${RUNTIME}/inventory_probe" <<PROBE
+      [all:vars]
+      ansible_user=\$2
+      ansible_password=\$3
+      ansible_connection=winrm
+      ansible_port=5985
+      ansible_winrm_scheme=http
+      ansible_winrm_transport=ntlm
+      ansible_winrm_server_cert_validation=ignore
+      ansible_winrm_operation_timeout_sec=60
+      ansible_winrm_read_timeout_sec=70
+
+      [localhost]
+      localhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3
+      PROBE
+        # ONE host, not the group: a failure here must mean "this host rejected
+        # this credential" and nothing else.
+        ansible \$INV_FLAGS_HOSTS -i "\${RUNTIME}/inventory_probe" "\$1" -m win_ping >/dev/null 2>&1
+      }
+
+      # On success appends the host's ini line to .cred_host_lines and a
+      # password-free line to .cred_report, and returns 0. Returns 1 if no
+      # candidate worked, which for a host that has not finished booting is
+      # indistinguishable from wrong credentials except by waiting -- hence the
+      # retry loop below.
+      CRED_USER=""; CRED_PW=""; CRED_WHICH=""
+      resolve_host_creds() {   # \$1 = host
+        CRED_USER=""; CRED_PW=""; CRED_WHICH=""
+        if probe_host_pw "\$1" "\${INITIAL_USER}" "\${INITIAL_PASSWORD}"; then
+          CRED_USER="\${INITIAL_USER}"; CRED_PW="\${INITIAL_PASSWORD}"
+          CRED_WHICH="\${INITIAL_USER} (the account this spec asked for)"
+        elif probe_host_pw "\$1" vagrant vagrant; then
+          CRED_USER=vagrant; CRED_PW=vagrant
+          CRED_WHICH="vagrant (template 1004 baked local admin)"
+        elif probe_host_pw "\$1" vagrant "\${BOOTSTRAP_PASSWORD}"; then
+          CRED_USER=vagrant; CRED_PW="\${BOOTSTRAP_PASSWORD}"
+          CRED_WHICH="vagrant (rotated by a previous run on this lane)"
+        elif probe_host_pw "\$1" Administrator "\${WIN_CLIENT_INITIAL_PASSWORD}"; then
+          CRED_USER=Administrator; CRED_PW="\${WIN_CLIENT_INITIAL_PASSWORD}"
+          CRED_WHICH="Administrator (template 1006 / Windows 11 baked admin)"
+        else
+          return 1
+        fi
+        # bash's builtin echo does not interpret backslash escapes without -e, so
+        # a password containing one lands verbatim, which is what the ini needs.
+        echo "\$1 ansible_user=\$CRED_USER ansible_password=\$CRED_PW" >> "\$RUNTIME/.cred_host_lines"
+        echo "\$1: \$CRED_WHICH" >> "\$RUNTIME/.cred_report"
+        return 0
+      }
+
+      echo "==> Probing which initial WinRM account each host accepts..."
+      : > "\$RUNTIME/.cred_host_lines"
+      : > "\$RUNTIME/.cred_report"
+      CRED_DEADLINE=\$(( \$(date +%s) + \${CRED_PROBE_TIMEOUT:-600} ))
+      CRED_PENDING="\$WIN_HOSTS"
+      CRED_FIRST_ROUND=1
+      while [ -n "\$CRED_PENDING" ]; do
+        CRED_STILL=""
+        for h in \$CRED_PENDING; do
+          # The deadline is checked per host, not only per round, so a lane where
+          # every connection hangs cannot overrun CRED_PROBE_TIMEOUT by
+          # hosts x candidates x connect-timeout. The first round is exempt so
+          # every host is tried at least once and is named accurately below.
+          if [ "\$CRED_FIRST_ROUND" != "1" ] && [ "\$(date +%s)" -ge "\${CRED_DEADLINE}" ]; then
+            CRED_STILL="\$CRED_STILL \$h"
+            continue
+          fi
+          if resolve_host_creds "\$h"; then
+            echo "    \$h: \$CRED_WHICH"
+          else
+            CRED_STILL="\$CRED_STILL \$h"
+          fi
+        done
+        CRED_FIRST_ROUND=0
+        CRED_PENDING="\$(echo \$CRED_STILL)"
+        if [ -z "\$CRED_PENDING" ]; then
+          break
+        fi
+        if [ "\$(date +%s)" -ge "\${CRED_DEADLINE}" ]; then
+          break
+        fi
+        echo "    ... no account works yet for:\$CRED_PENDING (they may still be booting)"
+        sleep 15
+      done
+      rm -f "\${RUNTIME}/inventory_probe"
+
+      if [ -n "\$CRED_PENDING" ]; then
+        # ABORT ON ONE UNRESOLVED HOST, and here is the argument for it.
+        #
+        # Continuing is tempting: the other hosts authenticated, so the forest
+        # would probably build. But it would not survive. preflight-network.yml
+        # targets 'domain' and its FIRST task is wait_for_connection, so an
+        # unauthenticated member fails that play and run.sh exits 1 anyway --
+        # only minutes later, and saying "unreachable" instead of printing the
+        # credential matrix below. And if the host were merely skipped, the
+        # failure would move to the extension install ninety minutes in, with the
+        # forest built and the real cause a screen of ansible output away. A
+        # partial success that proceeds silently is the exact failure mode this
+        # whole script is arranged against, so: exit 1 = no forest, while the
+        # evidence is still on screen.
+        echo "ERROR: no initial WinRM account worked within \${CRED_PROBE_TIMEOUT:-600}s for:" >&2
+        for h in \$CRED_PENDING; do
+          echo "         \$h" >&2
+        done
+        echo "       Tried on each of those, in this order:" >&2
+        echo "         \${INITIAL_USER} / the bake-time password from the spec" >&2
+        echo "         vagrant / vagrant                 (template 1004, Windows Server)" >&2
+        echo "         vagrant / the bootstrap password  (set by a previous run here)" >&2
+        echo "         Administrator / WIN_CLIENT_INITIAL_PASSWORD (template 1006, Windows 11)" >&2
+        if [ -s "\$RUNTIME/.cred_report" ]; then
+          echo "       These hosts DID resolve, so this is a per-host credential" >&2
+          echo "       problem and not a lane-wide outage:" >&2
+          sed 's/^/         /' "\$RUNTIME/.cred_report" >&2
+        else
+          echo "       NO host resolved, which points at the lane rather than at any" >&2
+          echo "       one account: gateway, DHCP reservations, or WinRM never started." >&2
+        fi
+        echo "       On a Windows host, check the accounts -- the built-in" >&2
+        echo "       Administrator is commonly DISABLED by sysprep /generalize /oobe:" >&2
+        echo "         Get-LocalUser | fl Name,Enabled,PasswordLastSet" >&2
+        echo "         (Get-ItemProperty 'HKLM:SYSTEM/Setup/Status/SysprepStatus').GeneralizationState" >&2
+        echo "       A Windows 11 host (ws01) has no vagrant account by design; if that" >&2
+        echo "       is the host listed, 1006 was re-baked with a different password --" >&2
+        echo "       set WIN_CLIENT_INITIAL_PASSWORD in run.sh's environment." >&2
+        echo "       Exit 1 = no forest." >&2
+        exit 1
+      fi
+      echo "==> Initial credentials resolved for every Windows host:"
+      sed 's/^/    /' "\$RUNTIME/.cred_report"
+
+      # Rewrite the initial inventory with PER-HOST accounts.
+      #
+      # ORDER IN THIS FILE MATTERS TWICE OVER:
+      #   1. The bare host lines must come BEFORE the first section header.
+      #      Inside a '[x:vars]' section ansible's ini plugin reads every line as
+      #      key=value, and 'ws01 ansible_user=Administrator' is not one -- it
+      #      rejects the entire source, taking every host in it with it.
+      #   2. This file is the LAST -i in INV_FLAGS_INITIAL and these are HOST
+      #      vars, so they outrank the [all:vars] block beneath them and anything
+      #      the lab, provider or extension inventories set.
+      # Only the credentials are per host; the connection settings are shared and
+      # stay in [all:vars], where one edit still reaches every host.
+      cat "\$RUNTIME/.cred_host_lines" > "\${RUNTIME}/inventory_overrides_initial"
+      # Quoted terminator: nothing in this body needs run-time expansion any more
+      # now that the credentials sit above it.
+      cat >> "\${RUNTIME}/inventory_overrides_initial" <<'INITOK'
+      [all:vars]
+      ansible_connection=winrm
+      ansible_port=5985
+      ansible_winrm_scheme=http
+      ansible_winrm_transport=ntlm
+      ansible_winrm_server_cert_validation=ignore
+      ansible_winrm_operation_timeout_sec=400
+      ansible_winrm_read_timeout_sec=500
+
+      [localhost]
+      localhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3
+      INITOK
+
+      echo ""
+      echo ">>>>>>>>>>>>>>>>>>>>>> preflight-network.yml <<<<<<<<<<<<<<<<<<<<<<"
+      # EXIT 1 EXPLICITLY, not whatever ansible returned. ansible-playbook
+      # exits 2 for "one or more hosts failed" and 3 for "unreachable" --
+      # and under set -e those codes became run.sh's OWN exit code, which
+      # COLLIDES with the exit 2 this script uses to mean "forest built, an
+      # extension failed". A lane that died here, before a single AD play
+      # ran, reported exit 2 and the orchestrator read it as a good forest
+      # with a bad SIEM. Observed on a real deploy. 1 = no forest, always.
+      ansible-playbook \$INV_FLAGS_INITIAL "\$RUNTIME/preflight-network.yml" --extra-vars "@\$RUNTIME/extra_vars.yml" || {
+        echo "ERROR: preflight-network.yml failed -- the lab chain never started." >&2
+        echo "       Exit 1 = no forest. (Exit 2 means the forest built and an extension did not.)" >&2
+        exit 1
+      }
+
+      # Preflight #1: create the 'vagrant' scaffolding user on every Windows
+      # host. This connects via the bake-time Administrator account (the only
+      # account that exists at this point). After this play succeeds, ALL
+      # subsequent plays connect as vagrant/vagrant, so we never depend on
+      # the Administrator account again — and ad-servers.yml is free to
+      # rotate the Administrator password to per-host upstream values.
+      cat > "\$RUNTIME/preflight-vagrant.yml" <<PFV
+      ---
+      - name: "Preflight: create 'vagrant' scaffolding user on all Windows hosts"
+        hosts: domain
+        gather_facts: no
+        tasks:
+          - name: Ensure vagrant local user exists in Administrators
+            win_user:
+              name: vagrant
+              # Must satisfy Windows local password policy: 8+ chars,
+              # 3-of-4 char classes, and no 'vagrant' substring (the user-
+              # name check is case-insensitive). MUST match ansible_password
+              # in inventory_overrides — these are the connection credentials
+              # for every play after this preflight.
+              password: BootstrapPwd!1
+              state: present
+              password_never_expires: yes
+              account_disabled: no
+              groups:
+                - Administrators
+              groups_action: add
+      PFV
+      echo ""
+      echo ">>>>>>>>>>>>>>>>>>>>>> preflight-vagrant.yml <<<<<<<<<<<<<<<<<<<<<<"
+      ansible-playbook \$INV_FLAGS_INITIAL "\$RUNTIME/preflight-vagrant.yml" --extra-vars "@\$RUNTIME/extra_vars.yml" || {
+        echo "ERROR: preflight-vagrant.yml failed -- the scaffolding user was not created," >&2
+        echo "       so every play after this one would fail to authenticate. Exit 1 = no forest." >&2
+        exit 1
+      }
+
+      # Preflight #2: ensure DNS Server feature is installed on every DC.
+      # Upstream's child_domain role assumes Get-DnsServerForwarder is available
+      # immediately after the child DC's first reboot, but Install-ADDSDomain
+      # doesn't always pull in DNS-Server-Tools. Install it explicitly so the
+      # 'Configure DNS Forwarders' task doesn't blow up.
+      # Upstream's inventory groups DCs under [dc]; targeting that group catches
+      # every DC across all lab variants. Connects as vagrant (so this also
+      # validates the scaffolding user works before the long chain runs).
+      cat > "\$RUNTIME/preflight-dns.yml" <<PREFLIGHT
+      ---
+      - name: "Preflight: ensure DNS Server feature on all DCs"
+        hosts: dc
+        gather_facts: no
+        tasks:
+          - name: Install DNS Server + tools
+            win_feature:
+              name: DNS,RSAT-DNS-Server
+              include_management_tools: yes
+              state: present
+      PREFLIGHT
+      echo ""
+      echo ">>>>>>>>>>>>>>>>>>>>>> preflight-dns.yml <<<<<<<<<<<<<<<<<<<<<<"
+      ansible-playbook \$INV_FLAGS "\$RUNTIME/preflight-dns.yml" --extra-vars "@\$RUNTIME/extra_vars.yml" || \\
+        echo "WARNING: DNS preflight failed — continuing anyway, may fail later"
+
+      for pb in \$PLAYBOOKS; do
+        echo ""
+        echo ">>>>>>>>>>>>>>>>>>>>>> \$pb <<<<<<<<<<<<<<<<<<<<<<"
+        ansible-playbook \$INV_FLAGS "\$pb" --extra-vars "@\$RUNTIME/extra_vars.yml" || {
+          echo "ERROR: lab chain failed at \$pb. Exit 1 = no forest." >&2
+          exit 1
+        }
+      done
+
+      echo "================================================================="
+      echo " \$LAB provisioning complete."
+      echo "================================================================="
+
+      # ---------- GOAD extensions ----------
+      # Reached ONLY if the lab chain above succeeded. run.sh runs under
+      # 'set -e' and every playbook in that loop is unguarded, so a failed AD
+      # build has already exited non-zero and nothing below ever runs. That
+      # ordering is upstream's too: install_extension is a command you give a
+      # lab that is already installed.
+      #
+      # THE INVENTORY LAYERING IS UPSTREAM'S, IN UPSTREAM'S ORDER
+      # (goad/provisioner/ansible/ansible.py, run_extension):
+      #     lab inventory                     data/inventory + inventory_proxmox
+      #     every OTHER requested extension's inventory
+      #     THIS extension's inventory        last of the extensions
+      #     the global inventory              ours: inventory_overrides
+      # The order IS the mechanism. Later files win on a conflict, so this
+      # extension's own host lines beat any other extension's, and the global
+      # overrides beat everything -- which is what lets ONE file carry both the
+      # WinRM credentials the agent roles need on the Windows hosts and the SSH
+      # credentials the server role needs on the SIEM.
+      #
+      # FAILURE POLICY, and it is a real decision, not a default:
+      #   A lane whose forest built but whose SIEM did not is still a usable
+      #   lane for red-team work, and destroying ninety minutes of AD because
+      #   winlogbeat would not install would be its own kind of wrong. But
+      #   REPORTING SUCCESS for it is worse: what was ordered was a blue-team
+      #   environment, and "green deploy, nothing actually planted" is this
+      #   pipeline's dominant and most expensive failure mode -- the instructor
+      #   discovers it in front of a class, with no telemetry and no error to
+      #   point at.
+      #   So the run FAILS -- with exit code 2 rather than 1, and only after
+      #   every requested extension has been attempted.
+      #   The distinct code is the point. 1 means "no forest" (set -e, above);
+      #   2 means "forest is up, the SIEM is not", and a caller can act on that
+      #   difference: re-run just the extension against a lane that is
+      #   otherwise finished, or hand it over red-team-only, instead of tearing
+      #   it down. Attempting all of them means one summary tells the whole
+      #   story rather than the first casualty hiding the second.
+      EXT_FAILED=""
+      EXT_INSTALLED=""
+      for ext in \$EXT_KEYS; do
+        EXT_INV_FLAGS="-i \$LAB_DATA/inventory -i \$RUNTIME/inventory_proxmox"
+        for other in \$EXT_KEYS; do
+          if [ "\$other" != "\$ext" ]; then
+            EXT_INV_FLAGS="\$EXT_INV_FLAGS -i \$RUNTIME/inventory_ext_\$other"
+          fi
+        done
+        EXT_INV_FLAGS="\$EXT_INV_FLAGS -i \$RUNTIME/inventory_ext_\$ext -i \$RUNTIME/inventory_overrides"
+        echo ""
+        echo "================================================================="
+        echo " EXTENSION '\$ext': installing"
+        echo "   playbook:  \$GOAD_ROOT/extensions/\$ext/ansible/install.yml"
+        echo "   inventory: \$EXT_INV_FLAGS"
+        echo "================================================================="
+        # ROLES PATH IS SET EXPLICITLY, and it has to be. Upstream runs each
+        # extension playbook with the extension directory as cwd, and the extensions
+        # split into two shapes that need OPPOSITE things:
+        #
+        #   elk, wazuh          ship their own roles/ and NO ansible.cfg
+        #   ws01, lx01, guacamole  ship NO roles/ and their own ansible.cfg, whose
+        #                       whole content is "roles_path = ./roles:../../../ansible/roles"
+        #                       -- i.e. they borrow common, settings/*, commonwkstn
+        #                       from the MAIN GOAD tree
+        #   exchange            ships both
+        #
+        # run.sh exports ANSIBLE_CONFIG as an absolute path to the MAIN ansible.cfg,
+        # and a previous revision of this comment called surviving the cd a feature.
+        # It is the bug: ANSIBLE_CONFIG outranks the cwd ansible.cfg, so the extension
+        # cfg never loads -- and the main cfg has no roles_path line at all. ws01 then
+        # died on its first role with
+        #   the role 'common' was not found in /opt/goad/extensions/ws01/ansible/roles:...
+        # after the forest had already built. Observed on a real lane.
+        #
+        # ANSIBLE_ROLES_PATH is an env var, so it outranks every cfg, and the UNION
+        # below is correct for all six shapes at once -- no cfg discovery, no cwd
+        # subtleties, nothing that changes when an extension adds or drops a roles/.
+        # Patch this extension's own roles BEFORE running its playbook.
+        # roles/logs_windows ships a win_template task that does not render on
+        # ansible-core 2.20+, exactly like upstream mssql -- see
+        # /opt/goad-light/patch-winlogbeat.py. Idempotent, and a no-op for any
+        # extension that does not ship that role.
+        EXT_WLB="\$GOAD_ROOT/extensions/\$ext/ansible/roles/logs_windows/tasks/winlogbeat.yml"
+        if [ -f "\$EXT_WLB" ]; then
+          echo "    patching logs_windows: win_template does not render on ansible-core 2.20+"
+          python3 /opt/goad-light/patch-winlogbeat.py "\$EXT_WLB" || \\
+            echo "WARNING: patch-winlogbeat failed; winlogbeat.yml may ship unrendered Jinja"
+        fi
+        EXT_ROLES="\$GOAD_ROOT/extensions/\$ext/ansible/roles:\$GOAD_ROOT/ansible/roles"
+        if ( cd "\$GOAD_ROOT/extensions/\$ext/ansible" && \\
+             ANSIBLE_ROLES_PATH="\$EXT_ROLES" \\
+             ansible-playbook \$EXT_INV_FLAGS install.yml \\
+               --extra-vars "@\$RUNTIME/extra_vars.yml" ); then
+          echo "<<< EXTENSION '\$ext': INSTALLED"
+          EXT_INSTALLED="\$EXT_INSTALLED \$ext"
+        else
+          echo "!!! EXTENSION '\$ext': FAILED. The lab itself is built and usable;"
+          echo "!!!   this lane has no working '\$ext' telemetry."
+          EXT_FAILED="\$EXT_FAILED \$ext"
+        fi
+      done
+
+      if [ -n "\$EXT_KEYS" ]; then
+        echo "================================================================="
+        echo " \$LAB extensions summary"
+        echo "   requested:\$EXT_KEYS"
+        echo "   installed:\$EXT_INSTALLED"
+        echo "   failed:   \$EXT_FAILED"
+        echo "================================================================="
+      fi
+      if [ -n "\$EXT_FAILED" ]; then
+        echo "ERROR: the '\$LAB' forest is built, but these extensions did not install:\$EXT_FAILED" >&2
+        echo "       Exit 2 = lab OK, extension failed. Exit 1 = the lab chain itself failed." >&2
+        exit 2
+      fi
+
+  - path: /opt/goad-light/README.md
+    content: |
+      # GOAD Controller (VM, upstream-backed)
+      Per-lane VM cloned from template $VMID. Carries upstream GOAD's
+      ansible/ + ad/ at /opt/goad/. Run with /opt/goad-light/run.sh.
+      Source of truth: infrastructure/proxmox-templates/vm-templates/bake-goad-controller-vm.sh
+      Re-bake to update.
+
+runcmd:
+  # Allow root password login (bootcmd set the password but didn't touch sshd
+  # config because systemctl reload at init-local can block). Safe here in
+  # final stage — sshd is up.
+  - [ sh, -c, 'sed -i "s/^#*PermitRootLogin.*/PermitRootLogin yes/; s/^#*PasswordAuthentication.*/PasswordAuthentication yes/" /etc/ssh/sshd_config && systemctl reload ssh' ]
+  - [ systemctl, enable, --now, qemu-guest-agent ]
+  - [ systemctl, enable, ssh ]
+  - [ update-locale, LANG=C.UTF-8, LC_ALL=C.UTF-8 ]
+  # Receiving directory for pushed lab trees. Created at BAKE time, not on
+  # first push, so the pusher never has to mkdir over the guest agent and can
+  # never create it with the wrong mode. root:root 0755: the guest-agent
+  # channel runs as root, and nothing else on this VM has any business writing
+  # a lab tree. Full contract: the block above /opt/goad-light/extract-lab.sh.
+  - [ install, -d, -m, '0755', -o, root, -g, root, /opt/goad-inbox ]
+  # NOT "git clone --branch \$GOAD_REF": that flag takes branch and tag names
+  # only and rejects a commit SHA outright, and --depth 1 fetches just the tip
+  # so a follow-up "git checkout <sha>" would die with "reference is not a
+  # tree". init + fetch-by-ref is the shallow form that accepts all three
+  # spellings, so a GOAD_REF override of a branch or tag still bakes.
+  # (github.com serves arbitrary full SHAs to fetch; a self-hosted GOAD_REPO
+  # would need uploadpack.allowAnySHA1InWant for the SHA form to work.)
+  - bash -c 'set -e; git init -q /opt/goad; cd /opt/goad; git remote add origin "$GOAD_REPO"; git fetch -q --depth 1 origin "$GOAD_REF"; git checkout -q FETCH_HEAD'
+  - bash -c 'cd /opt/goad/ansible && export LANG=C.UTF-8 LC_ALL=C.UTF-8 && ansible-galaxy install -r requirements.yml'
+  - bash -c 'cd /opt/goad && git log -1 --oneline > /opt/goad-light/upstream-commit.txt'
+  # ----- Extension trees: verified, not assumed -----
+  # /opt/goad is a FULL checkout of GOAD_REF (git init + fetch + checkout
+  # FETCH_HEAD, above) -- not sparse, not filtered -- so extensions/ arrives
+  # with everything else and nothing has to fetch it separately. Confirmed at
+  # bake time anyway, because a GOAD_REPO override or a future ref could drop
+  # it and the failure would otherwise surface at the end of a 90-minute
+  # deploy. extensions-available.txt is the list for a human; and if either
+  # extension CyberCore actually drives is missing, the capability marker is
+  # DELETED, so the orchestrator reads 'no extension support' rather than an
+  # assertion it has no way to check.
+  - bash -c 'ls -1 /opt/goad/extensions 2>/dev/null | sort > /opt/goad-light/extensions-available.txt || true'
+  - bash -c 'for e in elk wazuh; do if [ ! -f /opt/goad/extensions/\$e/ansible/install.yml ] || [ ! -f /opt/goad/extensions/\$e/inventory ]; then echo "WARNING - extension \$e did not land in /opt/goad, dropping the extension capability marker"; rm -f /opt/goad-light/.cc-extension-install; fi; done'
+  - [ apt-get, clean ]
+  - bash -c 'rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache 2>/dev/null || true'
+  - [ touch, /var/lib/cloud/instance/bake-complete ]
+
+# When cloud-init finishes, power off so the bake script can convert
+# the VM to a template. The instance ID changes on clone, so this
+# user-data won't re-run on per-lane clones.
+power_state:
+  mode: poweroff
+  delay: '+1'
+  message: 'GOAD bake complete'
+  timeout: 900
+SNIPPET
+
+echo "==> Wrote bake-time cloud-init snippet: $USERDATA_PATH"
+
+# ---------- 3. Create VM ----------
+echo "==> Creating VM $VMID ($NAME)..."
+
+# Bake-time NIC: virtio + optional VLAN tag
+NET0="virtio,bridge=${BAKE_BRIDGE},firewall=0"
+[ -n "${BAKE_VLAN:-}" ] && NET0="${NET0},tag=${BAKE_VLAN}"
+
+qm create $VMID \
+  --name "$NAME" \
+  --memory $MEMORY \
+  --cores $CORES \
+  --cpu host \
+  --machine q35 \
+  --bios ovmf \
+  --efidisk0 "${STORAGE}:0,efitype=4m,pre-enrolled-keys=1" \
+  --scsihw virtio-scsi-pci \
+  --net0 "$NET0" \
+  --serial0 socket --vga serial0 \
+  --agent enabled=1,fstrim_cloned_disks=1 \
+  --ostype l26 \
+  --description "GOAD controller (VM). Baked from infrastructure/proxmox-templates/vm-templates/bake-goad-controller-vm.sh."
+
+# Import the cloud image disk
+echo "==> Importing cloud image as VM disk..."
+qm disk import $VMID "$CLOUD_IMG_LOCAL" "$STORAGE"
+qm set $VMID --scsi0 "${STORAGE}:vm-${VMID}-disk-1,discard=on,ssd=1"
+qm set $VMID --boot order=scsi0
+
+# Resize to target disk size (cloud image ships ~3GB)
+echo "==> Resizing disk to ${DISK_GB}G..."
+qm resize $VMID scsi0 ${DISK_GB}G || true   # idempotent: skip if already at size
+
+# Cloud-init drive
+echo "==> Adding cloud-init drive..."
+qm set $VMID --ide2 "${STORAGE}:cloudinit"
+
+# Bake-time cloud-init: default user, our snippet for the bake-only setup.
+# --nameserver overrides whatever DHCP advertises — survives a FreeIPA outage.
+qm set $VMID \
+  --ciuser root \
+  --cipassword "$TEMPLATE_PASSWORD" \
+  --ipconfig0 ip=dhcp \
+  --nameserver "$BAKE_DNS" \
+  --cicustom "user=${SNIPPET_STORAGE}:snippets/$(basename "$USERDATA_PATH")"
+
+# ---------- 4. Boot, wait for cloud-init to finish ----------
+echo "==> Starting VM (cloud-init will install everything; this takes ~5–10 min)..."
+qm start $VMID
+
+echo "==> Waiting for cloud-init to complete and VM to power off..."
+DEADLINE=$(( $(date +%s) + 1500 ))   # 25 min ceiling
+while true; do
+  STATUS=$(qm status $VMID | awk '{print $2}')
+  if [ "$STATUS" = "stopped" ]; then
+    echo "==> VM powered off (cloud-init done)."
+    break
+  fi
+  if [ $(date +%s) -ge $DEADLINE ]; then
+    echo "ERROR: cloud-init did not finish in 25 minutes. Check console:"
+    echo "       qm terminal $VMID  (then ^O to exit)"
+    exit 1
+  fi
+  sleep 10
+done
+
+# ---------- 4b. VERIFY cloud-init actually completed (not just user kill) ----------
+# The poll above only knows the VM stopped; it can't tell "power_state: poweroff
+# fired naturally after cloud-init finished" from "user `qm stop`'d a hung VM".
+# Mount the rootfs and check for the bake-complete marker (written by runcmd).
+# Without this guard, a half-baked template can ship: packages not installed,
+# /opt/goad missing, runcmd never executed.
+echo "==> Verifying cloud-init wrote the bake-complete marker..."
+VERIFY_DEV=$(rbd map ${STORAGE}/vm-${VMID}-disk-1 --id admin 2>/dev/null) || {
+  # Fallback for non-Ceph storages: just trust the stop and warn
+  echo "WARNING: could not map ${STORAGE}/vm-${VMID}-disk-1 for verification — proceeding without marker check"
+  VERIFY_DEV=""
+}
+if [ -n "$VERIFY_DEV" ]; then
+  # rbd map + partprobe is racy: the device node appears before the kernel
+  # finishes re-reading the partition table. Retry until p1 surfaces (or give
+  # up after ~10s and warn).
+  for _ in 1 2 3 4 5; do
+    partprobe "$VERIFY_DEV" 2>/dev/null || true
+    udevadm settle 2>/dev/null || true
+    [ -b "${VERIFY_DEV}p1" ] && break
+    sleep 2
+  done
+  VERIFY_MOUNT=$(mktemp -d)
+  if mount "${VERIFY_DEV}p1" "$VERIFY_MOUNT" 2>/dev/null; then
+    # /var/lib/cloud/instance is an ABSOLUTE symlink ('-> /var/lib/cloud/instances/<iid>')
+    # that resolves against the HOST'S filesystem when accessed via $VERIFY_MOUNT,
+    # not the mounted disk's. Search the actual instance dirs instead.
+    MARKER_FOUND=$(find "$VERIFY_MOUNT/var/lib/cloud/instances/" -maxdepth 2 -name bake-complete 2>/dev/null | head -1)
+    if [ -z "$MARKER_FOUND" ]; then
+      echo ""
+      echo "==================================================================="
+      echo "  ERROR: bake-complete marker missing — cloud-init did NOT finish"
+      echo "==================================================================="
+      echo "  The VM stopped but cloud-init never reached the runcmd that writes"
+      echo "  /var/lib/cloud/instance/bake-complete. Causes:"
+      echo "    - Network hang during apt install / git clone / ansible-galaxy"
+      echo "    - User manually qm-stop'd a still-running VM"
+      echo "    - YAML parse error (unlikely if you ran the python yaml check)"
+      echo ""
+      echo "  Last 80 lines of cloud-init-output.log:"
+      tail -80 "$VERIFY_MOUNT/var/log/cloud-init-output.log" 2>/dev/null \
+        | sed 's/^/    /'
+      echo "==================================================================="
+      umount "$VERIFY_MOUNT"
+      rmdir "$VERIFY_MOUNT"
+      rbd unmap "$VERIFY_DEV"
+      exit 1
+    fi
+    echo "==> bake-complete marker present at $MARKER_FOUND — cloud-init ran to completion."
+    umount "$VERIFY_MOUNT"
+  else
+    echo "WARNING: could not mount ${VERIFY_DEV}p1 — proceeding without marker check"
+    echo "         (verify manually: rbd map ${STORAGE}/vm-${VMID}-disk-1 --id admin"
+    echo "                           partprobe /dev/rbdN; mount /dev/rbdNp1 /mnt/...)"
+  fi
+  rmdir "$VERIFY_MOUNT" 2>/dev/null || true
+  # rbd may have auto-released; tolerate unmap failure so set -e doesn't abort
+  # the bake before we strip cicustom + template the VM.
+  rbd unmap "$VERIFY_DEV" 2>/dev/null || true
+fi
+
+# ---------- 5. Strip the bake-time cloud-init custom config ----------
+# Per-lane clones will get their OWN cloud-init config from admin.js
+# (hostname, ssh key, etc.). The bake snippet should not apply to them.
+echo "==> Clearing bake-time cicustom (clones get fresh cloud-init from admin.js)..."
+qm set $VMID --delete cicustom
+# Regenerate the cloud-init drive so it's empty for the template
+qm cloudinit dump $VMID user 2>/dev/null > /dev/null || true
+
+# Optionally remove the snippet file — keep for re-bake debugging
+# rm -f "$USERDATA_PATH"
+
+# ---------- 6. Convert to template ----------
+echo "==> Converting VM to template..."
+qm template $VMID
+
+echo ""
+echo "==================================================================="
+echo "  GOAD controller VM template $VMID baked successfully"
+echo "==================================================================="
+echo "  Verify:        qm config $VMID"
+echo "  Test clone:    qm clone $VMID 9994 --name goad-test --full --storage $STORAGE"
+echo "  Then start:    qm set 9994 --net0 virtio,bridge=$BAKE_BRIDGE,tag=$BAKE_VLAN"
+echo "                 qm start 9994 && sleep 60"
+echo "  Inspect:       qm guest exec 9994 -- /bin/sh -c 'ls /opt/goad /opt/goad-light'"
+echo "  Sanity:        qm guest exec 9994 -- /bin/sh -c 'cat /opt/goad-light/upstream-commit.txt'"
+echo "  Cleanup test:  qm stop 9994 && qm destroy 9994 --purge"
+echo "-------------------------------------------------------------------"
+echo "  EXTENSIONS:    run.sh now takes an OPTIONAL 5th argument:"
+echo "                 run.sh LAB HOST_MAP INITIAL_USER INITIAL_PASSWORD [EXTENSIONS]"
+echo "                 EXTENSIONS = comma-separated keys in install order,"
+echo "                 e.g. 'elk' or 'elk,wazuh'. Absent or empty behaves"
+echo "                 exactly as it did before extensions existed."
+echo "                 elk is placed at .24, NOT upstream's .50 (that is Kali"
+echo "                 on a flat v1/v2 lane, and a duplicate dhcp-host stops"
+echo "                 dnsmasq for the WHOLE lane). Must match"
+echo "                 GOAD_EXTENSIONS.elk.ipOctet in goad-deploy.js."
+echo "                 Exit 2 = forest built, an extension playbook failed."
+echo "  Verify:        qm guest exec 9994 -- /bin/sh -c 'cat /opt/goad-light/.cc-extension-install /opt/goad-light/extensions-available.txt'"
+echo "-------------------------------------------------------------------"
+echo "  RE-BAKE IS THE ONLY WAY TO SHIP A run.sh CHANGE."
+echo "  /opt/goad-light/run.sh exists only inside this script's cloud-init"
+echo "  heredoc, so editing it here changes NOTHING until template $VMID is"
+echo "  rebuilt, and every lane already deployed keeps the run.sh it was"
+echo "  cloned with. FREEZE FIRST -- once $VMID is purged it is unrecoverable:"
+echo "    qm clone $VMID $ROLLBACK_TEMPLATE_VMID --name goad-controller-template-frozen --full --storage $STORAGE"
+echo "    qm template $ROLLBACK_TEMPLATE_VMID"
+echo "    qm set $ROLLBACK_TEMPLATE_VMID --description \"FROZEN \$(date +%F): last known-good GOAD controller\""
+echo "    qm destroy $VMID --purge && ./bake-goad-controller-vm.sh"
+echo "-------------------------------------------------------------------"
+echo "  ROLLBACK:      front-end/src/utils/goad-deploy.js"
+echo "                 const CONTROLLER_TEMPLATE_VMID = $VMID;  ->  = $ROLLBACK_TEMPLATE_VMID;"
+echo "                 then restart the node process (see header, ROLLBACK)."
+echo "==================================================================="

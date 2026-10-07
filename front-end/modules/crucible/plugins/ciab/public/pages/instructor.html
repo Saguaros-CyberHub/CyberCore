@@ -1,0 +1,962 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Instructor Dashboard | Clinic-in-a-Box</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <link rel="stylesheet" href="/ciab/css/instructor.css">
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <!-- No inline handler: layout.js binds the overlay's click itself. -->
+    <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+    <main class="main-content">
+      <header class="main-header">
+        <div class="header-left">
+          <button class="menu-toggle" onclick="Layout.toggleSidebar()">☰</button>
+        </div>
+      </header>
+
+      <div class="page-content">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">Instructor Dashboard</h1>
+            <p class="page-subtitle">Manage students, review submissions, and generate assessment documents.</p>
+          </div>
+          <div>
+            <button class="btn btn-primary" onclick="switchTab('sections')">+ Add Students</button>
+          </div>
+        </div>
+
+        <!-- Tabs: real buttons, hash-routed (#overview … #documents), arrow-key
+             navigable. switchTab() lives in instructor-core.js and still
+             answers to the legacy name 'dashboard'. -->
+        <div class="tabs" role="tablist" aria-label="Instructor dashboard sections">
+          <button class="tab active" role="tab" id="tabbtn-overview" data-tab="overview"
+                  aria-controls="tab-overview" aria-selected="true">Overview</button>
+          <button class="tab" role="tab" id="tabbtn-sections" data-tab="sections"
+                  aria-controls="tab-sections" aria-selected="false" tabindex="-1">Sections</button>
+          <button class="tab" role="tab" id="tabbtn-modules" data-tab="modules"
+                  aria-controls="tab-modules" aria-selected="false" tabindex="-1">Modules</button>
+          <button class="tab" role="tab" id="tabbtn-students" data-tab="students"
+                  aria-controls="tab-students" aria-selected="false" tabindex="-1">Students</button>
+          <button class="tab" role="tab" id="tabbtn-engagements" data-tab="engagements"
+                  aria-controls="tab-engagements" aria-selected="false" tabindex="-1" data-instructor-only>Engagements</button>
+          <button class="tab" role="tab" id="tabbtn-incidents" data-tab="incidents"
+                  aria-controls="tab-incidents" aria-selected="false" tabindex="-1" data-instructor-only>Incidents</button>
+          <button class="tab" role="tab" id="tabbtn-reviews" data-tab="reviews"
+                  aria-controls="tab-reviews" aria-selected="false" tabindex="-1">
+            Review Queue <span class="pill-count" id="reviewsTabCount" hidden></span>
+          </button>
+          <button class="tab" role="tab" id="tabbtn-documents" data-tab="documents"
+                  aria-controls="tab-documents" aria-selected="false" tabindex="-1">Documents &amp; Answer Keys</button>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- TAB: OVERVIEW                                                 -->
+        <!-- Rendered by instructor-overview.js from InstructorState.      -->
+        <!-- ============================================================ -->
+        <div class="tab-content active" id="tab-overview" role="tabpanel" aria-labelledby="tabbtn-overview">
+
+          <div class="instr-hero">
+            <div class="instr-hero-top">
+              <h2 class="instr-hero-greeting" id="heroGreeting">Welcome</h2>
+              <span class="instr-hero-scope" id="heroScope">Loading…</span>
+            </div>
+            <div class="instr-hero-stats">
+              <div class="instr-hero-stat">
+                <div class="instr-hero-stat-value" id="statStudents"><span class="instr-hero-skel"></span></div>
+                <div class="instr-hero-stat-label">Students</div>
+              </div>
+              <div class="instr-hero-stat">
+                <div class="instr-hero-stat-value" id="statPending"><span class="instr-hero-skel"></span></div>
+                <div class="instr-hero-stat-label">Pending Reviews</div>
+              </div>
+              <div class="instr-hero-stat">
+                <div class="instr-hero-stat-value" id="statCompleted"><span class="instr-hero-skel"></span></div>
+                <div class="instr-hero-stat-label">Completed Reviews</div>
+              </div>
+              <div class="instr-hero-stat">
+                <div class="instr-hero-stat-value" id="statDocs"><span class="instr-hero-skel"></span></div>
+                <div class="instr-hero-stat-label">Documents Generated</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card" style="margin-bottom: 1.5rem;">
+            <div class="card-header">
+              <span class="card-title">Action Items</span>
+            </div>
+            <div class="card-body" id="actionItemsContent"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Recent Submissions</span>
+            </div>
+            <div class="card-body" id="recentSubmissions"></div>
+          </div>
+        </div>
+        <div class="tab-content" id="tab-engagements" role="tabpanel" aria-labelledby="tabbtn-engagements" data-instructor-only></div>
+
+
+        <!-- ============================================================ -->
+        <!-- TAB: SECTIONS                                                 -->
+        <!-- ------------------------------------------------------------ -->
+        <!-- The roster surface. An ACTIVE enrollment on an ACTIVE section  -->
+        <!-- is what grants a student access to Clinic-in-a-Box, so this   -->
+        <!-- is where students are actually added. Markup only — every     -->
+        <!-- behaviour lives in /ciab/js/instructor-sections.js and        -->
+        <!-- /ciab/js/instructor-roster-import.js, loaded after the inline -->
+        <!-- block below because they depend on globals it defines.        -->
+        <!-- ============================================================ -->
+        <div class="tab-content" id="tab-sections" role="tabpanel" aria-labelledby="tabbtn-sections">
+
+          <!-- No sections yet. This is the state a brand-new instructor    -->
+          <!-- lands in, and the state everyone whose students came from a  -->
+          <!-- CIAB profile-lane deploy lands in after migration 008 — so   -->
+          <!-- it has to name the next step rather than just say "empty".   -->
+          <div id="sectionsEmpty" class="empty-state" style="display: none;">
+            <div class="icon">🎓</div>
+            <h3>No sections yet</h3>
+            <p>Create a section, then add students to it.<br>
+               Only students enrolled on a section can open Clinic-in-a-Box.</p>
+            <button class="btn btn-primary" onclick="Sections.showSectionModal()">Create your first section</button>
+          </div>
+
+          <div id="sectionsMain" style="display: none;">
+            <div class="card" style="margin-bottom: 1rem;">
+              <div class="card-body" style="padding: 1rem;">
+                <div style="display: flex; gap: 1rem; flex-wrap: wrap; align-items: center;">
+                  <div style="flex: 1; min-width: 260px;">
+                    <select id="sectionSelect" class="form-input" onchange="Sections.onSectionChange()"></select>
+                  </div>
+                  <button class="btn btn-primary btn-sm" onclick="Sections.showSectionModal()">＋ New Section</button>
+                  <button class="btn btn-outline btn-sm" onclick="Sections.showSectionModal(Sections.currentId)">✏️ Edit</button>
+                  <button class="btn btn-outline btn-sm" onclick="Sections.archiveSection()">🗃️ Archive</button>
+                </div>
+                <div id="sectionMeta" style="margin-top: 0.75rem; color: var(--gray-500); font-size: 0.9rem;"></div>
+              </div>
+            </div>
+
+            <!-- The three add paths, mirroring the CLE course Students tab. -->
+            <div class="card" style="margin-bottom: 1rem;">
+              <div class="card-body" style="padding: 1rem; display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                <button class="btn btn-primary btn-sm"  onclick="Sections.showAddStudent()">+ Add Student</button>
+                <button class="btn btn-outline btn-sm" onclick="RosterImport.showImport()">📄 Import Roster (CSV)</button>
+                <button class="btn btn-outline btn-sm" onclick="RosterImport.showCohort()">👥 Generate Cohort Accounts</button>
+                <button class="btn btn-outline btn-sm" onclick="RosterImport.showFromCle()">🎓 Import from a CLE course</button>
+                <div style="flex: 1;"></div>
+                <input type="text" id="rosterSearch" class="form-input" style="max-width: 240px;"
+                       placeholder="Search this roster…" oninput="Sections.renderRoster()">
+                <select id="rosterStatus" class="form-input" style="max-width: 150px;" onchange="Sections.loadRoster()">
+                  <option value="active">Enrolled</option>
+                  <option value="dropped">Dropped</option>
+                  <option value="all">All</option>
+                </select>
+              </div>
+            </div>
+
+            <div id="sectionRosterContent"></div>
+          </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- TAB: MODULES                                                  -->
+        <!-- Rendered by instructor-modules.js. The toolbar lives OUTSIDE   -->
+        <!-- #moduleListContent so an innerHTML repaint never steals the    -->
+        <!-- caret. No `hidden` and no inline display on the panel itself:  -->
+        <!-- visibility is the .active class, and switchTab's classList     -->
+        <!-- toggle would silently lose to an inline style.                 -->
+        <!-- ============================================================ -->
+        <div class="tab-content" id="tab-modules" role="tabpanel" aria-labelledby="tabbtn-modules">
+
+          <div id="modulesNoSection" class="empty-state" style="display: none;">
+            <div class="icon">&#127891;</div>
+            <h3>No sections yet</h3>
+            <p>A module belongs to a section.<br>Create one first, then come back and build the sequence.</p>
+            <button class="btn btn-primary" onclick="switchTab('sections')">Go to Sections</button>
+          </div>
+
+          <div id="modulesMain" style="display: none;">
+            <div class="card" style="margin-bottom: 1rem;">
+              <div class="card-body" style="padding: 1rem;">
+                <div style="display:flex; gap:1rem; flex-wrap:wrap; align-items:center;">
+                  <div style="flex:1; min-width:260px;">
+                    <select id="moduleSectionSelect" class="form-input" onchange="CiabModules.onSectionChange()"></select>
+                  </div>
+                  <button class="btn btn-primary btn-sm" onclick="CiabModules.showModuleModal()">&#65291; New Module</button>
+                  <label style="display:flex; align-items:center; gap:0.35rem; font-size:0.85rem; color:var(--gray-500);">
+                    <input type="checkbox" id="moduleHideArchived" onchange="CiabModules.render()"> Hide archived
+                  </label>
+                </div>
+                <div id="moduleSectionMeta" style="margin-top:0.75rem; color:var(--gray-500); font-size:0.9rem;"></div>
+              </div>
+            </div>
+
+            <!-- The resolver's diagnoses, above the list. -->
+            <div id="moduleIssues"></div>
+            <!-- Owned entirely by instructor-modules.js. -->
+            <div id="moduleListContent"></div>
+          </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- TAB: STUDENTS                                                 -->
+        <!-- Rendered by instructor-students.js. The toolbar lives OUTSIDE -->
+        <!-- the re-rendered list so typing never loses the caret.         -->
+        <!-- ============================================================ -->
+        <div class="tab-content" id="tab-students" role="tabpanel" aria-labelledby="tabbtn-students">
+          <div class="card" style="margin-bottom: 1rem;">
+            <div class="card-body" style="padding: 1rem;">
+              <div class="toolbar-row">
+                <div style="flex: 1; min-width: 250px; position: relative;">
+                  <input type="text" id="studentSearch" class="form-input" placeholder="Search by name or email…"
+                         oninput="Students.onSearchInput()">
+                  <button type="button" id="studentSearchClear" onclick="Students.clearSearch()" hidden
+                          style="position: absolute; right: 0.5rem; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; color: var(--text-muted); font-size: 1.1rem; line-height: 1;"
+                          aria-label="Clear search">×</button>
+                </div>
+                <select id="studentFilter" class="form-input" style="max-width: 190px;" onchange="Students.applyFilters()">
+                  <option value="all">All Students</option>
+                  <option value="mine">My Students</option>
+                  <option value="unassigned">Unassigned</option>
+                  <option value="has-profiles">Has Profiles</option>
+                  <option value="pending">Has Pending Reviews</option>
+                  <option value="no-section">No Section</option>
+                </select>
+                <select id="studentSort" class="form-input" style="max-width: 190px;" onchange="Students.applyFilters()">
+                  <option value="name">Name A→Z</option>
+                  <option value="pending">Pending reviews ↓</option>
+                  <option value="joined">Recently joined</option>
+                </select>
+                <span id="studentCount" class="text-muted" style="font-size: 0.9rem; white-space: nowrap;"></span>
+              </div>
+              <div class="filter-pills" id="studentSectionPills" style="margin-top: 0.75rem;"></div>
+            </div>
+          </div>
+          <div id="studentsList"></div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- TAB: REVIEW QUEUE                                             -->
+        <!-- Rendered by instructor-reviews.js.                            -->
+        <!-- ============================================================ -->
+        <div class="tab-content" id="tab-reviews" role="tabpanel" aria-labelledby="tabbtn-reviews">
+          <div class="card" style="margin-bottom: 1rem;">
+            <div class="card-body" style="padding: 1rem;">
+              <div class="toolbar-row">
+                <div style="flex: 1; min-width: 250px;">
+                  <input type="text" id="reviewSearch" class="form-input" placeholder="Search student or company…"
+                         oninput="Reviews.onSearchInput()">
+                </div>
+                <select id="reviewGroupMode" class="form-input" style="max-width: 200px;" onchange="Reviews.render()">
+                  <option value="student">Group by student</option>
+                  <option value="flat">Flat · oldest first</option>
+                </select>
+                <span id="reviewCount" class="text-muted" style="font-size: 0.9rem; white-space: nowrap;"></span>
+              </div>
+              <div class="filter-pills" id="reviewPartPills" style="margin-top: 0.75rem;"></div>
+            </div>
+          </div>
+          <div id="reviewCapNote"></div>
+          <div id="reviewQueue"></div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- TAB: DOCUMENTS & ANSWER KEYS                                  -->
+        <!-- Rendered by instructor-documents.js. Element ids are kept     -->
+        <!-- from the old page so the ported generation flows line up.     -->
+        <!-- ============================================================ -->
+        <div class="tab-content" id="tab-documents" role="tabpanel" aria-labelledby="tabbtn-documents">
+
+          <div class="card" style="margin-bottom: 1.5rem;">
+            <div class="card-header">
+              <span class="card-title">Profile Selection</span>
+            </div>
+            <div class="card-body">
+              <p class="text-muted" style="margin: 0 0 1rem; font-size: 0.9rem;">Select a profile to generate security documents, PDFs, or AI-generated answer keys.</p>
+              <div class="form-group" style="margin: 0;">
+                <label for="docProfileSelect" style="font-weight: 600;">Profile</label>
+                <select id="docProfileSelect" class="form-input">
+                  <option value="">-- Select a profile --</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="card" style="margin-bottom: 1.5rem; border-left: 3px solid var(--primary);">
+            <div class="card-header">
+              <span class="card-title">🤖 AI Model Configuration</span>
+            </div>
+            <div class="card-body">
+              <p class="text-muted" style="margin: 0 0 1rem; font-size: 0.9rem;">Choose which AI model to use for generating answer keys and policy documents.</p>
+              <div style="display: grid; grid-template-columns: 1fr 1fr auto; gap: 1rem; align-items: end;">
+                <div class="form-group" style="margin: 0;">
+                  <label style="font-weight: 600; font-size: 0.85rem;">Model</label>
+                  <select id="instructorLlmModel" class="form-input" onchange="Docs.updateCostEstimate()">
+                    <optgroup label="Cloud APIs">
+                      <option value="claude-haiku-4-5" selected>Claude Haiku 4.5 (Recommended)</option>
+                      <option value="claude-sonnet-5">Claude Sonnet 5</option>
+                      <option value="claude-opus-5">Claude Opus 5</option>
+                    </optgroup>
+                  </select>
+                </div>
+                <div class="form-group" style="margin: 0;">
+                  <label style="font-weight: 600; font-size: 0.85rem;">Provider</label>
+                </div>
+                <div style="text-align: center; min-width: 100px;">
+                  <div style="font-size: 0.75rem; color: var(--text-muted); font-weight: 600; margin-bottom: 0.25rem;">EST. COST</div>
+                  <div id="instructorCostEstimate" style="font-size: 1.1rem; font-weight: 700; color: var(--success);">—</div>
+                  <div id="instructorCostContext" style="font-size: 0.7rem; color: var(--text-muted); margin-top: 0.15rem;"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card" style="margin-bottom: 1.5rem;">
+            <div class="card-header" style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;">
+              <span class="card-title">🛡️ Security Scan Documents</span>
+              <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                <button id="generateDocsBtn" class="btn btn-primary" onclick="Docs.generateDocuments()" disabled>
+                  ⚡ Generate All Documents
+                </button>
+                <button id="downloadPdfBtn" class="btn btn-outline" onclick="Docs.printScanReports()" disabled>
+                  🖨️ Print Scan Reports / PDF
+                </button>
+              </div>
+            </div>
+            <div class="card-body">
+              <p class="text-muted" style="margin: 0 0 0.75rem; font-size: 0.9rem;">Generate Nessus, ZAP, and Nmap scan reports for the selected profile.</p>
+              <div id="generateStatus" class="text-muted" style="font-size: 0.9rem; margin-bottom: 0.5rem;"></div>
+              <div id="documentGrid" class="doc-grid"></div>
+              <div id="generatedDocsList" style="margin-top: 1rem;"></div>
+            </div>
+          </div>
+
+          <div class="card" style="margin-bottom: 1.5rem;">
+            <div class="card-header" style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;">
+              <span class="card-title">📝 AI Answer Key</span>
+              <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
+                <span id="examplesCostBadge" class="cost-chip" hidden></span>
+                <button id="generateExamplesBtn" class="btn btn-primary" onclick="Docs.generateExamples()" disabled>
+                  📝 Generate Answer Key
+                </button>
+                <button id="viewExamplesBtn" class="btn btn-outline" onclick="Docs.viewExamples()" style="display: none;">
+                  👁️ View Answer Key
+                </button>
+              </div>
+            </div>
+            <div class="card-body">
+              <p class="text-muted" style="margin: 0 0 0.75rem; font-size: 0.9rem;">Generate example solutions for all 8 parts of the assessment using AI.</p>
+              <div id="examplesStatus" class="text-muted" style="font-size: 0.9rem;"></div>
+            </div>
+          </div>
+
+          <div class="card" style="margin-bottom: 1.5rem;">
+            <div class="card-header" style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;">
+              <span class="card-title">📋 Policy Documents</span>
+              <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
+                <span id="policyCostBadge" class="cost-chip" hidden></span>
+                <button id="generatePoliciesBtn" class="btn btn-primary" onclick="Docs.generatePolicies()" disabled>
+                  📋 Generate Policies
+                </button>
+                <button id="printPoliciesBtn" class="btn btn-outline" onclick="Docs.printPolicies()" disabled>
+                  🖨️ Print Policies / PDF
+                </button>
+              </div>
+            </div>
+            <div class="card-body">
+              <p class="text-muted" style="margin: 0 0 0.75rem; font-size: 0.9rem;">Generate security policy documents based on the profile's governance framework.</p>
+              <div id="policiesStatus" class="text-muted" style="font-size: 0.9rem;"></div>
+            </div>
+          </div>
+
+          <!-- Hidden until instructor-core.js confirms the DRAWN role is
+               instructor/admin — stays off screen in Student View. -->
+          <div class="card" id="vulnCheatSheetCard" style="border-left: 4px solid var(--danger); display: none;">
+            <div class="card-header" style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;">
+              <span class="card-title">🔓 Vuln-App Answer Key
+                <span class="badge badge-danger" style="vertical-align: middle;">Instructors</span>
+              </span>
+              <button id="viewVulnCheatSheetBtn" class="btn btn-primary" onclick="Docs.viewVulnCheatSheet()" disabled>
+                🔓 View Vuln-App Key
+              </button>
+            </div>
+            <div class="card-body">
+              <p class="text-muted" style="margin: 0 0 0.75rem; font-size: 0.9rem;">View the attack chain, planted flags, seed credentials, and per-file vulnerability notes for this profile's deployed vuln-app.</p>
+              <div id="vulnCheatSheetStatus" class="text-muted" style="font-size: 0.9rem;"></div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- TAB: INCIDENTS                          (Track E, phase E6)   -->
+        <!-- ------------------------------------------------------------ -->
+        <!-- Launch a synthetic incident into every environment of one     -->
+        <!-- defensive engagement, watch it land, adjudicate what the      -->
+        <!-- students recorded, release the verdicts.                      -->
+        <!--                                                               -->
+        <!-- Markup only. Every behaviour lives in                         -->
+        <!-- /ciab/js/instructor-incidents.js, and the BOARD at the bottom -->
+        <!-- is mounted there from the shared /js/blueteam/ component the  -->
+        <!-- student workspace also uses.                                  -->
+        <!--                                                               -->
+        <!-- data-instructor-only on BOTH the button and the panel: this   -->
+        <!-- screen carries verdict overrides and the release gate, and    -->
+        <!-- none of that belongs on a projector in Student View.          -->
+        <!--                                                               -->
+        <!-- The pickers live OUTSIDE #incidentLauncher so an innerHTML    -->
+        <!-- repaint of the launcher never steals the selection, the same  -->
+        <!-- rule the Modules and Students tabs follow. No `hidden` and no  -->
+        <!-- inline display on the panel itself: visibility is the .active  -->
+        <!-- class, and switchTab's classList toggle would silently lose    -->
+        <!-- to an inline style.                                           -->
+        <!-- ============================================================ -->
+        <div class="tab-content" id="tab-incidents" role="tabpanel" aria-labelledby="tabbtn-incidents" data-instructor-only>
+
+          <!-- Is the attack authoring console set up on this platform, and is
+               it answering? Filled by instructor-incidents.js from
+               GET /api/caldera-authoring/status, asynchronously, and left
+               EMPTY until that answers - so nothing here delays the tab.
+
+               OUTSIDE #incidentMain deliberately. That block is hidden until
+               a Section with a defensive Engagement is loaded, and the person
+               who most needs to be told the console was never set up is
+               exactly the one who has nothing selected yet. -->
+          <div id="incidentAuthoringConsole"></div>
+
+          <!-- Filled by instructor-incidents.js: no sections, or nothing loaded. -->
+          <div id="incidentNoScope" class="empty-state" style="display: none;"></div>
+
+          <div id="incidentMain" style="display: none;">
+            <div class="card" style="margin-bottom: 1rem;">
+              <div class="card-body" style="padding: 1rem;">
+                <div style="display: flex; gap: 1rem; flex-wrap: wrap; align-items: flex-end;">
+                  <div style="flex: 1; min-width: 240px;">
+                    <label for="incidentSectionSelect" style="display: block; font-size: 0.8rem; font-weight: 600; color: var(--gray-500);">Section</label>
+                    <select id="incidentSectionSelect" class="form-input" onchange="Incidents.onSectionChange()"></select>
+                  </div>
+                  <!-- Hidden outright when the section has no defensive engagement.
+                       An empty dropdown reads as a loading failure; the launcher
+                       area says what is actually missing instead. -->
+                  <div id="incidentEngagementField" style="flex: 1; min-width: 240px; display: none;">
+                    <label for="incidentEngagementSelect" style="display: block; font-size: 0.8rem; font-weight: 600; color: var(--gray-500);">Engagement</label>
+                    <select id="incidentEngagementSelect" class="form-input" onchange="Incidents.onEngagementChange()"></select>
+                  </div>
+                </div>
+                <div id="incidentScopeMeta" style="margin-top: 0.75rem; color: var(--gray-500); font-size: 0.9rem;"></div>
+              </div>
+            </div>
+
+            <!-- Mode picker, catalog, duration, environments. -->
+            <div id="incidentLauncher"></div>
+            <!-- The live run: status, abort, re-fire, and the release banner. -->
+            <div id="incidentRun"></div>
+            <!-- Where instructor-incidents.js mounts the board, staff layout. -->
+            <div id="incidentBoard"></div>
+          </div>
+        </div>
+        <!-- /TAB: INCIDENTS -->
+
+      </div>
+    </main>
+  </div>
+
+
+  <!-- ======================================================================= -->
+  <!-- SECTION + ROSTER MODALS                                                 -->
+  <!-- ----------------------------------------------------------------------- -->
+  <!-- Ported from the CLE course Students tab so the two plugins feel the same -->
+  <!-- to an instructor. Behaviour lives in /ciab/js/instructor-sections.js and -->
+  <!-- /ciab/js/instructor-roster-import.js.                                    -->
+  <!-- ======================================================================= -->
+
+  <!-- Create / edit a section -->
+  <div class="modal-overlay" id="sectionModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="sectionModalTitle">New Section</h3>
+        <button class="modal-close" onclick="closeModal('sectionModal')">&times;</button>
+      </div>
+      <form id="sectionForm" onsubmit="Sections.saveSection(event)">
+        <div class="form-group">
+          <label for="sectionName">Section name</label>
+          <input type="text" id="sectionName" required placeholder="CYBR 480 — Fall 2026">
+        </div>
+        <div class="form-group">
+          <label for="sectionCode">Code <span style="font-weight: 400; color: var(--gray-500);">(optional)</span></label>
+          <input type="text" id="sectionCode" placeholder="CYBR-480-7W1">
+          <!-- Not cosmetic: the code becomes the cohort username prefix, which
+               is why two active sections may not share one. -->
+          <small style="color: var(--gray-500);">Used to name generated cohort accounts, e.g. <code>cybr-480-7w1-student1</code>. Must be unique among active sections.</small>
+        </div>
+        <div class="form-group">
+          <label for="sectionTerm">Term <span style="font-weight: 400; color: var(--gray-500);">(optional)</span></label>
+          <input type="text" id="sectionTerm" placeholder="Fall 2026">
+        </div>
+        <div class="form-group">
+          <label for="sectionMax">Seat limit <span style="font-weight: 400; color: var(--gray-500);">(optional)</span></label>
+          <input type="number" id="sectionMax" min="1" placeholder="No limit">
+        </div>
+        <div class="form-group">
+          <label for="sectionDescription">Notes</label>
+          <textarea id="sectionDescription" rows="2" placeholder="Anything you want to remember about this section…"></textarea>
+        </div>
+        <div style="display: flex; gap: 1rem; justify-content: flex-end;">
+          <button type="button" class="btn btn-outline" onclick="closeModal('sectionModal')">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="sectionSaveBtn">Save Section</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Add one existing account -->
+  <div class="modal-overlay" id="ciabAddStudentModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Add Student to Section</h3>
+        <button class="modal-close" onclick="closeModal('ciabAddStudentModal')">&times;</button>
+      </div>
+      <div class="form-group">
+        <label for="ciabStudentSearch">Search</label>
+        <input type="text" id="ciabStudentSearch" placeholder="Name, username or email…" oninput="Sections.filterAvailable()">
+      </div>
+      <div class="form-group">
+        <label for="ciabAddStudentSelect">Account</label>
+        <select id="ciabAddStudentSelect" size="10" style="width: 100%;"></select>
+        <!-- This path deliberately does not mint accounts. Creating one from a
+             typo'd address is worse than saying no; Import Roster creates, and
+             it previews first. -->
+        <small style="color: var(--gray-500);">Only existing accounts appear here. To create accounts, use <strong>Import Roster (CSV)</strong> or <strong>Generate Cohort Accounts</strong>.</small>
+      </div>
+      <div style="display: flex; gap: 1rem; justify-content: flex-end;">
+        <button type="button" class="btn btn-outline" onclick="closeModal('ciabAddStudentModal')">Cancel</button>
+        <button type="button" class="btn btn-primary" id="ciabAddStudentBtn" onclick="Sections.addStudent()">Add to Section</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- CSV roster import — three stages: input, preview, result. -->
+  <!-- The preview stage is the point: a request without `confirm` mutates      -->
+  <!-- nothing, so an instructor sees the seat maths and the problem rows       -->
+  <!-- before 200 accounts exist.                                              -->
+  <!-- data-modal-static: a backdrop click or Esc must not throw away a        -->
+  <!-- mid-import preview.                                                     -->
+  <div class="modal-overlay" id="ciabRosterImportModal" data-modal-static>
+    <div class="modal-content" style="max-width: 820px;">
+      <div class="modal-header">
+        <h3>Import Roster (CSV)</h3>
+        <button class="modal-close" onclick="closeModal('ciabRosterImportModal')">&times;</button>
+      </div>
+
+      <div id="ciabRosterStage-input">
+        <div class="form-group">
+          <label for="ciabRosterFile">Roster file</label>
+          <input type="file" id="ciabRosterFile" accept=".csv,.tsv,.txt" onchange="RosterImport.onFile(event)">
+          <small style="color: var(--gray-500);">A D2L or Canvas export works as-is. Comma, tab and semicolon separated files are all detected.</small>
+        </div>
+        <div class="form-group">
+          <label for="ciabRosterPaste">…or paste rows</label>
+          <textarea id="ciabRosterPaste" rows="6" placeholder="email,first_name,last_name&#10;jsmith@example.edu,Jamie,Smith"></textarea>
+        </div>
+        <div id="ciabRosterParseSummary" style="margin-bottom: 1rem;"></div>
+        <label style="display: block; margin-bottom: 1rem;">
+          <input type="checkbox" id="ciabRosterNotifyExisting" checked>
+          Email students who already have an account to tell them they were added
+        </label>
+        <div style="display: flex; gap: 1rem; justify-content: flex-end;">
+          <button type="button" class="btn btn-outline" onclick="closeModal('ciabRosterImportModal')">Cancel</button>
+          <button type="button" class="btn btn-primary" id="ciabRosterPreviewBtn" onclick="RosterImport.preview()">Preview</button>
+        </div>
+      </div>
+
+      <div id="ciabRosterStage-preview" style="display: none;">
+        <div id="ciabRosterPreviewBody"></div>
+        <div style="display: flex; gap: 1rem; justify-content: flex-end; margin-top: 1rem;">
+          <button type="button" class="btn btn-outline" onclick="RosterImport.setStage('input')">← Back</button>
+          <button type="button" class="btn btn-primary" id="ciabRosterConfirmBtn" onclick="RosterImport.confirm()">Import</button>
+        </div>
+      </div>
+
+      <div id="ciabRosterStage-result" style="display: none;">
+        <div id="ciabRosterResultBody"></div>
+        <div style="display: flex; gap: 1rem; justify-content: flex-end; margin-top: 1rem;">
+          <button type="button" class="btn btn-outline" id="ciabRosterCsvBtn" onclick="RosterImport.downloadCredentials()" style="display: none;">⬇ Copy credentials as CSV</button>
+          <button type="button" class="btn btn-primary" onclick="RosterImport.done()">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Generate cohort accounts -->
+  <!-- data-modal-static: same reason as the roster import — passwords are     -->
+  <!-- shown once; an accidental dismiss loses them.                           -->
+  <div class="modal-overlay" id="ciabCohortModal" data-modal-static>
+    <div class="modal-content" style="max-width: 720px;">
+      <div class="modal-header">
+        <h3>Generate Cohort Accounts</h3>
+        <button class="modal-close" onclick="closeModal('ciabCohortModal')">&times;</button>
+      </div>
+
+      <div id="ciabCohortStage-input">
+        <p style="color: var(--gray-600);">Creates numbered lab accounts named from this section's code, for students who should not need a real email address. Passwords are shown <strong>once</strong>.</p>
+        <div class="form-group">
+          <label for="ciabCohortCount">How many</label>
+          <input type="number" id="ciabCohortCount" min="1" max="500" value="25">
+        </div>
+        <div class="form-group">
+          <label for="ciabCohortStartIndex">Start numbering at</label>
+          <input type="number" id="ciabCohortStartIndex" min="1" value="1">
+          <!-- Resumable on purpose: 25 made, 5 more needed should give 26–30. -->
+          <small style="color: var(--gray-500);">Names already taken are skipped, so running this again continues from the next free number.</small>
+        </div>
+        <div class="form-group">
+          <label for="ciabCohortRole">Enroll as</label>
+          <select id="ciabCohortRole">
+            <option value="student">Student</option>
+            <option value="ta">TA</option>
+            <option value="observer">Observer</option>
+          </select>
+        </div>
+        <label style="display: block; margin-bottom: 1rem;">
+          <input type="checkbox" id="ciabCohortRequireChange">
+          Make students choose their own password on first sign-in
+          <small style="display: block; color: var(--gray-500); margin-left: 1.5rem;">Leave off if you are handing out a printed sheet — otherwise your copy stops working the first time each student signs in.</small>
+        </label>
+        <div style="display: flex; gap: 1rem; justify-content: flex-end;">
+          <button type="button" class="btn btn-outline" onclick="closeModal('ciabCohortModal')">Cancel</button>
+          <button type="button" class="btn btn-primary" id="ciabCohortPreviewBtn" onclick="RosterImport.cohortPreview()">Preview</button>
+        </div>
+      </div>
+
+      <div id="ciabCohortStage-preview" style="display: none;">
+        <div id="ciabCohortPreviewBody"></div>
+        <div style="display: flex; gap: 1rem; justify-content: flex-end; margin-top: 1rem;">
+          <button type="button" class="btn btn-outline" onclick="RosterImport.setCohortStage('input')">← Back</button>
+          <button type="button" class="btn btn-primary" id="ciabCohortConfirmBtn" onclick="RosterImport.cohortConfirm()">Generate</button>
+        </div>
+      </div>
+
+      <div id="ciabCohortStage-result" style="display: none;">
+        <div id="ciabCohortResultBody"></div>
+        <div style="display: flex; gap: 1rem; justify-content: flex-end; margin-top: 1rem;">
+          <button type="button" class="btn btn-outline" onclick="RosterImport.downloadCohort()">⬇ Copy as CSV</button>
+          <button type="button" class="btn btn-primary" onclick="RosterImport.done()">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pull a roster out of a CLE course -->
+  <div class="modal-overlay" id="ciabFromCleModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Import from a CLE course</h3>
+        <button class="modal-close" onclick="closeModal('ciabFromCleModal')">&times;</button>
+      </div>
+      <div class="form-group">
+        <label for="ciabCleCourseSelect">Course</label>
+        <select id="ciabCleCourseSelect"></select>
+        <small style="color: var(--gray-500);">Only courses you teach are listed. Everyone actively enrolled there is enrolled here too; no new accounts are created.</small>
+      </div>
+      <div id="ciabFromCleBody"></div>
+      <div style="display: flex; gap: 1rem; justify-content: flex-end;">
+        <button type="button" class="btn btn-outline" onclick="closeModal('ciabFromCleModal')">Cancel</button>
+        <button type="button" class="btn btn-primary" id="ciabFromCleBtn" onclick="RosterImport.fromCle()">Preview</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================================================================= -->
+  <!-- PAGE MODALS (rebuilt tabs)                                              -->
+  <!-- ======================================================================= -->
+
+  <!-- Review a submission (instructor-reviews.js) -->
+  <div class="modal-overlay" id="reviewModal" role="dialog" aria-modal="true" aria-labelledby="reviewModalHeading">
+    <div class="modal-content" style="max-width: 640px;">
+      <div class="modal-header">
+        <h3 id="reviewModalHeading">Review Submission</h3>
+        <button class="modal-close" onclick="closeModal('reviewModal')">&times;</button>
+      </div>
+      <div id="reviewModalContent"></div>
+    </div>
+  </div>
+
+  <!-- View a submission read-only (instructor-reviews.js) -->
+  <div class="modal-overlay" id="viewSubmissionModal" role="dialog" aria-modal="true" aria-labelledby="viewSubmissionModalTitle">
+    <div class="modal-content" style="max-width: 700px; max-height: 85vh; overflow-y: auto;">
+      <div class="modal-header">
+        <h3 id="viewSubmissionModalTitle">📄 Submission</h3>
+        <button class="modal-close" onclick="closeModal('viewSubmissionModal')">&times;</button>
+      </div>
+      <div id="viewSubmissionModalContent"></div>
+    </div>
+  </div>
+
+  <!-- Assign a profile to a student (instructor-students.js) — single-purpose
+       now; the join-group and schedule flows that used to hijack it are gone
+       with the deployed-groups card. -->
+  <div class="modal-overlay" id="assignProfileModal" role="dialog" aria-modal="true" aria-labelledby="assignProfileModalHeading">
+    <div class="modal-content" style="max-width: 500px;">
+      <div class="modal-header">
+        <h3 id="assignProfileModalHeading">Assign Profile to Student</h3>
+        <button class="modal-close" onclick="closeModal('assignProfileModal')">&times;</button>
+      </div>
+      <div id="assignProfileModalContent"></div>
+    </div>
+  </div>
+
+  <!-- Enroll a student on one of my sections (instructor-students.js) -->
+  <div class="modal-overlay" id="enrollStudentModal" role="dialog" aria-modal="true" aria-labelledby="enrollStudentModalHeading">
+    <div class="modal-content" style="max-width: 460px;">
+      <div class="modal-header">
+        <h3 id="enrollStudentModalHeading">Enroll Student in Section</h3>
+        <button class="modal-close" onclick="closeModal('enrollStudentModal')">&times;</button>
+      </div>
+      <div id="enrollStudentModalContent"></div>
+    </div>
+  </div>
+
+  <!-- Generate documents for a specific student profile (instructor-documents.js;
+       opened from the student progress modal) -->
+  <div class="modal-overlay" id="generateDocsModal" role="dialog" aria-modal="true" aria-labelledby="generateDocsModalHeading">
+    <div class="modal-content" style="max-width: 550px;">
+      <div class="modal-header">
+        <h3 id="generateDocsModalHeading">📄 Generate Assessment Documents</h3>
+        <button class="modal-close" onclick="closeModal('generateDocsModal')">&times;</button>
+      </div>
+      <div id="generateDocsModalContent"></div>
+    </div>
+  </div>
+
+  <!-- Full student progress (instructor-students.js) -->
+  <div class="modal-overlay" id="viewProgressModal" role="dialog" aria-modal="true" aria-labelledby="viewProgressModalHeading">
+    <div class="modal-content" style="max-width: 700px; max-height: 85vh; overflow-y: auto;">
+      <div class="modal-header">
+        <h3 id="viewProgressModalHeading">📊 Student Progress</h3>
+        <button class="modal-close" onclick="closeModal('viewProgressModal')">&times;</button>
+      </div>
+      <div id="viewProgressModalContent"></div>
+    </div>
+  </div>
+
+  <!-- Answer Key (instructor-documents.js) -->
+  <div class="modal-overlay" id="answerKeyModal" role="dialog" aria-modal="true" aria-labelledby="answerKeyProfileName">
+    <div class="modal-content" style="max-width: 900px; max-height: 90vh; display: flex; flex-direction: column;">
+      <div class="modal-header" style="display: flex; align-items: center; justify-content: space-between;">
+        <h3 style="margin: 0;">📝 Answer Key — <span id="answerKeyProfileName"></span></h3>
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <button class="btn btn-sm" id="regenerateAnswerKeyBtn" onclick="Docs.regenerateAnswerKey()" style="font-size: 0.8rem; border: 1px solid var(--danger); color: var(--danger); background: transparent; display: none;">
+            🔄 Regenerate
+          </button>
+          <button class="btn btn-sm btn-primary" id="downloadPacketBtn" onclick="Docs.downloadPacketPdf()" style="font-size: 0.8rem;">
+            📥 Download Packet PDF
+          </button>
+          <button class="modal-close" onclick="closeModal('answerKeyModal')">&times;</button>
+        </div>
+      </div>
+      <div style="display: flex; flex: 1; overflow: hidden; gap: 0;">
+        <div id="answerKeySidebar" style="width: 220px; min-width: 220px; border-right: 1px solid var(--border-color); overflow-y: auto; padding: 0.5rem 0;">
+        </div>
+        <div id="answerKeyContent" style="flex: 1; overflow-y: auto; padding: 1.5rem;">
+          <div class="empty-state">
+            <div class="icon">📝</div>
+            <h3>Select a Part</h3>
+            <p>Choose a part from the sidebar to view the generated answer key.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Vuln-App Cheat Sheet (instructor-documents.js; drawn-role gated) -->
+  <div class="modal-overlay" id="vulnCheatSheetModal" role="dialog" aria-modal="true" aria-labelledby="vulnCheatSheetTitle">
+    <div class="modal-content" style="max-width: 1000px; max-height: 90vh; display: flex; flex-direction: column;">
+      <div class="modal-header" style="display: flex; align-items: center; justify-content: space-between;">
+        <h3 style="margin: 0;">🔓 Vuln-App Answer Key — <span id="vulnCheatSheetTitle"></span></h3>
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <button class="btn btn-sm btn-primary" onclick="Docs.printVulnCheatSheet()" style="font-size: 0.8rem;">
+            🖨️ Print
+          </button>
+          <button class="modal-close" onclick="closeModal('vulnCheatSheetModal')">&times;</button>
+        </div>
+      </div>
+      <div id="vulnCheatSheetBody" style="flex: 1; overflow-y: auto; padding: 1.5rem;">
+        <div class="empty-state">
+          <div class="icon">🔓</div>
+          <h3>Loading…</h3>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- New / edit a module (instructor-modules.js) -->
+  <div class="modal-overlay" id="moduleModal" role="dialog" aria-modal="true" aria-labelledby="moduleModalTitle">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="moduleModalTitle">New Module</h3>
+        <button class="modal-close" onclick="closeModal('moduleModal')">&times;</button>
+      </div>
+      <form onsubmit="CiabModules.saveModule(event)">
+        <div class="form-group">
+          <label for="moduleTitle">Title</label>
+          <input type="text" id="moduleTitle" maxlength="255" required>
+        </div>
+        <div class="form-group">
+          <label for="moduleProfile">Client</label>
+          <input type="text" id="moduleClientFilter" oninput="CiabModules.filterClients()" placeholder="Filter clients&hellip;">
+          <select id="moduleProfile"></select>
+        </div>
+        <div class="form-group">
+          <label for="moduleEngagement">Engagement</label>
+          <input type="text" id="moduleEngagement" list="moduleEngagementList" maxlength="32" placeholder="default">
+          <datalist id="moduleEngagementList"></datalist>
+        </div>
+        <div class="form-group">
+          <label for="modulePart">Deliverable</label>
+          <select id="modulePart"></select>
+        </div>
+        <div class="form-group">
+          <label for="moduleReleaseState">Release</label>
+          <select id="moduleReleaseState"></select>
+        </div>
+        <div class="form-group">
+          <label for="moduleReleaseAt">Opens at</label>
+          <input type="datetime-local" id="moduleReleaseAt">
+          <small id="moduleReleaseTz"></small>
+        </div>
+        <div class="form-group">
+          <label for="moduleCloseAt">Closes at</label>
+          <input type="datetime-local" id="moduleCloseAt">
+        </div>
+        <div class="form-group">
+          <label for="moduleBrief">Brief</label>
+          <textarea id="moduleBrief" rows="4"></textarea>
+          <small>Students see this once the module opens.</small>
+        </div>
+        <div class="form-group">
+          <label for="moduleNotes">Instructor notes</label>
+          <textarea id="moduleNotes" rows="3"></textarea>
+          <small>Staff only. Never shown to a student.</small>
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-top:1rem;">
+          <button type="button" class="btn btn-secondary" onclick="closeModal('moduleModal')">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="moduleSaveBtn">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Clone a module: SAME SHAPE, DIFFERENT CLIENT. Single-stage, so no
+       data-modal-static -- that attribute is only for a multi-stage flow whose
+       intermediate state cannot be recreated. -->
+  <div class="modal-overlay" id="moduleCloneModal" role="dialog" aria-modal="true" aria-labelledby="moduleCloneModalTitle">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="moduleCloneModalTitle">Clone</h3>
+        <button class="modal-close" onclick="closeModal('moduleCloneModal')">&times;</button>
+      </div>
+      <form onsubmit="CiabModules.cloneModule(event)">
+        <div class="form-group">
+          <label for="moduleCloneSource">Cloning</label>
+          <input type="text" id="moduleCloneSource" readonly>
+        </div>
+        <div class="form-group">
+          <label for="moduleCloneTitle">New title</label>
+          <input type="text" id="moduleCloneTitle" maxlength="255" required>
+        </div>
+        <div class="form-group">
+          <label for="moduleCloneProfile">Client</label>
+          <input type="text" id="moduleCloneClientFilter" oninput="CiabModules.filterClients('clone')" placeholder="Filter clients&hellip;">
+          <select id="moduleCloneProfile"></select>
+          <small>Change this &mdash; cloning onto a different client is the point.</small>
+        </div>
+        <div class="form-group">
+          <label for="moduleCloneEngagement">Engagement</label>
+          <input type="text" id="moduleCloneEngagement" list="moduleCloneEngagementList" maxlength="32" placeholder="default">
+          <datalist id="moduleCloneEngagementList"></datalist>
+        </div>
+        <div class="form-group">
+          <label for="moduleCloneSection">Section</label>
+          <select id="moduleCloneSection" onchange="CiabModules.onCloneSectionChange()"></select>
+        </div>
+        <div class="form-group">
+          <label style="display:flex; align-items:center; gap:0.4rem;">
+            <input type="checkbox" id="moduleClonePrereqs" checked>
+            <span id="moduleClonePrereqsLabel">Copy the prerequisites this module follows</span>
+          </label>
+          <small id="moduleClonePrereqsNote"></small>
+        </div>
+        <div class="form-group">
+          <strong>What the copy gets</strong>
+          <p style="margin:0.35rem 0 0 0; font-size:0.85rem; color:var(--gray-500);">
+            Copied &mdash; title, brief, instructor notes, deliverable.<br>
+            Reset &mdash; it lands at the end of the sequence as a Draft with no open or close time.<br>
+            Not copied &mdash; student completions and overrides, and the modules that follow this one.
+          </p>
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-top:1rem;">
+          <button type="button" class="btn btn-secondary" onclick="closeModal('moduleCloneModal')">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="moduleCloneBtn">Clone</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Prerequisites for one module (instructor-modules.js fills the body) -->
+  <div class="modal-overlay" id="modulePrereqModal" role="dialog" aria-modal="true" aria-labelledby="modulePrereqModalTitle">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="modulePrereqModalTitle">Prerequisites</h3>
+        <button class="modal-close" onclick="closeModal('modulePrereqModal')">&times;</button>
+      </div>
+      <div id="modulePrereqContent"></div>
+      <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-top:1rem;">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('modulePrereqModal')">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Load order matters. instructor-core.js replaces the old inline block as
+       the provider of switchTab/closeModal/escapeHtml; instructor-sections.js
+       and instructor-roster-import.js depend on those globals and must stay
+       after every module that defines them. See instructor-core.js header. -->
+  <script src="/js/app.js"></script>
+  <script src="/ciab/js/ciab-api.js"></script>
+  <script src="/js/layout.js"></script>
+  <script src="/ciab/js/instructor-core.js"></script>
+  <script src="/ciab/js/instructor-overview.js"></script>
+  <script src="/ciab/js/instructor-students.js"></script>
+  <script src="/ciab/js/instructor-reviews.js"></script>
+  <script src="/ciab/js/instructor-documents.js"></script>
+  <script src="/ciab/js/instructor-engagements.js"></script>
+  <script src="/js/csv.js"></script>
+  <script src="/ciab/js/instructor-sections.js"></script>
+  <script src="/ciab/js/instructor-roster-import.js"></script>
+  <script src="/ciab/js/instructor-modules.js"></script>
+
+  <!-- The shared blue-team board, then the tab that mounts it.
+       ORDER INSIDE THIS BLOCK IS LOAD-BEARING AND IS NOT ALPHABETICAL:
+       blueteam-board.js reads BlueTeamApi, BlueTeamTimeline and BlueTeamScore
+       off window when it mounts, so all three must already have registered.
+       api -> timeline -> score -> board, and instructor-incidents.js last of
+       all — it needs the board AND instructor-core.js's esc/escJs/timeAgo,
+       which are top-level consts and therefore unreadable before that file
+       runs. instructor-incidents.js detects a wrong order and says so rather
+       than rendering an empty panel; see the guard at the bottom of it. -->
+  <script src="/js/blueteam/blueteam-api.js"></script>
+  <script src="/js/blueteam/blueteam-timeline.js"></script>
+  <script src="/js/blueteam/blueteam-score.js"></script>
+  <script src="/js/blueteam/blueteam-board.js"></script>
+  <script src="/ciab/js/instructor-incidents.js"></script>
+</body>
+</html>

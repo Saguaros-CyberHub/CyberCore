@@ -1,0 +1,153 @@
+---
+# ===========================================================================
+# cc_web — defaults
+#
+# TWO RULES GOVERN THIS FILE.
+#
+# 1. NOTHING HERE MAY IDENTIFY A TENANT. No company name, no hostname, no
+#    route, no copy, no account. The AI writes the site; this role installs
+#    whatever it was handed. Every identity-bearing default below is empty on
+#    purpose, and tasks/assert.yml turns "still empty" into a named failure
+#    instead of a templated empty string.
+#
+# 2. NO SECRETS. cc_web_pivot is {} here and is required to arrive from the
+#    caller (extra-vars, a vaulted group_vars file, or the runner's generated
+#    vars file). A password with a default is a password that ships.
+#
+# Anything that is NOT identity and NOT a secret — paths, timeouts, which
+# checks to run — belongs here so an operator can override one knob without
+# re-deriving the whole contract.
+# ===========================================================================
+
+# --- the web-facts contract (REQUIRED) -------------------------------------
+# asset.web_facts VERBATIM, exactly the shape documented in
+# front-end/modules/crucible/plugins/ciab/ai/scan-documents/service-inference.js:
+#
+#   cc_web_facts:
+#     product:  nginx            # spelled the way nmap -sV names it
+#     version:  '1.24.0'         # '' when the image pins no version
+#     ports:    [80]             # every TCP port the web server really binds
+#     tls:
+#       enabled:   false         # true ONLY if a TLS listener really exists
+#       port:      443           # which of `ports` terminates TLS
+#       protocols: [TLSv1.2]     # versions really offered
+#     paths:    ['/', '/login']  # routes that really resolve
+#
+# The JS side reads this to decide what the scan report is ALLOWED to claim.
+# This role reads the same block to decide what to build. That is the whole
+# design: one contract, two consumers, so "the paper matches the lane" stops
+# being something a checker verifies after the fact and becomes something that
+# cannot be false.
+cc_web_facts: {}
+
+# --- site identity (REQUIRED) ----------------------------------------------
+# The vhost ServerName. Also the -servername passed to `openssl s_client`
+# during verification, so a TLS listener is proved over the name the paper
+# prints rather than over an IP the paper never mentions.
+cc_web_server_name: ""
+
+# Where the declared routes land. Not identity, so it has a default.
+cc_web_docroot: /var/www/cc-web
+
+# The generated site. One entry per route:
+#
+#   - path: /login          # URL path; must appear in cc_web_facts.paths
+#     content: "<!doctype html>..."   # the body, authored by the generator
+#     file: login/index.html          # OPTIONAL explicit filename under the
+#                                     # docroot; derived from `path` if absent
+#
+# Extra routes NOT named in cc_web_facts.paths are allowed — a route the paper
+# does not mention is a legitimate piece of exercise design (find the admin
+# panel). The reverse is not: a path the paper links to that serves nothing is
+# the paper lying, and tasks/assert.yml refuses it.
+cc_web_routes: []
+
+# --- the pivot credential (REQUIRED) ---------------------------------------
+# The seam between the website and the domain, and the reason this host exists.
+# The web box is the dual-homed DMZ machine (engagement-model.js: exactly one
+# pivot per lane, pinned to .240 on both segments); a domain service account
+# sitting in an app config file on it is what turns a web compromise into an AD
+# foothold. Without this file the external half of the engagement dead-ends.
+#
+#   cc_web_pivot:
+#     path:     /etc/cc-web/app.env   # where the config file lands
+#     format:   dotenv                # dotenv | php | json | ini | xml
+#     domain:   EXAMPLE               # NetBIOS or FQDN, as the app would spell it
+#     username: svc-intranet
+#     password: "{{ vault_cc_web_pivot_password }}"
+#     owner:    root                  # optional
+#     group:    www-data              # optional
+#     mode:     '0640'                # optional; QUOTE IT (see below)
+#     dir_mode: '0750'                # optional; mode of the parent directory
+#     extra:    {}                    # optional extra keys the app config needs
+#     allow_in_docroot: false         # optional; see tasks/assert.yml
+#
+# EMPTY ON PURPOSE. See rule 2 in the header.
+cc_web_pivot: {}
+
+# Set false only for a web host that is deliberately NOT the pivot. Defaulting
+# this to false would make "we forgot the credential" and "this host has no
+# credential by design" the same silent outcome.
+cc_web_pivot_required: true
+
+# --- TLS -------------------------------------------------------------------
+cc_web_tls_cert_dir: /etc/ssl/cc-web
+cc_web_tls_cert: "{{ cc_web_tls_cert_dir }}/cc-web.crt"
+cc_web_tls_key: "{{ cc_web_tls_cert_dir }}/cc-web.key"
+cc_web_tls_cert_days: 3650
+cc_web_tls_key_bits: 2048
+
+# A deliberately weak protocol set is not enough on its own. Debian's
+# /etc/ssl/openssl.cnf ships a [system_default_sect] with CipherString at
+# SECLEVEL=2, and OpenSSL 3 applies that to every consumer INCLUDING httpd — so
+# `SSLProtocol +TLSv1` yields a listener that advertises TLS 1.0 and then
+# refuses every handshake, which is the worst of both worlds: the config looks
+# right and the scan finds nothing. tasks/tls.yml relaxes the system policy when
+# and only when a weak protocol was actually declared.
+cc_web_relax_system_openssl: true
+cc_web_openssl_cnf: /etc/ssl/openssl.cnf
+cc_web_openssl_weak_min_protocol: TLSv1
+cc_web_openssl_weak_cipher_string: "DEFAULT@SECLEVEL=0"
+
+# --- the banner the scan report names --------------------------------------
+# QUOTED ON PURPOSE. YAML 1.1 reads bare Off/On/Yes/No as booleans, and Apache
+# wants the literal string; an unquoted Off templates as "False" and
+# ServerSignature refuses to parse.
+cc_web_server_signature: "Off"
+
+# Products this role can actually deliver. It refuses anything else rather than
+# serving Apache under another product's name: httpd generates the Server header
+# in its core output filter, so mod_headers cannot rewrite it, and the only way
+# to present a foreign banner is mod_security's SecServerSignature — a
+# dependency this role does not pull in. Declaring a product the role cannot
+# build is therefore a fail-fast, not a best effort. If a lane needs nginx, this
+# role grows an nginx engine; it does not learn to lie.
+cc_web_supported_products:
+  - apache
+  - apache2
+  - httpd
+  - "apache httpd"
+  - "apache http server"
+
+# --- verification ----------------------------------------------------------
+# Every switch here defaults to ON. A verification you have to remember to
+# enable is a verification that is off on the lane that mattered.
+cc_web_verify_banner: true
+cc_web_verify_tls: true
+cc_web_verify_routes: true
+cc_web_verify_pivot: true
+
+# Also prove the listener REFUSES every protocol web_facts did not declare. The
+# permissive direction breaks the contract just as badly: a vhost that quietly
+# offers TLS 1.2 beside the declared TLS 1.0 makes the student's sslscan output
+# disagree with the appendix they were handed.
+cc_web_verify_tls_exhaustive: true
+
+# Where the role publishes what it OBSERVED (not what it was told). This is the
+# return path that closes the loop: a generator that reads this file writes a
+# report about the host that exists.
+cc_web_facts_out: /etc/cybercore/cc-web-observed.json
+
+# --- service ---------------------------------------------------------------
+cc_web_service_enabled: true
+cc_web_service_state: started
