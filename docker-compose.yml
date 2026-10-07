@@ -2,7 +2,22 @@ networks:
   cybercore-net:
     driver: bridge
 
+volumes:
+  cybercore-redis-data:
+  cybercore-postgres-data:
+  cybercore-caddy-data:
+  cybercore-caddy-config:
+  # Caldera's object store and authored content (data/adversaries, data/sources,
+  # data/objectives, data/abilities). A NAMED volume, not a bind mount, for the
+  # same reason the postgres data is: `docker compose build caldera` replaces the
+  # image and everything in it, and an instructor's afternoon of adversary
+  # authoring must not be part of what gets replaced.
+  cybercore-caldera-data:
+
 services:
+  # ============================================================================
+  # POSTGRES — Single instance hosting cybercore_db + plugin databases
+  # ============================================================================
   postgres:
     image: postgres:17
     container_name: cybercore-postgres
@@ -11,16 +26,22 @@ services:
       POSTGRES_USER: ${CORE_DB_USER}
       POSTGRES_PASSWORD: ${CORE_DB_PASSWORD}
       POSTGRES_DB: ${CORE_DB_NAME}
+      CORE_DB_USER: ${CORE_DB_USER}
+      CORE_DB_PASSWORD: ${CORE_DB_PASSWORD}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
       ENABLED_MODULES: ${CORE_ENABLED_MODULES}
-      N8N_DB_USER: ${N8N_DB_USER}
-      N8N_DB_PASSWORD: ${N8N_DB_PASSWORD}
-      N8N_DB_NAME: ${N8N_DB_NAME}
+      GUAC_DB_USER: ${GUAC_DB_USER:-guacamole_user}
+      GUAC_DB_PASSWORD: ${GUAC_DB_PASSWORD}
+      GUAC_DB_NAME: ${GUAC_DB_NAME:-guacamole_db}
     ports:
       - "0.0.0.0:5432:5432"
     volumes:
-      - ./data/postgres:/var/lib/postgresql/data:rw,z
+      - cybercore-postgres-data:/var/lib/postgresql/data
       - ./config/postgres/001_init_db.sql:/docker-entrypoint-initdb.d/001_init_db.sql:ro,z
-      - ./config/postgres/002_init_db.sh:/docker-entrypoint-initdb.d/002_init_db.sh:ro,z
+      - ./config/postgres/003_cyberhub_modules.sql:/docker-entrypoint-initdb.d/003_cyberhub_modules.sql:ro,z
+      - ./config/postgres/004_site_settings.sql:/docker-entrypoint-initdb.d/004_site_settings.sql:ro,z
+      - ./config/postgres/005_admin_user.sh:/docker-entrypoint-initdb.d/005_admin_user.sh:ro,z
+      - ./config/postgres/010_guacamole.sh:/docker-entrypoint-initdb.d/010_guacamole.sh:ro,z
       - ./config/postgres/050_apply_modules.sh:/docker-entrypoint-initdb.d/050_apply_modules.sh:ro,z
       - ./config/postgres/modules:/docker-entrypoint-initdb.d/modules:ro,z
     shm_size: 256mb
@@ -32,13 +53,16 @@ services:
     networks:
       - cybercore-net
 
+  # ============================================================================
+  # REDIS — Cache, queues, idempotency
+  # ============================================================================
   redis:
     image: redis:7-alpine
     container_name: cybercore-redis
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
     volumes:
-      - ./data/redis:/data:rw,z
+      - cybercore-redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "PING"]
       interval: 10s
@@ -47,114 +71,735 @@ services:
     networks:
       - cybercore-net
 
-  n8n:
-    image: docker.n8n.io/n8nio/n8n:2.1.2
-    container_name: cybercore-n8n
+  # ============================================================================
+  # CYBERHUB APP — Node.js/Express application
+  # ============================================================================
+  app:
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    build:
+      context: ./front-end
+      dockerfile: Dockerfile
+    container_name: cybercore-app
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    user: 0:0 # run as root to be able to bind to low ports if needed (CHANGEME)
+      guacamole:
+        condition: service_started
     environment:
-      N8N_USER_FOLDER: /home/node
-      TZ: ${TZ}
-      GENERIC_TIMEZONE: ${TZ}
       NODE_ENV: production
-      N8N_HOST: 100.100.20.50
-      N8N_PORT: 5678
-      N8N_PROTOCOL: http
-      N8N_SECURE_COOKIE: "false"
-      # WEBHOOK_URL: http://100.100.20.50:5678/
-      WEBHOOK_URL: http://0.0.0.0:5678/
-      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
-      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
-      DB_TYPE: postgresdb
-      DB_POSTGRESDB_HOST: postgres
-      DB_POSTGRESDB_PORT: 5432
-      DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME}
-      DB_POSTGRESDB_USER: ${N8N_DB_USER}
-      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
-      EXECUTIONS_MODE: queue
-      QUEUE_BULL_REDIS_HOST: redis
-      QUEUE_BULL_REDIS_PORT: 6379
-    entrypoint: ["/bin/sh","-lc"]
-    command: "/docker-entrypoint-initn8n.sh"
+      PORT: 3000
+      # CyberCore DB (single source of truth for users, modules, lanes)
+      CYBERCORE_DB_HOST: postgres
+      CYBERCORE_DB_PORT: 5432
+      CYBERCORE_DB_NAME: ${CORE_DB_NAME}
+      CYBERCORE_DB_USER: ${CORE_DB_USER}
+      CYBERCORE_DB_PASSWORD: ${CORE_DB_PASSWORD}
+      # CIAB / legacy plugin DB
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: clinic_db
+      DB_USER: ${CORE_DB_USER}
+      DB_PASSWORD: ${CORE_DB_PASSWORD}
+      # Security
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRES_IN: 7d
+      SESSION_SECRET: ${SESSION_SECRET}
+      # Marks the session cookie Secure, so the browser sends it back ONLY over
+      # https. True by default, and that default is correct here: public traffic
+      # arrives through the Cloudflare tunnel, which terminates TLS at the edge,
+      # so the BROWSER always sees https regardless of what the origin hop
+      # between cloudflared and caddy looks like.
+      #
+      # THE ONE CASE THAT FORCES false, stated so the trade is visible: this
+      # stack also answers plain HTTP on the `http://:80` site block in
+      # config/caddy/Caddyfile, for lane gateways and lane VMs. Those are MACHINE
+      # callers — bearer tokens and signed token URLs, never a cookie session —
+      # so a Secure cookie costs them nothing. A HUMAN on that path is the
+      # problem: browse the app by raw IP over http:// and the browser silently
+      # declines to send a Secure cookie, so the login POST returns 200, the
+      # redirect lands back on /login, and NOTHING is logged anywhere because
+      # nothing failed. If operators sign in over http://<lab-ip>, set
+      # COOKIE_SECURE=false in .env and accept that the session cookie then
+      # crosses that network in clear text.
+      #
+      # src/routes/auth.js sessionCookieOptions() compares === 'true', so any
+      # value that is not exactly "true" is false.
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      # Widens the session cookie to subdomains. REQUIRED for the Caldera
+      # authoring console: it is served on its own hostname (its SPA requests
+      # /api/v2/* from the origin root, so it cannot live under a path), and a
+      # cookie with no domain is HOST-ONLY — the browser never sends the session
+      # there, Caddy's forward_auth gate gets an anonymous subrequest, and the
+      # console shows a bare "HTTP ERROR 401" with nothing wrong in any log.
+      # Set it to the parent domain WITH the leading dot, e.g. .example.edu.
+      # Empty = host-only, the previous behaviour. See example.env for the trade.
+      COOKIE_DOMAIN: ${COOKIE_DOMAIN:-}
+      # Encryption keys for pgcrypto (pgp_sym_encrypt) at-rest secrets.
+      # These MUST be passed through or guac_password / MFA secrets can't be
+      # written and mfaKey() returns null (500 on /api/auth/mfa/setup).
+      GUAC_ENCRYPT_KEY: ${GUAC_ENCRYPT_KEY}
+      MFA_ENCRYPT_KEY: ${MFA_ENCRYPT_KEY}
+      # Anthropic API — all AI generation (profile gen, policy gen, examples,
+      # chat, interview, vuln-app). See front-end/src/utils/llm-client.js.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      LLM_DEFAULT_MODEL: ${LLM_DEFAULT_MODEL:-claude-sonnet-5}
+      LLM_MAX_CONCURRENT: ${LLM_MAX_CONCURRENT:-6}
+      # The bottom-right chat bubble only. Off by default; the key above still
+      # drives profile / policy / interview / vuln-app generation either way.
+      AI_ASSISTANT_ENABLED: ${AI_ASSISTANT_ENABLED:-false}
+      # Internal URL lane web VMs use to PULL prebuilt vuln-app images (HTTP, no
+      # TLS — busybox wget on the web template). Lane egress SNATs to the gateway
+      # WAN IP, reaching this via the same path lane-bootstrap uses. Override if
+      # the orchestrator's lab IP differs. See utils/vuln-app-builder.js.
+      CYBERCORE_INTERNAL_URL: ${CYBERCORE_INTERNAL_URL:-http://100.100.20.50:80}
+      # Guacamole — internal service, always points to compose container
+      GUAC_ENABLED: "true"
+      # The analysis connection check uses the same backend as Guacamole below.
+      GUACD_HOSTNAME: guacd
+      GUACD_PORT: 4822
+      GUAC_PUBLIC_BASE_URL: /guacamole
+      GUAC_API_URL: http://guacamole:8080/guacamole
+      GUAC_ADMIN_USER: ${GUAC_ADMIN_USER}
+      GUAC_ADMIN_PASSWORD: ${GUAC_ADMIN_PASSWORD}
+      GUAC_DATASOURCE: postgresql
+      GUAC_DB_HOST: postgres
+      GUAC_DB_NAME: ${GUAC_DB_NAME:-guacamole_db}
+      GUAC_DB_USER: ${GUAC_DB_USER:-guacamole_user}
+      GUAC_DB_PASSWORD: ${GUAC_DB_PASSWORD}
+      # ----------------------------------------------------------------------
+      # Caldera AUTHORING — internal service, exactly like Guacamole above.
+      # ----------------------------------------------------------------------
+      # THE SIGNING KEY FOR THE SSO TOKEN. The app MINTS the X-CyberCore-Auth
+      # token (src/utils/caldera-sso.js) and the caldera container VERIFIES it,
+      # so the SAME value must reach both services — that is why it is named
+      # here as well as in the caldera service below, from one .env entry.
+      # There is no default and both sides fail closed without it: the mint
+      # throws, forward_auth then answers non-2xx, and the door stays shut.
+      #   openssl rand -hex 32
+      CALDERA_SSO_SECRET: ${CALDERA_SSO_SECRET:-}
+      # Where the authoring instance lives, for GET /api/caldera-authoring/status
+      # (which decides whether the UI offers the link at all). It is now a compose
+      # service name, because the authoring instance moved from a Proxmox VM into
+      # the `caldera` container below — the executor Calderas are still VMs.
+      CALDERA_AUTHORING_UPSTREAM: ${CALDERA_AUTHORING_UPSTREAM:-caldera:8888}
+      # WHERE THE INSTRUCTOR'S BROWSER GOES, which is NOT where Caddy dials.
+      # The line above is a container-to-container address on cybercore-net; it
+      # is unresolvable from a browser and must never be rendered as a link.
+      # This one is the console's own PUBLIC hostname, and it is the value
+      # GET /api/caldera-authoring/status hands the UI as `console_url`.
+      #
+      # THE SAME .env ENTRY THE caddy SERVICE READS, deliberately, for the same
+      # reason CALDERA_SSO_SECRET and CALDERA_API_KEY_RED are named twice: Caddy
+      # opens its two `import caldera_gate` site blocks on this hostname, and a
+      # link built from any other source could point at a host Caddy has no site
+      # block for. One value, two consumers, no way to set half of it.
+      #
+      # OMITTING IT HERE IS SILENT AND IT WAS OMITTED. src/routes/caldera-
+      # authoring.js consoleConfig() reads exactly this variable and, unset,
+      # answers url:null / console_configured:false — which is honest but wrong
+      # on a deployment where the console is up and working, because both
+      # instructor surfaces then render "Attack authoring is not set up. An
+      # administrator needs to set CALDERA_HOST" at an administrator who already
+      # has. Nothing errors, nothing is logged, and the console stays
+      # undiscoverable. That is the exact dead end this whole surface was built
+      # to prevent, arriving from the one direction it could not see.
+      #
+      # NO DEFAULT, unlike the caddy service's `:-caldera.localhost`, and the
+      # asymmetry is intentional. Caddy needs SOME hostname to open a site block
+      # on or it fails to start; the app needs the TRUTH or it must say it does
+      # not know. A default here would make console_configured permanently true
+      # and turn "nobody set the hostname" into a link to caldera.localhost —
+      # a confidently wrong address, which is worse than an honest null.
+      CALDERA_HOST: ${CALDERA_HOST:-}
+      # THE READ-BACK CREDENTIAL, and it is the SAME SECRET as the caldera
+      # service's CALDERA_API_KEY_RED below — one .env entry, deliberately
+      # reaching both services, exactly like CALDERA_SSO_SECRET above.
+      #
+      # src/incident/caldera/authoring.js calls Caldera's v2 API to read an
+      # authored adversary back out. It resolves its key from
+      # CALDERA_AUTHORING_API_KEY_FILE (preferred — a root-owned 0600 mount,
+      # re-read per call so a rotation lands on the next click) or from this
+      # variable. With NEITHER set it does not throw: resolveApiKey() returns
+      # detail:'not_set' and the surface renders a calm "not configured", which
+      # is why a missing key here has been costing a feature rather than raising
+      # an error.
+      #
+      # KEEP THE TWO IDENTICAL. It is one credential seen from two sides: the
+      # app presents it as the API key on its own requests, while Caddy injects
+      # the very same value as Caldera's `KEY` header on the proxied console. A
+      # MISMATCH IS QUIET — the console keeps working, because that path uses
+      # Caddy's copy — and shows up only as 401s on the app's API calls.
+      CALDERA_AUTHORING_API_KEY: ${CALDERA_API_KEY_RED:-}
+      # Central Wazuh batch installs from Admin > Active Lanes. API credentials
+      # stay in the app; each guest receives only its own agent key.
+      WAZUH_MANAGER: ${WAZUH_MANAGER:-}
+      WAZUH_API_URL: ${WAZUH_API_URL:-}
+      WAZUH_API_USERNAME: ${WAZUH_API_USERNAME:-}
+      WAZUH_API_PASSWORD: ${WAZUH_API_PASSWORD:-}
+      WAZUH_API_CA_FILE: ${WAZUH_API_CA_FILE:-}
+      WAZUH_API_SERVER_NAME: ${WAZUH_API_SERVER_NAME:-}
+      WAZUH_AGENT_VERSION: ${WAZUH_AGENT_VERSION:-}
+      WAZUH_AGENT_GROUP: ${WAZUH_AGENT_GROUP:-}
+      WAZUH_DASHBOARD_URL: ${WAZUH_DASHBOARD_URL:-}
+      # Proxmox
+      PROXMOX_API_URL: ${PROXMOX_API_URL}
+      PROXMOX_TOKEN_ID: ${PROXMOX_TOKEN_ID}
+      PROXMOX_TOKEN_SECRET: ${PROXMOX_TOKEN_SECRET}
+      # Proxmox SSH — the ONLY way to run a shell inside a lane gateway LXC
+      # (the API has no exec for containers). Without a readable key here, every
+      # per-lane DHCP reservation and console DNAT install fails, and lanes come
+      # up "active" with consoles that cannot connect. See example.env.
+      PROXMOX_SSH_USER: ${PROXMOX_SSH_USER:-root}
+      PROXMOX_SSH_KEY: ${PROXMOX_SSH_KEY:-/run/secrets/proxmox_ssh_key}
+      # Tailscale BYOAB (used by v2 lane bootstrap to mint per-lane auth keys)
+      TAILSCALE_OAUTH_CLIENT_ID: ${TAILSCALE_OAUTH_CLIENT_ID}
+      TAILSCALE_OAUTH_CLIENT_SECRET: ${TAILSCALE_OAUTH_CLIENT_SECRET}
+      TAILSCALE_TAILNET: ${TAILSCALE_TAILNET}
+      TAILSCALE_LANE_TAG: ${TAILSCALE_LANE_TAG:-tag:lane}
+      # libuv threadpool. The default of 4 is shared by ALL fs reads, dns.lookup
+      # and crypto work; this app does enough of each that 4 threads can queue
+      # behind a handful of slow DNS lookups and stall static file serving.
+      UV_THREADPOOL_SIZE: "64"
+      # Turns on the per-request duration line that request-logger.js already
+      # emits on every response — it logs at level "http", which the default
+      # LOG_LEVEL=info suppresses, so slow requests currently leave no trace.
+      LOG_LEVEL: ${LOG_LEVEL:-http}
+      # Rate Limiting
+      RATE_LIMIT_WINDOW_MS: 900000
+      # 5000 matches the code default (src/server.js) and example.env. The
+      # previous value of 100 per 15 min is exhausted by normal dashboard use
+      # within minutes for any NON-ADMIN user (admins are exempt at
+      # server.js:215, which is why it never reproduced for operators).
+      RATE_LIMIT_MAX_REQUESTS: 5000
+      # Outbound email — activation links and course notifications from the CLE
+      # roster import. MAIL_HOST is the compose service name below; see the dns:
+      # note underneath, which is what makes that name resolvable at all.
+      MAIL_ENABLED: ${MAIL_ENABLED:-false}
+      MAIL_HOST: ${MAIL_HOST:-mailrelay}
+      # 587: the bundled relay below binds submission only, never 25.
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_SECURE: ${MAIL_SECURE:-false}
+      MAIL_FROM: ${MAIL_FROM:-CyberHub <no-reply@localhost>}
+      MAIL_REPLY_TO: ${MAIL_REPLY_TO:-}
+      # Set only when MAIL_HOST points at an external relay instead of the
+      # mailrelay service below (Resend, SES, Gmail, a campus smarthost).
+      MAIL_USER: ${MAIL_USER:-}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      # Escape hatch for a self-signed relay reached by FQDN. Certificates are
+      # verified for every non-internal host by default, which is what keeps
+      # MAIL_PASSWORD from crossing an unauthenticated connection.
+      MAIL_TLS_INSECURE: ${MAIL_TLS_INSECURE:-}
+      # Absolute base URL used to build activation links. Must be reachable by
+      # students from OUTSIDE the lab, or every invitation is a dead link.
+      MAIL_PUBLIC_URL: ${MAIL_PUBLIC_URL:-}
+      # pgcrypto key for message bodies at rest. Falls back to MFA_ENCRYPT_KEY /
+      # GUAC_ENCRYPT_KEY; with none of the three, every message is suppressed
+      # rather than stored in plaintext.
+      MAIL_ENCRYPT_KEY: ${MAIL_ENCRYPT_KEY:-}
+      MAIL_POLL_MS: ${MAIL_POLL_MS:-15000}
+      MAIL_MAX_ATTEMPTS: ${MAIL_MAX_ATTEMPTS:-5}
+      MAIL_RETENTION_DAYS: ${MAIL_RETENTION_DAYS:-30}
+      MAIL_RATE_PER_MIN: ${MAIL_RATE_PER_MIN:-60}
+      # Empty = send anywhere. Set this to your institution's domain(s) so a
+      # mistyped roster cannot turn the platform into a credential-phishing
+      # sender. See G12 in the roster import plan.
+      MAIL_ALLOWED_RECIPIENT_DOMAINS: ${MAIL_ALLOWED_RECIPIENT_DOMAINS:-}
+      ACTIVATION_TTL_HOURS: ${ACTIVATION_TTL_HOURS:-336}
+      # Accounts come from a roster; /register is closed unless this is "true".
+      ALLOW_SELF_REGISTRATION: ${ALLOW_SELF_REGISTRATION:-false}
+      # Bounds the fallback credential — the temp password shown to an instructor
+      # when an invitation could not be emailed, and the one a staff regenerate
+      # hands out. Expired ones are refused at login.
+      TEMP_PASSWORD_TTL_HOURS: ${TEMP_PASSWORD_TTL_HOURS:-72}
+      # Synthetic domain for generated cohort accounts. Hard-suppressed by the
+      # mailer regardless of any other setting — these credentials are handed
+      # out on a printed sheet, never emailed. Must NOT be a domain you own.
+      CLE_COHORT_EMAIL_DOMAIN: ${CLE_COHORT_EMAIL_DOMAIN:-cohort.invalid}
+    # External DNS for api.tailscale.com and every other public hostname the
+    # orchestrator reaches -- Proxmox, Guacamole, the LLM API, the SMTP relay.
+    # RESOLVER ORDER IS THE WHOLE THING. Docker's embedded resolver tries these
+    # upstreams in order and waits out a ~4s timeout on each one that does not
+    # answer, so a dead entry at the FRONT taxes every public lookup in the
+    # container by four seconds even though the name resolves correctly.
+    #
+    # Measured, in the container, with 1.1.1.1 first:
+    #   dns.lookup smtp.resend.com   4065 ms
+    #   dns.lookup postgres            10 ms   <- embedded resolver is healthy
+    # and on the HOST, using the two nameservers below:
+    #   getent hosts smtp.resend.com    2 ms
+    #
+    # So the lab resolvers DO recurse to the public internet -- an earlier
+    # revision of this block assumed they did not and put 1.1.1.1 in front,
+    # which is what bought the 4s. They go first now; 1.1.1.1 stays as a last
+    # resort only.
+    #
+    # DO NOT ADD 127.0.0.11 HERE. This key sets the resolver's UPSTREAMS, not
+    # the container's nameservers -- Docker points the container at 127.0.0.11
+    # itself on any user-defined network. Naming it here makes the resolver
+    # forward to itself, which is a second, independent way to buy the same 4s.
+    #
+    # Verify after ANY change -- both lines, and both must be tens of ms:
+    #   docker compose exec app node -e "const t=Date.now();require('dns').lookup('postgres',(e,a)=>console.log(Date.now()-t,'ms',e||a))"
+    #   docker compose exec app node -e "const t=Date.now();require('dns').lookup('smtp.resend.com',(e,a)=>console.log(Date.now()-t,'ms',e||a))"
+    dns:
+      - 100.100.10.1
+      - 100.100.60.1
+      - 1.1.1.1
     ports:
-      - "0.0.0.0:5678:5678"
-    env_file:
-      - ./config/secrets.env
+      - "127.0.0.1:3000:3000"
     volumes:
-      - ./data/n8n:/home/node:rw,z
-      - ./config/n8n/init.sh:/docker-entrypoint-initn8n.sh:ro,z
-      - ./config/n8n/workflows:/home/node/.n8n/config/workflows:ro,z
-      - ./config/n8n/credentials:/home/node/.n8n/config/credentials:ro,z
-      - ./config/site.json:/home/node/.n8n/config/site.json:ro,z
-    healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://0.0.0.0:5678/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
-      interval: 15s
-      timeout: 5s
-      retries: 10
+      - ./config/site.json:/config/site.json:ro
+      # Private key for `ssh root@<node> pct exec ...`. Read-only, and mounted at
+      # the path PROXMOX_SSH_KEY names. ssh refuses a key it considers
+      # world-readable, so keep the host file at 0600.
+      - ${PROXMOX_SSH_KEY_HOST:-./secrets/proxmox_ed25519}:${PROXMOX_SSH_KEY:-/run/secrets/proxmox_ssh_key}:ro
+      # Verified public Wazuh API certificate, provisioned on the Docker host.
+      # Keep the file out of Git; fail rather than create a directory if absent.
+      - type: bind
+        source: ./secrets/wazuh-api-ca.pem
+        target: /run/secrets/wazuh-api-ca.pem
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: Z
+      - ./front-end/plugins:/app/plugins:rw
+      - ./front-end/profiles:/app/profiles:rw
+      - ./front-end/vuln-assets:/app/vuln-assets:ro
+      - ./logs:/app/logs:rw
+      # THE APP'S OWN CODE, BIND-MOUNTED OVER THE IMAGE LAYER.
+      #
+      # Everything else about this service is recreate-cheap — an `environment:`
+      # edit is live after `docker compose up -d app`, no build. front-end/src
+      # and front-end/public were NOT: the Dockerfile bakes them in with
+      # `COPY . .`, so a container recreated from a stale image serves stale code
+      # while the corrected file sits right there in the working tree. That
+      # asymmetry cost real debugging time twice in one night — a fixed
+      # admin-topology.js on disk while the container kept rendering the GOAD
+      # "Extensions" checkboxes as nothing, and a COOKIE_DOMAIN fix that looked
+      # inert because `printenv` in the container showed the NEW value while the
+      # code reading it was still the OLD image layer. Two root causes, one
+      # symptom: "I changed it and nothing happened."
+      #
+      # Read-only, matching ./front-end/vuln-assets above: nothing in the
+      # container has any business writing back into the working tree.
+      #
+      # THE CAVEAT THIS DOES NOT REMOVE. Node caches every module it require()s,
+      # so a change under src/ is NOT live until the process restarts:
+      #     docker compose restart app
+      # public/ is read off disk per request, so that half is live immediately.
+      # This removes the REBUILD from the loop, not the restart.
+      #
+      # AND DO NOT MOUNT /app/node_modules. It is image-provided — `npm ci
+      # --omit=dev` runs in a layer BEFORE the source copy — and the host tree
+      # is a different install (devDependencies, host-built native bindings).
+      # Mounting ./front-end over /app wholesale, or adding a node_modules line
+      # here, shadows that layer and the container exits on its first require().
+      # Mount the two source directories and nothing else.
+      - ./front-end/public:/app/public:ro
+      - ./front-end/src:/app/src:ro
+      # Built vuln-app image tarballs, served over HTTP to lane web VMs.
+      - ./front-end/vuln-builds:/app/vuln-builds:rw
+      # DooD — the CIAB vuln-app builder runs `docker build` + `docker save`
+      # against the orchestrator VM's daemon. Reverted from a kaniko-only
+      # approach because kaniko-in-container extracts each build's base image
+      # into / and clobbers the running app container (curl, apk, /etc/os-release
+      # all get overwritten with Debian/glibc files). The security tradeoff is
+      # accepted: anything with code-execution inside this container can reach
+      # orchestrator-VM root via `docker run -v /:/host`. Blast radius is this
+      # VM only — not Proxmox.
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - cybercore-net
 
-  n8n-worker:
-    image: docker.n8n.io/n8nio/n8n:2.1.2
-    container_name: cybercore-n8n-worker
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      # n8n:
-       #  condition: service_healthy
-    user: 0:0
-    environment:
-      N8N_USER_FOLDER: /home/node
-      TZ: ${TZ}
-      GENERIC_TIMEZONE: ${TZ}
-      NODE_ENV: production
-      N8N_HOST: 100.100.20.50
-      N8N_PORT: 5678
-      N8N_PROTOCOL: http
-      N8N_SECURE_COOKIE: "false"
-      # WEBHOOK_URL: http://100.100.20.50:5678/
-      WEBHOOK_URL: http://0.0.0.0:5678/
-      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
-      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
-      DB_TYPE: postgresdb
-      DB_POSTGRESDB_HOST: postgres
-      DB_POSTGRESDB_PORT: 5432
-      DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME}
-      DB_POSTGRESDB_USER: ${N8N_DB_USER}
-      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
-      EXECUTIONS_MODE: queue
-      QUEUE_BULL_REDIS_HOST: redis
-      QUEUE_BULL_REDIS_PORT: 6379
-      QUEUE_HEALTH_CHECK_ACTIVE: "true"
-      N8N_SKIP_DB_MIGRATIONS: "true"
-    command: ["worker"]
-    env_file:
-      - ./config/secrets.env
-    volumes:
-      - ./data/n8n:/home/node:z
-      - ./config/n8n/workflows:/home/node/.n8n/config/workflows:ro,z
-      - ./config/n8n/credentials:/home/node/.n8n/config/credentials:ro,z
-      - ./config/site.json:/home/node/.n8n/config/site.json:ro,z
-    networks:
-      - cybercore-net
-
+  # ============================================================================
+  # ADMINER — Lightweight DB management UI
+  # ============================================================================
   adminer:
     image: adminer:latest
     container_name: cybercore-adminer
     restart: unless-stopped
     depends_on:
       - postgres
-    environment:
-      ADMINER_DEFAULT_SERVER: postgres
     ports:
-      - "0.0.0.0:8080:8080"
+      - "0.0.0.0:8181:8080"
+    networks:
+      - cybercore-net
+
+  # ============================================================================
+  # GUACD — Guacamole proxy daemon (speaks RDP/VNC/SSH, never exposed)
+  # ============================================================================
+  guacd:
+    image: guacamole/guacd:1.5.5
+    container_name: cybercore-guacd
+    restart: unless-stopped
+    networks:
+      - cybercore-net
+
+  # ============================================================================
+  # GUACAMOLE INIT — One-shot job: downloads and applies the Guacamole
+  # PostgreSQL schema against the already-created guacamole_db. Skips
+  # gracefully if tables already exist. Runs before guacamole starts.
+  # ============================================================================
+  guacamole-init:
+    image: postgres:17
+    container_name: cybercore-guacamole-init
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${GUAC_DB_PASSWORD}
+      GUAC_DB_HOST: postgres
+      GUAC_DB_NAME: ${GUAC_DB_NAME:-guacamole_db}
+      GUAC_DB_USER: ${GUAC_DB_USER:-guacamole_user}
+    volumes:
+      - ./config/guacamole/init-schema.sh:/init-schema.sh:ro,z
+      - ./config/guacamole:/schema:ro,z
+    entrypoint: ["/bin/sh", "/init-schema.sh"]
+    networks:
+      - cybercore-net
+
+  # ============================================================================
+  # GUACAMOLE — Web app / clientless remote desktop gateway
+  # Not exposed directly — accessed through Caddy at /guacamole/
+  # ============================================================================
+  guacamole:
+    image: guacamole/guacamole:1.5.5
+    container_name: cybercore-guacamole
+    restart: unless-stopped
+    depends_on:
+      guacd:
+        condition: service_started
+      guacamole-init:
+        condition: service_completed_successfully
+    environment:
+      GUACD_HOSTNAME: guacd
+      GUACD_PORT: 4822
+      POSTGRESQL_HOSTNAME: postgres
+      POSTGRESQL_PORT: 5432
+      POSTGRESQL_DATABASE: ${GUAC_DB_NAME:-guacamole_db}
+      POSTGRESQL_USER: ${GUAC_DB_USER:-guacamole_user}
+      POSTGRESQL_PASSWORD: ${GUAC_DB_PASSWORD}
+    networks:
+      - cybercore-net
+
+  # ============================================================================
+  # CALDERA — adversary authoring and manual control of running-lane agents
+  # ----------------------------------------------------------------------------
+  # ONE central instance for authoring and manual operations on agents installed
+  # from the Blue Team Board. Each agent has a scoped HTTP contact capability;
+  # console/API requests retain the instructor session gate.
+  #
+  # >>> THE MOST IMPORTANT LINE IN THIS SERVICE IS THE ONE THAT IS NOT HERE. <<<
+  # THERE IS DELIBERATELY NO `ports:` MAPPING. Do not add one. Not for
+  # "debugging", not "just on 127.0.0.1", not temporarily. With no port binding
+  # this container is unreachable from the host and from the lab network, and the
+  # ONLY path to it is Caddy on CALDERA_HOST, which runs the appropriate
+  # console or agent forward_auth gate against the app first. There is no firewall rule to
+  # keep correct and nothing to drift. Publish a port and an adversary authoring
+  # console becomes reachable from every lab subnet behind nothing at all,
+  # because the Caldera login form on the other side accepts no password (see
+  # infrastructure/caldera/conf/local.yml). `mailrelay` below is internal-only
+  # for the same reason and says so at the same volume.
+  # front-end/test/caldera-container-config.test.js fails if a ports: key appears.
+  #
+  # To reach it for debugging, go through the front door as an instructor, or
+  # `docker compose exec caldera sh` — both leave a trace, which is the point.
+  # ============================================================================
+  caldera:
+    build:
+      # Built from source, not pulled: mitre/caldera's published tags lag the
+      # releases and the plugins are git submodules that only a
+      # `git clone --recursive --branch <tag>` populates. See the Dockerfile.
+      context: ./infrastructure/caldera
+      dockerfile: Dockerfile
+      args:
+        # Bumping Caldera is this one line plus a rebuild.
+        CALDERA_VERSION: ${CALDERA_VERSION:-5.3.0}
+    container_name: cybercore-caldera
+    restart: unless-stopped
+    depends_on:
+      # Only for the token burn (POST /api/caldera/redeem). Nothing here reads
+      # the database, so postgres is not a dependency.
+      app:
+        condition: service_started
+    environment:
+      # Public HTTPS origin used by the Blue Team Board's agent installer.
+      CALDERA_HOST: ${CALDERA_HOST:-}
+      # The shared HMAC key. Same .env entry the app reads above; the token is
+      # minted there and verified here, so a mismatch means every login is
+      # refused (fail closed) rather than every login accepted.
+      CALDERA_SSO_SECRET: ${CALDERA_SSO_SECRET:-}
+      # Single use. The container has no Redis of its own, so the nonce burn
+      # happens server-side in CyberCore: the login handler POSTs the token's
+      # jti here and requires 200. 409 means "already used" and the login is
+      # refused — which is what stops a replay inside the 60-second window.
+      # The service name, not the public hostname: this call must not leave
+      # cybercore-net.
+      CYBERCORE_REDEEM_URL: ${CYBERCORE_REDEEM_URL:-http://app:3000/api/caldera/redeem}
+      # The `path` claim the token must carry, matching the prefix Caddy serves
+      # the console on and PUBLIC_PATH in src/routes/caldera-authoring.js. A
+      # token minted for some other path is refused here.
+      CALDERA_SSO_PATH_PREFIX: ${CALDERA_SSO_PATH_PREFIX:-/caldera}
+      # Which Caldera account an authenticated instructor is attached to. Caldera
+      # groups are ROLES, not tenancy, so there is exactly one per group; see the
+      # attribution note in conf/local.yml.
+      CALDERA_SSO_USER: cybercore
+      CALDERA_SSO_GROUP: red
+      # REQUIRED, not optional — this comment used to say otherwise and the code
+      # moved underneath it. CALDERA_API_KEY_RED is what actually authenticates
+      # the console: Caddy injects it as Caldera's `KEY` header and
+      # auth_svc.check_permissions() short-circuits on it for every route. The
+      # entrypoint now REFUSES TO START when it is unset or under 32 characters
+      # (infrastructure/caldera/entrypoint.sh), because an ephemeral key would
+      # leave Caddy presenting one this container has never heard of — which is
+      # the failure that cost hours the first time.
+      #
+      # The app reads the same value as CALDERA_AUTHORING_API_KEY above. Three
+      # services, ONE .env entry: caldera trusts it, caddy presents it, the app
+      # calls the API with it.
+      #   openssl rand -hex 32
+      CALDERA_API_KEY_RED: ${CALDERA_API_KEY_RED:-}
+      # Still genuinely optional: nothing presents a blue key, so an ephemeral
+      # per-start value is harmless.
+      CALDERA_API_KEY_BLUE: ${CALDERA_API_KEY_BLUE:-}
+      # Optional. The entrypoint generates these once and keeps them inside the
+      # data volume; set them only to hold them in your own secret store. They
+      # decrypt the object store, so CHANGING them orphans existing content.
+      CALDERA_ENCRYPTION_KEY: ${CALDERA_ENCRYPTION_KEY:-}
+      CALDERA_CRYPT_SALT: ${CALDERA_CRYPT_SALT:-}
+    volumes:
+      # Authored adversaries, sources, objectives and the object store. Survives
+      # `docker compose build caldera`, which is the whole reason it is named.
+      - cybercore-caldera-data:/usr/src/app/data
+      #
+      # DO NOT ADD A VOLUME FOR plugins/atomic/data/abilities. It looks like an
+      # obvious fix — the atomic plugin writes its ingested abilities into an
+      # image layer, so they are lost on --force-recreate — and it silently
+      # breaks the plugin instead. Its hook guards the ingest with
+      #
+      #     if "abilities" not in os.listdir(data_dir):
+      #
+      # so a mount there CREATES the directory, the ingest is skipped forever,
+      # and atomic reports zero abilities with nothing in any log to say why.
+      # Nothing needs persisting: the ingest is automatic on a fresh container,
+      # so a recreate simply re-runs it. Tried in 4facbd6, reverted immediately.
+    healthcheck:
+      # Defined in the Dockerfile (this image is ours, so it has one). Repeated
+      # here only to give the app-side `depends_on` something to wait on if one
+      # is ever added; the interval is generous because Caldera parses every
+      # stockpile and atomic ability out of YAML on a cold start.
+      test: ["CMD", "python", "-c", "import urllib.request as r, urllib.error as e, sys\ntry:\n    r.urlopen('http://127.0.0.1:8888/', timeout=5)\nexcept e.HTTPError:\n    pass\nexcept Exception:\n    sys.exit(1)\n"]
+      interval: 30s
+      timeout: 10s
+      start_period: 180s
+      retries: 3
+    networks:
+      - cybercore-net
+
+  # ============================================================================
+  # CADDY — Reverse proxy and automatic HTTPS
+  # Routes / → app:3000 and /guacamole/* → guacamole:8080
+  # Set CYBERHUB_HOST=yourdomain.example.edu for auto-HTTPS via Let's Encrypt.
+  # Set CYBERHUB_HOST=:80 to disable HTTPS (offline / LAN mode).
+  # ============================================================================
+  caddy:
+    # PINNED, NOT FLOATING. This used to be `caddy:2-alpine`, which is a moving
+    # target: every `docker compose pull` could bring a different minor release.
+    #
+    # That matters here because of advisory GHSA-7r4p-vjf4-gxv4 — `forward_auth`
+    # with `copy_headers` does NOT strip a header the CLIENT supplied, so if the
+    # auth service ever answers 2xx without setting a copied header, the client's
+    # own value survives all the way to the backend. Identity injection. The
+    # Caddyfile mitigates it explicitly (`request_header -X-CyberCore-Auth`
+    # before forward_auth, inside a `route` so the order is the written order),
+    # and the token is HMAC-signed so a forged header is worthless anyway.
+    #
+    # BOTH of those mitigations are written against a KNOWN forward_auth
+    # behaviour. A floating tag lets that behaviour change underneath them
+    # silently, with no diff anywhere in this repository to review. So the
+    # version is a literal, and bumping it is a reviewed edit:
+    #   1. read the release notes for changes to forward_auth / copy_headers
+    #   2. bump this line
+    #   3. docker compose up -d caddy, then confirm a request carrying its own
+    #      X-CyberCore-Auth still reaches Caldera without that value.
+    image: caddy:2.10.2-alpine
+    container_name: cybercore-caddy
+    # Caddy resolves Let's Encrypt and OCSP responders during certificate work
+    # and during TLS handshakes, so a slow resolver here stalls the public site
+    # rather than a background job.
+    # RESOLVER ORDER IS THE WHOLE THING. Docker's embedded resolver tries these
+    # upstreams in order and waits out a ~4s timeout on each one that does not
+    # answer, so a dead entry at the FRONT taxes every public lookup in the
+    # container by four seconds even though the name resolves correctly.
+    #
+    # Measured, in the container, with 1.1.1.1 first:
+    #   dns.lookup smtp.resend.com   4065 ms
+    #   dns.lookup postgres            10 ms   <- embedded resolver is healthy
+    # and on the HOST, using the two nameservers below:
+    #   getent hosts smtp.resend.com    2 ms
+    #
+    # So the lab resolvers DO recurse to the public internet -- an earlier
+    # revision of this block assumed they did not and put 1.1.1.1 in front,
+    # which is what bought the 4s. They go first now; 1.1.1.1 stays as a last
+    # resort only.
+    #
+    # DO NOT ADD 127.0.0.11 HERE. This key sets the resolver's UPSTREAMS, not
+    # the container's nameservers -- Docker points the container at 127.0.0.11
+    # itself on any user-defined network. Naming it here makes the resolver
+    # forward to itself, which is a second, independent way to buy the same 4s.
+    #
+    # Verify after ANY change (caddy has no node; time a name it must resolve):
+    #   time docker compose exec caddy nslookup acme-v02.api.letsencrypt.org
+    # Tens of milliseconds, not seconds.
+    dns:
+      - 100.100.10.1
+      - 100.100.60.1
+      - 1.1.1.1
+    restart: unless-stopped
+    depends_on:
+      - app
+      - guacamole
+      - caldera
+    environment:
+      CYBERHUB_HOST: ${CYBERHUB_HOST}
+      # The authoring console's OWN hostname. It is a separate site block rather
+      # than a path on CYBERHUB_HOST because magma is an SPA that bootstraps from
+      # /api/v2/config/main at the origin root — a subpath mount cannot work. Point
+      # a Cloudflare tunnel ingress rule at this container for this hostname.
+      CALDERA_HOST: ${CALDERA_HOST:-caldera.localhost}
+      # The /caldera* upstream in config/caddy/Caddyfile. It is a compose SERVICE
+      # NAME now — the authoring instance moved from a Proxmox VM into the
+      # `caldera` container above — but it stays an environment variable so a
+      # deployment that fronts a separate authoring host can repoint it without
+      # editing the Caddyfile, and so the Caddyfile never carries an address.
+      CALDERA_AUTHORING_UPSTREAM: ${CALDERA_AUTHORING_UPSTREAM:-caldera:8888}
+      # Injected onto the proxied request as Caldera's `KEY` header, which is
+      # what actually authenticates the console (see config/caddy/Caddyfile).
+      # Must be the SAME value the caldera service receives, and must be set:
+      # the container refuses to start without it rather than mint an ephemeral
+      # key Caddy would not know.
+      CALDERA_API_KEY_RED: ${CALDERA_API_KEY_RED:-}
+    ports:
+      - "0.0.0.0:80:80"
+      - "0.0.0.0:443:443"
+      - "0.0.0.0:443:443/udp"
+    volumes:
+      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro,z
+      - cybercore-caddy-data:/data
+      - cybercore-caddy-config:/config
+    networks:
+      - cybercore-net
+
+
+  # ============================================================================
+  # CLOUDFLARED — Outbound-only ingress tunnel
+  # ----------------------------------------------------------------------------
+  # This orchestrator sits behind a school network that source-NATs every inbound
+  # connection to a single upstream address, so the NAT table in front of us is a
+  # shared, exhaustible resource we do not control. When it fills, inbound TCP
+  # handshakes stop completing: Caddy sends SYN-ACK, the final ACK never arrives,
+  # and the site times out for everyone while the server sits idle. Confirmed by
+  # packet capture — dozens of half-open connections, all peering with 10.0.254.1.
+  #
+  # cloudflared dials OUT to Cloudflare and serves requests back down that
+  # connection, so nothing has to traverse the inbound port-forward. The same box
+  # measured 400 Mbps outbound while its own public IP delivered 68 B/s.
+  #
+  # Points at caddy:80 rather than app:3000 so the existing http://:80 block keeps
+  # routing /guacamole* to the Guacamole container. Cloudflare terminates TLS, so
+  # no certificate is needed on this path — which also sidesteps the ACME renewal
+  # failures caused by the same NAT.
+  # ============================================================================
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cybercore-cloudflared
+    restart: unless-stopped
+    depends_on:
+      - caddy
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    networks:
+      - cybercore-net
+  # ============================================================================
+  # FTP — File transfer for profile delivery
+  # ============================================================================
+  ftp:
+    image: fauria/vsftpd:latest
+    container_name: cybercore-ftp
+    restart: unless-stopped
+    environment:
+      FTP_USER: ${FTP_USER}
+      FTP_PASS: ${FTP_PASSWORD}
+      PASV_ADDRESS: 0.0.0.0
+      PASV_MIN_PORT: 21100
+      PASV_MAX_PORT: 21110
+    ports:
+      - "0.0.0.0:21:21"
+      - "21100-21110:21100-21110"
+    volumes:
+      - ./front-end/profiles:/home/vsftpd/${FTP_USER}:rw
+    networks:
+      - cybercore-net
+
+  # ==========================================================================
+  # MAILRELAY — outbound SMTP for activation links and course notifications.
+  #
+  # INTERNAL ONLY. There is deliberately no `ports:` stanza, so only containers
+  # on cybercore-net can submit. That is what makes unauthenticated submission
+  # safe; publishing 25 would turn this into an open relay the moment
+  # mynetworks is judged even slightly wrong, and an open relay is discovered
+  # in hours, not weeks.
+  #
+  # DELIVERABILITY IS NOT A CODE PROBLEM. Before trusting this in production:
+  #   1. Outbound port 25 must not be blocked. Most residential ISPs and many
+  #      university NAT egress paths block it outright, and nothing below
+  #      matters if it is. Check first:
+  #        docker compose exec mailrelay sh -c 'nc -zv gmail-smtp-in.l.google.com 25'
+  #   2. PTR (reverse DNS) on the egress IP must equal MAIL_RELAY_HOSTNAME.
+  #      Only the IP's owner can set this. A generic PTR is rejected outright
+  #      by Gmail and Outlook.
+  #   3. SPF:   saguaroscyberhub.org TXT "v=spf1 ip4:<egress-ip> -all"
+  #      DKIM:  2048-bit key in ./secrets/dkim, public half published at
+  #             <selector>._domainkey.saguaroscyberhub.org
+  #      DMARC: start at p=none with rua=, read the reports, then tighten.
+  #
+  # STRONGLY RECOMMENDED: set MAIL_SMARTHOST to a reputable relay — ideally the
+  # institution's own SMTP server. A brand-new IP sending 200 near-identical
+  # credential-bearing messages in one burst is the textbook spam signature,
+  # and will be spam-foldered even with 1-3 all correct. Keeping this container
+  # in front still buys queueing, retry, and one place to change the story.
+  # ==========================================================================
+  mailrelay:
+    # Pinned: :latest silently changes TLS and relay defaults.
+    image: boky/postfix:v4.3.0
+    container_name: cybercore-mailrelay
+    restart: unless-stopped
+    environment:
+      # HELO/envelope identity. MUST match the PTR record of the egress IP.
+      HOSTNAME: ${MAIL_RELAY_HOSTNAME:-mail.localhost}
+      ALLOWED_SENDER_DOMAINS: ${MAIL_RELAY_ALLOWED_SENDER_DOMAINS:-localhost}
+      # RFC1918 only — the compose bridge. Never widen this.
+      POSTFIX_mynetworks: 172.16.0.0/12,192.168.0.0/16,10.0.0.0/8
+      DKIM_SELECTOR: ${MAIL_DKIM_SELECTOR:-cyberhub}
+      # Empty = deliver direct to MX. Set to hand off to a smarthost instead.
+      RELAYHOST: ${MAIL_SMARTHOST:-}
+      RELAYHOST_USERNAME: ${MAIL_SMARTHOST_USER:-}
+      RELAYHOST_PASSWORD: ${MAIL_SMARTHOST_PASSWORD:-}
+      POSTFIX_message_size_limit: "10485760"
+    volumes:
+      # DKIM signing keys. Optional — Postfix starts without them, unsigned.
+      - ./secrets/dkim:/etc/opendkim/keys:ro
     networks:
       - cybercore-net

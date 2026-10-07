@@ -1,0 +1,566 @@
+#!/usr/bin/env python3
+"""Install CyberCore's Windows SOC workbench on a lane's Elastic Stack 7.17.
+
+Python 3.8+, standard library only. No remote code downloads or service changes.
+See --help and README.md. Generated artifacts contain no authentication secrets.
+"""
+
+import argparse
+import base64
+import copy
+import datetime
+import json
+import os
+from pathlib import Path
+import re
+import ssl
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+PREFIX = "cybercore-lane-soc-v1"
+OWNER = "CyberCore lane SOC v1"
+DESCRIPTION = "Managed by " + OWNER + ". "
+INDEX_ID = PREFIX + "-windows"
+DASHBOARD_ID = PREFIX + "-overview"
+SOURCES = [
+    "https://www.elastic.co/guide/en/kibana/7.17/saved-objects-api-bulk-create.html",
+    "https://www.elastic.co/guide/en/security/7.17/rules-api-create.html",
+    "https://www.elastic.co/guide/en/security/7.17/rules-api-update.html",
+    "https://www.elastic.co/guide/en/security/7.17/detections-permissions-section.html",
+    "https://www.elastic.co/guide/en/security/7.17/privileges-api-overview.html",
+    "https://www.elastic.co/guide/en/security/7.17/index-api-overview.html",
+]
+
+
+def compact(value):
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
+def either(fields, value):
+    return "(" + " or ".join(field + ": " + value for field in fields) + ")"
+
+
+def event(*codes):
+    return either(["event.code", "winlog.event_id"], "(" + " or ".join('"' + str(c) + '"' for c in codes) + ")")
+
+
+def channel(value):
+    return 'winlog.channel: "' + value + '"'
+
+
+def cmd(value):
+    return either(["process.command_line", "winlog.event_data.CommandLine"], value)
+
+
+def process_name(value):
+    # Raw paths need a suffix wildcard; ECS process.name contains only the basename.
+    return '(process.name: "' + value + '" or winlog.event_data.Image: *' + value + ' or winlog.event_data.NewProcessName: *' + value + ')'
+
+
+PROCESS = "((" + channel("Microsoft-Windows-Sysmon/Operational") + " and " + event(1) + ") or (" + channel("Security") + " and " + event(4688) + "))"
+AUTH_FAIL = channel("Security") + " and " + event(4625)
+AUTH_SUCCESS = channel("Security") + " and " + event(4624)
+NETWORK = channel("Microsoft-Windows-Sysmon/Operational") + " and " + event(3)
+PERSISTENCE = "((" + channel("Security") + " and " + event(4697, 4698, 4702) + ") or (" + channel("System") + " and " + event(7045) + ") or (" + channel("Microsoft-Windows-Sysmon/Operational") + " and " + event(13, 19, 20, 21) + "))"
+
+
+def rule_catalog(index, source_field="source.ip"):
+    """Behavior hypotheses, with independent raw Windows field alternatives."""
+    powershell = "(" + process_name("powershell.exe") + " or " + process_name("pwsh.exe") + ")"
+    parent = either(["process.parent.name", "process.parent.executable", "winlog.event_data.ParentImage", "winlog.event_data.ParentProcessName"], "(*wsmprovhost.exe or *WmiPrvSE.exe)")
+    excluded_sources = '("127.0.0.1" or "::1")' if source_field == "source.ip" else '("-" or "127.0.0.1" or "::1")'
+    script = either(["powershell.file.script_block_text", "winlog.event_data.ScriptBlockText"], "(*DownloadString* or *DownloadFile* or *Invoke-WebRequest* or *Start-BitsTransfer*)")
+    def ps_behavior(value):
+        return "((" + channel("Microsoft-Windows-PowerShell/Operational") + " and " + event(4104) + " and " + either(["powershell.file.script_block_text", "winlog.event_data.ScriptBlockText"], value) + ") or (" + PROCESS + " and " + powershell + " and " + cmd(value) + "))"
+    specs = [
+        ("encoded-powershell", "PowerShell encoded command", "medium", 47, "T1059.001",
+         PROCESS + " and " + powershell + " and " + cmd("(*-enc* or *-EncodedCommand*)"),
+         "An encoded PowerShell command obscures the command visible to an analyst.",
+         "Management tools can legitimately encode scripts. Inspect the decoded text without executing it, parent process, user, and destination.",
+         "Process creation with command line (Sysmon 1 or Security 4688)."),
+        ("powershell-transfer", "PowerShell script contains download behavior", "medium", 43, "T1105",
+         channel("Microsoft-Windows-PowerShell/Operational") + " and " + event(4104) + " and " + script,
+         "A script block uses a network download method; correlate with process and network events.",
+         "Software deployment is common. Review the URL, script contents, parent, and subsequent execution. A match does not establish successful transfer.",
+         "PowerShell Script Block Logging (4104); merely collecting the channel is insufficient."),
+        ("scheduled-task", "Scheduled task created from a command shell", "medium", 43, "T1053.005",
+         PROCESS + " and " + process_name("schtasks.exe") + " and " + cmd("*/create*"),
+         "A process attempted to register a scheduled task.",
+         "Correlate Security 4698/4702 or TaskScheduler events to verify task registration, principal, trigger and action. Tune named deployment tasks, not all schtasks activity.",
+         "Process creation with command line; task auditing improves confirmation."),
+        ("powershell-task", "PowerShell scheduled task registration", "medium", 43, "T1053.005",
+         ps_behavior("*Register-ScheduledTask*"),
+         "PowerShell attempted to register a scheduled task.",
+         "Inspect the action, user, trigger and run level; confirm with Security 4698/4702. Software management can legitimately register tasks. A script block can contain unexecuted function bodies.",
+         "PowerShell 4104 or process command line containing Register-ScheduledTask. Task events provide confirmation."),
+        ("startup-shortcut", "Shortcut written into a Windows startup folder", "medium", 43, "T1547.001",
+         channel("Microsoft-Windows-Sysmon/Operational") + " and " + event(11) + " and " + either(["file.path", "winlog.event_data.TargetFilename"], r"*\\Programs\\Startup\\*.lnk"),
+         "A process wrote a shortcut in a logon startup folder.",
+         "Resolve the shortcut target without running it. Check the writer process, signature, actor and next logon execution; authorized applications can add startup shortcuts.",
+         "Sysmon FileCreate 11 including Startup paths; sensor exclusions can hide file writes."),
+        ("comsvcs-minidump", "Rundll32 invoked the COM services MiniDump export", "high", 73, "T1003.001",
+         PROCESS + " and " + process_name("rundll32.exe") + " and " + cmd("*comsvcs*") + " and " + cmd("*MiniDump*"),
+         "The COM services DLL MiniDump export was invoked through rundll32; this is commonly used to dump process memory.",
+         "Identify the target PID and correlate it to LSASS or another process at that time. Check privileges, command result and dump-file creation. A matching command is an attempt, not proof of credential extraction; diagnostics can also dump memory.",
+         "Sysmon 1 or Security 4688 with command line. This rule does not depend on Sysmon ProcessAccess 10."),
+        ("defender-preference", "PowerShell requested disabling a Defender protection", "high", 63, "T1562.001",
+         ps_behavior("*Set-MpPreference*") + " and " + either(["powershell.file.script_block_text", "winlog.event_data.ScriptBlockText", "process.command_line", "winlog.event_data.CommandLine"], "(*DisableRealtimeMonitoring* or *DisableBehaviorMonitoring* or *DisableIOAVProtection* or *DisableScriptScanning*)") + " and " + either(["powershell.file.script_block_text", "winlog.event_data.ScriptBlockText", "process.command_line", "winlog.event_data.CommandLine"], "*$true*"),
+         "A PowerShell command or script block requested turning off a Defender protection setting.",
+         "Verify the resulting Defender preference or Operational events; Tamper Protection can block the attempt. Match actor, parent and change window. Test images and approved maintenance can trigger this rule; a logged script block need not have completed.",
+         "PowerShell Script Block Logging 4104, or process creation with the full command line. The default lane collector does not subscribe to Defender Operational."),
+        ("service-user-path", "Service installed from a writable user or temporary directory", "high", 63, "T1543.003",
+         "((" + channel("System") + " and " + event(7045) + ") or (" + channel("Security") + " and " + event(4697) + ")) and " + either(["winlog.event_data.ImagePath", "winlog.event_data.ServiceFileName", "service.path"], r"(*\\Users\\* or *\\Temp\\* or *\\ProgramData\\*)"),
+         "A newly registered Windows service points to a commonly writable directory.",
+         "Installers and support software may match. Examine signature, service account, creator logon and executable provenance; ProgramData alone is not malicious.",
+         "System 7045 or Security 4697 with service executable path."),
+        ("run-key", "Registry Run key value changed", "medium", 43, "T1547.001",
+         channel("Microsoft-Windows-Sysmon/Operational") + " and " + event(13) + " and " + either(["registry.path", "winlog.event_data.TargetObject"], r"(*\\CurrentVersion\\Run\\* or *\\CurrentVersion\\RunOnce\\*)"),
+         "A registry value was set in a logon autorun key.",
+         "Inspect the value data, writer process, user, signer and subsequent logon execution. Updaters create legitimate autoruns.",
+         "Sysmon RegistryEvent 13; the sensor configuration must include these keys."),
+        ("wmi-subscription", "WMI permanent event subscription modified", "high", 63, "T1546.003",
+         channel("Microsoft-Windows-Sysmon/Operational") + " and " + event(19, 20, 21),
+         "A WMI event filter, consumer, or binding was registered.",
+         "Correlate filter, consumer and binding names. Inspect executable/script content and registration user; monitoring agents also use WMI subscriptions.",
+         "Sysmon WmiEvent 19/20/21; WMI Operational collection alone does not provide these events."),
+        ("credential-hive", "Registry credential hive export attempted", "high", 73, "T1003.002",
+         PROCESS + " and " + process_name("reg.exe") + " and " + cmd("(*save* or *export*)") + " and " + cmd("(*HKLM*SAM* or *HKLM*SECURITY* or *HKEY_LOCAL_MACHINE*SAM* or *HKEY_LOCAL_MACHINE*SECURITY*)"),
+         "reg.exe was used to save or export a sensitive credential hive.",
+         "Check command success, output file creation, privilege level and paired SYSTEM hive access. Backup/forensic activity can be authorized.",
+         "Process creation with command line; no credential contents are collected by this rule."),
+        ("lsass-access", "High access rights requested for LSASS", "high", 73, "T1003.001",
+         channel("Microsoft-Windows-Sysmon/Operational") + " and " + event(10) + " and " + either(["winlog.event_data.TargetImage"], "*lsass.exe") + ' and winlog.event_data.GrantedAccess: ("0x1fffff" or "0x1f0fff" or "0x1010" or "0x1410")',
+         "A process accessed LSASS with rights commonly observed during credential access.",
+         "Antivirus and diagnostic agents can match. Inspect SourceImage, GrantedAccess, CallTrace, signature and neighboring dump-file events. This is not proof credentials were extracted.",
+         "Sysmon ProcessAccess 10 targeting LSASS; GOAD's default sensor excludes ProcessAccess."),
+        ("log-cleared", "Windows event log cleared", "high", 63, "T1070.001",
+         "((" + channel("Security") + " and " + event(1102) + ") or (" + channel("System") + " and " + event(104) + " and " + either(["event.provider", "winlog.provider_name"], '"Microsoft-Windows-Eventlog"') + "))",
+         "Windows recorded an event-log clear operation.",
+         "Identify the actor and cleared channel, compare maintenance windows, and inspect process history before the clear. Forwarded logs can retain evidence.",
+         "Security 1102 or System 104. Channel scoping prevents unrelated provider event-ID collisions."),
+        ("remote-shell", "Shell launched by WinRM or WMI", "medium", 47, "T1021",
+         PROCESS + " and " + parent + " and (" + process_name("cmd.exe") + " or " + powershell + ")",
+         "A remote-management host process spawned a command interpreter.",
+         "Administrative automation is expected in lanes. Correlate logon type 3, source address, account, command and subsequent changes. Scope exceptions to known management accounts and sources.",
+         "Sysmon 1 with parent process or Security 4688 with ParentProcessName enrichment."),
+        ("auth-burst", "Repeated failed logons from one source", "medium", 43, "T1110",
+         AUTH_FAIL + " and " + source_field + ': * and not ' + source_field + ': ' + excluded_sources,
+         "At least ten failed logons share a source address within a seven-minute lookback.",
+         "Check status/substatus, distinct targeted users, source owner and later successful logons. Stale service credentials and scanners can cause bursts. Threshold alerts summarize a group; pivot to the authentication hunt for source documents.",
+         "Security 4625 with a populated, aggregatable source address field."),
+    ]
+    rules = []
+    for slug, name, severity, risk, technique, query, description, triage, telemetry in specs:
+        rule = {"rule_id": PREFIX + "-" + slug, "name": "Lane SOC | " + name,
+                "description": description, "risk_score": risk, "severity": severity,
+                "type": "query", "language": "kuery", "query": query, "index": [index],
+                "interval": "5m", "from": "now-7m", "to": "now", "max_signals": 100,
+                "enabled": False, "version": 1, "author": ["CyberCore"],
+                "tags": [OWNER, "Windows", technique], "meta": {"managed_by": OWNER},
+                "false_positives": [triage], "note": "Required telemetry: " + telemetry + "\n\nTriage: " + triage + "\n\nValidate in the lane with a known execution and compare raw event time, ingestion delay, and rule execution status. Review exceptions against a normal-activity baseline. Rules use event time and allow two minutes of scheduling overlap; events arriving more than seven minutes late can be missed.",
+                "references": ["https://attack.mitre.org/techniques/" + technique.replace(".", "/") + "/"],
+                "actions": [], "throttle": "no_actions"}
+        if slug == "auth-burst":
+            rule.update(type="threshold", threshold={"field": [source_field], "value": 10})
+        rules.append(rule)
+    return rules
+
+
+class InstallError(Exception):
+    pass
+
+
+class HTTPError(InstallError):
+    def __init__(self, status, method, path, detail):
+        self.status = status
+        super().__init__("{} {} returned HTTP {}: {}".format(method, path, status, detail[:400]))
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise InstallError("HTTP redirect refused; use the final service URL (credentials were not forwarded).")
+
+
+class Client:
+    def __init__(self, base, service, ca_cert=None, insecure=False):
+        parsed = urllib.parse.urlsplit(base)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.query or parsed.fragment:
+            raise InstallError("Service URLs must be http(s) URLs without embedded credentials, query or fragment.")
+        self.base = base.rstrip("/")
+        self.headers = {"Accept": "application/json", "Content-Type": "application/json", "kbn-xsrf": "cybercore-lane-soc"}
+        def credential(name):
+            return os.environ.get("LANE_" + service + "_" + name, os.environ.get("LANE_ELK_" + name, ""))
+        api_key, bearer = credential("API_KEY"), credential("BEARER_TOKEN")
+        username, password = credential("USERNAME"), credential("PASSWORD")
+        if api_key:
+            self.headers["Authorization"] = "ApiKey " + api_key
+        elif bearer:
+            self.headers["Authorization"] = "Bearer " + bearer
+        elif username:
+            self.headers["Authorization"] = "Basic " + base64.b64encode((username + ":" + password).encode()).decode()
+        context = ssl.create_default_context(cafile=ca_cert)
+        if insecure:
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+        self.opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=context))
+
+    def request(self, method, path, payload=None):
+        request = urllib.request.Request(self.base + path, data=None if payload is None else compact(payload).encode(), headers=self.headers, method=method)
+        try:
+            with self.opener.open(request, timeout=45) as response:
+                body = response.read()
+                return json.loads(body) if body else {}
+        except urllib.error.HTTPError as exc:
+            # Avoid storing server responses with echoed headers/credentials in reports.
+            raw = exc.read().decode("utf-8", "replace")
+            try:
+                data = json.loads(raw)
+                detail = data.get("message", data.get("error", "Request failed"))
+                if isinstance(detail, dict):
+                    detail = detail.get("reason", detail.get("type", "Request failed"))
+            except (ValueError, AttributeError):
+                detail = "Non-JSON error response; check the service URL and permissions."
+            raise HTTPError(exc.code, method, path, str(detail)) from None
+        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+            raise InstallError("{} {} failed ({}); check connectivity, TLS and authentication.".format(method, path, type(exc).__name__)) from None
+
+
+def scoped(space, path):
+    return ("" if space == "default" else "/s/" + urllib.parse.quote(space, safe="")) + path
+
+
+def field_choice(fields, *candidates):
+    for candidate in candidates:
+        if any(t.get("aggregatable") for t in fields.get(candidate, {}).values()):
+            return candidate
+    return candidates[0]
+
+
+def kibana_fields(fields):
+    type_map = {"keyword": "string", "text": "string", "wildcard": "string", "constant_keyword": "string", "date": "date", "date_nanos": "date", "ip": "ip", "boolean": "boolean"}
+    result = []
+    numeric = {"long", "integer", "short", "byte", "double", "float", "half_float", "scaled_float", "unsigned_long"}
+    for name, types in sorted(fields.items()):
+        variants = [v for k, v in types.items() if k != "unmapped"]
+        if not variants:
+            continue
+        kinds = {v.get("type") for v in variants}
+        kind = next(iter(kinds)) if len(kinds) == 1 else "conflict"
+        result.append({"name": name, "type": "number" if kind in numeric else type_map.get(kind, kind),
+                       "esTypes": sorted(kinds), "searchable": all(v.get("searchable", False) for v in variants),
+                       "aggregatable": all(v.get("aggregatable", False) for v in variants),
+                       "readFromDocValues": all(v.get("aggregatable", False) for v in variants) and kind != "text"})
+    if not result:
+        result = [{"name": "@timestamp", "type": "date", "esTypes": ["date"], "searchable": True, "aggregatable": True, "readFromDocValues": True}]
+    return result
+
+
+def saved_object(kind, slug, attributes, refs=None):
+    attributes.setdefault("description", DESCRIPTION)
+    return {"type": kind, "id": PREFIX + "-" + slug, "attributes": attributes, "references": refs or []}
+
+
+def search_source(query="", index_id=INDEX_ID):
+    return {"searchSourceJSON": compact({"indexRefName": "kibanaSavedObjectMeta.searchSourceJSON.index", "query": {"query": query, "language": "kuery"}, "filter": []})}
+
+
+def index_ref(index_id=INDEX_ID):
+    return [{"name": "kibanaSavedObjectMeta.searchSourceJSON.index", "type": "index-pattern", "id": index_id}]
+
+
+def visual(slug, title, vis_type, aggs, params=None, query="", index_id=INDEX_ID):
+    return saved_object("visualization", slug, {"title": title, "visState": compact({"title": title, "type": vis_type, "params": params or {}, "aggs": aggs}), "uiStateJSON": "{}", "version": 1, "kibanaSavedObjectMeta": search_source(query, index_id)}, index_ref(index_id))
+
+
+def metric(slug, title, query="", field=None, metric_type="count"):
+    params = {"addTooltip": True, "addLegend": False, "type": "metric", "metric": {"labels": {"show": True}, "style": {"bgFill": "#000", "bgColor": False, "labelColor": False, "subText": "", "fontSize": 42}, "colorSchema": "Green to Red", "colorsRange": [{"from": 0, "to": 10000}], "invertColors": False, "percentageMode": False}}
+    return visual(slug, title, "metric", [{"id": "1", "enabled": True, "type": metric_type, "schema": "metric", "params": {"field": field} if field else {}}], params, query)
+
+
+def table(slug, title, field, query="", last_seen=False, index_id=INDEX_ID):
+    aggs = [{"id": "1", "enabled": True, "type": "count", "schema": "metric", "params": {}}, {"id": "2", "enabled": True, "type": "terms", "schema": "bucket", "params": {"field": field, "size": 12, "order": "desc", "orderBy": "1", "otherBucket": False, "missingBucket": False}}]
+    if last_seen:
+        aggs.append({"id": "3", "enabled": True, "type": "max", "schema": "metric", "params": {"field": "@timestamp", "customLabel": "Last event (UTC)"}})
+    return visual(slug, title, "table", aggs, {"perPage": 12, "showPartialRows": False, "showMetricsAtAllLevels": False, "sort": {"columnIndex": None, "direction": None}, "showTotal": False, "totalFunc": "sum"}, query, index_id)
+
+
+def saved_search(slug, title, query, columns, detail="", index_id=INDEX_ID):
+    return saved_object("search", slug, {"title": title, "description": DESCRIPTION + detail, "columns": columns, "sort": [["@timestamp", "desc"]], "version": 1, "kibanaSavedObjectMeta": search_source(query, index_id)}, index_ref(index_id))
+
+
+def build_objects(index, fields, rules, status, alert_fields=None, space="default"):
+    host = field_choice(fields, "host.name", "winlog.computer_name")
+    source = field_choice(fields, "source.ip", "winlog.event_data.IpAddress")
+    process = field_choice(fields, "process.name", "winlog.event_data.Image", "winlog.event_data.NewProcessName")
+    destination = field_choice(fields, "destination.ip", "winlog.event_data.DestinationIp")
+    code = field_choice(fields, "event.code", "winlog.event_id")
+    objects = [saved_object("index-pattern", "windows", {"title": index, "timeFieldName": "@timestamp", "fields": compact(kibana_fields(fields)), "fieldFormatMap": "{}"})]
+    panels = []
+    refs = []
+    def panel(obj, x, y, w, h):
+        objects.append(obj)
+        i = str(len(panels) + 1)
+        ref_name = "panel_" + i
+        refs.append({"name": ref_name, "type": obj["type"], "id": obj["id"]})
+        panels.append({"version": "7.17.0", "type": obj["type"], "gridData": {"x": x, "y": y, "w": w, "h": h, "i": i}, "panelIndex": i, "embeddableConfig": {}, "panelRefName": ref_name})
+
+    text = "## Lane SOC | Windows operations\n" + status + "\n\nFilter by **host.name**, **user.name**, source IP and an execution time window. Counts below are observed events; suspicious behavior matches require investigation. Empty panels can indicate missing telemetry. Refresh every minute; default window is 24 hours.\n\n**Workflow:** check host freshness → inspect authentication → pivot through process, persistence and network evidence → compare normal activity → tune rules. Discover contains saved `Lane SOC | Hunt` searches and per-rule evidence queries."
+    panel(visual("readme", "Analyst workflow and detection status", "markdown", [], {"markdown": text, "openLinksInNewTab": True}), 0, 0, 48, 8)
+    panel(metric("event-count", "Windows events"), 0, 8, 12, 7)
+    panel(metric("host-count", "Reporting hosts", field=host, metric_type="cardinality"), 12, 8, 12, 7)
+    panel(metric("failed-count", "Failed logon events", AUTH_FAIL), 24, 8, 12, 7)
+    panel(metric("behavior-count", "Behavior evidence events", "(" + " or ".join("(" + r["query"] + ")" for r in rules if r["type"] != "threshold") + ")"), 36, 8, 12, 7)
+    hist_aggs = [{"id": "1", "enabled": True, "type": "count", "schema": "metric", "params": {}}, {"id": "2", "enabled": True, "type": "date_histogram", "schema": "segment", "params": {"field": "@timestamp", "interval": "auto", "min_doc_count": 1, "extended_bounds": {}}}, {"id": "3", "enabled": True, "type": "terms", "schema": "group", "params": {"field": "winlog.channel", "size": 8, "order": "desc", "orderBy": "1"}}]
+    hist_params = {"type": "histogram", "addTooltip": True, "addLegend": True, "legendPosition": "right", "grid": {"categoryLines": False}, "categoryAxes": [{"id": "CategoryAxis-1", "type": "category", "position": "bottom", "show": True, "style": {}, "scale": {"type": "linear"}, "labels": {"show": True, "truncate": 100}, "title": {}}], "valueAxes": [{"id": "ValueAxis-1", "type": "value", "position": "left", "show": True, "style": {}, "scale": {"type": "linear", "mode": "normal"}, "labels": {"show": True}, "title": {"text": "Events"}}], "seriesParams": [{"show": True, "type": "histogram", "mode": "stacked", "data": {"label": "Count", "id": "1"}, "valueAxis": "ValueAxis-1"}]}
+    panel(visual("volume", "Event volume by channel", "histogram", hist_aggs, hist_params), 0, 15, 32, 13)
+    panel(table("freshness", "Host inventory and last event", host, last_seen=True), 32, 15, 16, 13)
+    panel(table("auth-failures", "Failed logons by source", source, AUTH_FAIL), 0, 28, 16, 12)
+    panel(table("auth-users", "Successful logons by user", field_choice(fields, "user.name", "winlog.event_data.TargetUserName"), AUTH_SUCCESS), 16, 28, 16, 12)
+    panel(table("processes", "Process executions", process, PROCESS), 32, 28, 16, 12)
+    panel(table("destinations", "Network connections by destination", destination, NETWORK), 0, 40, 24, 12)
+    panel(table("persistence", "Persistence-related events by ID", code, PERSISTENCE), 24, 40, 24, 12)
+    cols = [host, code, "user.name", "process.parent.name", "process.command_line", "winlog.event_data.CommandLine", "message"]
+    panel(saved_search("timeline", "Lane SOC | Event timeline", "", cols, "Raw event timeline; use host and time filters for investigation."), 0, 52, 48, 15)
+    hunts = [
+        ("authentication", "Authentication and explicit credentials", channel("Security") + " and " + event(4624, 4625, 4648, 4672, 4768, 4769, 4771, 4776), [host, code, "user.name", source, "winlog.event_data.LogonType", "winlog.event_data.Status", "message"]),
+        ("execution", "Process ancestry and command lines", PROCESS, cols),
+        ("powershell", "PowerShell script blocks", channel("Microsoft-Windows-PowerShell/Operational") + " and " + event(4104), [host, "user.name", "powershell.file.script_block_text", "winlog.event_data.ScriptBlockText"]),
+        ("persistence-evidence", "Task, service, registry and WMI changes", PERSISTENCE, [host, code, "user.name", "winlog.event_data.ServiceName", "registry.path", "winlog.event_data.TargetObject", "message"]),
+        ("network-evidence", "Network and DNS evidence", channel("Microsoft-Windows-Sysmon/Operational") + " and " + event(3, 22), [host, code, process, destination, "destination.port", "dns.question.name", "winlog.event_data.QueryName", "message"]),
+        ("account-changes", "Account and group membership changes", channel("Security") + " and " + event(4720, 4722, 4724, 4726, 4728, 4732, 4756), [host, code, "user.name", "winlog.event_data.TargetUserName", "winlog.event_data.MemberName", "message"]),
+        ("kerberos", "Kerberos service tickets and preauthentication failures", channel("Security") + " and " + event(4769, 4771), [host, code, source, "winlog.event_data.TargetUserName", "winlog.event_data.ServiceName", "winlog.event_data.TicketEncryptionType", "message"]),
+    ]
+    for slug, title, query, columns in hunts:
+        objects.append(saved_search("hunt-" + slug, "Lane SOC | Hunt | " + title, query, columns))
+    for rule in rules:
+        objects.append(saved_search("hunt-" + rule["rule_id"][len(PREFIX) + 1:], "Lane SOC | Hunt | " + rule["name"].split(" | ", 1)[1], rule["query"], cols, rule["note"]))
+    if alert_fields is not None:
+        alert_id = PREFIX + "-alerts"
+        objects.append(saved_object("index-pattern", "alerts", {"title": ".siem-signals-" + space, "timeFieldName": "@timestamp", "fields": compact(kibana_fields(alert_fields)), "fieldFormatMap": "{}"}))
+        panel(table("alerts-by-rule", "Actual detection alerts by rule", "signal.rule.name", index_id=alert_id), 0, 67, 24, 12)
+        panel(saved_search("alerts-timeline", "Lane SOC | Detection alert queue", "", ["signal.rule.name", "signal.rule.severity", "signal.status", "host.name", "user.name"], "Only genuine Detection Engine output.", alert_id), 24, 67, 24, 12)
+    objects.append(saved_object("dashboard", "overview", {"title": "Lane SOC | Windows operations", "description": DESCRIPTION + "Behavior evidence, telemetry health, authentication and investigation pivots.", "panelsJSON": compact(panels), "optionsJSON": compact({"useMargins": True, "hidePanelTitles": False}), "version": 1, "timeRestore": True, "timeFrom": "now-24h", "timeTo": "now", "refreshInterval": {"pause": False, "value": 60000}, "kibanaSavedObjectMeta": {"searchSourceJSON": compact({"query": {"query": "", "language": "kuery"}, "filter": []})}}, refs))
+    return objects
+
+
+def validate_version(label, value):
+    if not re.fullmatch(r"7\.17\.\d+(?:[-+].*)?", value or ""):
+        raise InstallError("{} {} is unsupported. This bundle targets 7.17.x; no objects were written. Use a version-matched bundle for other releases.".format(label, value or "unknown"))
+
+
+def field_caps(es, index):
+    return es.request("GET", "/" + urllib.parse.quote(index, safe="*,.-_") + "/_field_caps?fields=*&ignore_unavailable=true&allow_no_indices=true").get("fields", {})
+
+
+def telemetry_report(es, index, fields):
+    checks = {
+        "security_auth": {"bool": {"filter": [{"term": {"winlog.channel": "Security"}}, {"bool": {"should": [{"terms": {"event.code": ["4624", "4625"]}}, {"terms": {"winlog.event_id": [4624, 4625]}}], "minimum_should_match": 1}}]}},
+        "sysmon_process": {"bool": {"filter": [{"term": {"winlog.channel": "Microsoft-Windows-Sysmon/Operational"}}, {"bool": {"should": [{"term": {"event.code": "1"}}, {"term": {"winlog.event_id": 1}}], "minimum_should_match": 1}}]}},
+        "powershell_script_blocks": {"bool": {"filter": [{"term": {"winlog.channel": "Microsoft-Windows-PowerShell/Operational"}}, {"bool": {"should": [{"term": {"event.code": "4104"}}, {"term": {"winlog.event_id": 4104}}], "minimum_should_match": 1}}]}},
+        "sysmon_process_access": {"bool": {"filter": [{"term": {"winlog.channel": "Microsoft-Windows-Sysmon/Operational"}}, {"bool": {"should": [{"term": {"event.code": "10"}}, {"term": {"winlog.event_id": 10}}], "minimum_should_match": 1}}]}},
+        "sysmon_network": {"bool": {"filter": [{"term": {"winlog.channel": "Microsoft-Windows-Sysmon/Operational"}}, {"bool": {"should": [{"term": {"event.code": "3"}}, {"term": {"winlog.event_id": 3}}], "minimum_should_match": 1}}]}},
+        "command_lines": {"bool": {"should": [{"exists": {"field": "process.command_line"}}, {"exists": {"field": "winlog.event_data.CommandLine"}}], "minimum_should_match": 1}},
+    }
+    body = {"size": 0, "track_total_hits": True, "query": {"range": {"@timestamp": {"gte": "now-24h"}}}, "aggs": {"coverage": {"filters": {"filters": checks}}, "last_event": {"max": {"field": "@timestamp"}}, "hosts": {"terms": {"field": field_choice(fields, "host.name", "winlog.computer_name"), "size": 100}, "aggs": {"last_event": {"max": {"field": "@timestamp"}}}}}}
+    response = es.request("POST", "/" + urllib.parse.quote(index, safe="*,.-_") + "/_search?ignore_unavailable=true&allow_no_indices=true", body)
+    if response.get("_shards", {}).get("failed", 0):
+        raise InstallError("Telemetry probe had failed shards; resolve mapping conflicts or narrow --index.")
+    total = response.get("hits", {}).get("total", {})
+    return {"window": "last 24 hours", "events": total.get("value", 0) if isinstance(total, dict) else total,
+            "last_event": response.get("aggregations", {}).get("last_event", {}).get("value_as_string"),
+            "coverage": {k: v.get("doc_count", 0) for k, v in response.get("aggregations", {}).get("coverage", {}).get("buckets", {}).items()},
+            "hosts": [{"host": h["key"], "events": h["doc_count"], "last_event": h.get("last_event", {}).get("value_as_string")} for h in response.get("aggregations", {}).get("hosts", {}).get("buckets", [])],
+            "interpretation": "No observed events is a blind spot to investigate, not proof that the corresponding audit policy is disabled. Host inventory lists reporting hosts only; compare it with the lane's expected machines."}
+
+
+def detection_readiness(es, kibana, space, index):
+    try:
+        features = es.request("GET", "/_xpack?categories=features&filter_path=features.security")
+        if features.get("features", {}).get("security", {}).get("enabled") is not True:
+            return False, "Elasticsearch security is disabled or could not be verified. Dashboard and hunts work; native detection rules are exported only."
+        privileges = kibana.request("GET", scoped(space, "/api/detection_engine/privileges"))
+        missing = [key for key in ("is_authenticated", "has_encryption_key", "has_all_requested") if privileges.get(key) is not True]
+        if missing:
+            return False, "Detection Engine prerequisites missing: " + ", ".join(missing) + ". Rules are exported only."
+        read = es.request("POST", "/_security/user/_has_privileges", {"cluster": [], "index": [{"names": [index], "privileges": ["read", "view_index_metadata"]}]})
+        if read.get("has_all_requested") is not True:
+            return False, "The installer identity lacks source-index read/view_index_metadata privileges. Rules are exported only."
+        return True, "Detection Engine API prerequisites passed. Check rule execution status after installation."
+    except InstallError as exc:
+        return False, "Detection Engine readiness could not be verified: " + str(exc)
+
+
+def install_rules(kibana, space, rules, mode, result=None):
+    path = scoped(space, "/api/detection_engine/index")
+    try:
+        kibana.request("GET", path)
+    except HTTPError as exc:
+        if exc.status != 404:
+            raise
+        kibana.request("POST", path, {})
+    if result is None:
+        result = []
+    for rule in rules:
+        path = scoped(space, "/api/detection_engine/rules")
+        try:
+            existing = kibana.request("GET", path + "?rule_id=" + urllib.parse.quote(rule["rule_id"]))
+        except HTTPError as exc:
+            if exc.status != 404:
+                raise
+            existing = None
+        if existing is not None:
+            if existing.get("meta", {}).get("managed_by") != OWNER:
+                raise InstallError("Refusing to update rule ID owned by another author: " + rule["rule_id"])
+            # Preserve local query tuning, schedule, exceptions and connectors on reruns.
+            payload = {"rule_id": rule["rule_id"], "description": rule["description"], "note": rule["note"], "references": rule["references"]}
+            if mode in ("enabled", "disabled"):
+                payload["enabled"] = mode == "enabled"
+            current = kibana.request("PATCH", path, payload)
+            action = "updated documentation; preserved tuned query/schedule/exceptions/actions"
+        else:
+            payload = copy.deepcopy(rule)
+            payload["enabled"] = mode in ("auto", "enabled")
+            current = kibana.request("POST", path, payload)
+            action = "created"
+        if current.get("rule_id") != rule["rule_id"]:
+            raise InstallError("Detection API did not confirm the expected rule ID: " + rule["rule_id"])
+        result.append({"rule_id": rule["rule_id"], "action": action, "enabled": current.get("enabled", payload.get("enabled", existing.get("enabled") if existing else False))})
+    return result
+
+
+def install_objects(kibana, space, objects):
+    # Read every managed ID first: namespace collisions are never overwritten blindly.
+    lookup = [{"type": obj["type"], "id": obj["id"]} for obj in objects]
+    found = kibana.request("POST", scoped(space, "/api/saved_objects/_bulk_get"), lookup)
+    if len(found.get("saved_objects", [])) != len(lookup):
+        raise InstallError("Saved-object ownership lookup was incomplete; refusing to overwrite objects.")
+    for obj in found.get("saved_objects", []):
+        if "error" in obj:
+            if obj["error"].get("statusCode") != 404:
+                raise InstallError("Cannot inspect saved object ownership: " + compact(obj["error"]))
+        elif not obj.get("attributes", {}).get("description", "").startswith(DESCRIPTION):
+            raise InstallError("Refusing to overwrite an unowned saved object: " + obj.get("id", "unknown"))
+    response = kibana.request("POST", scoped(space, "/api/saved_objects/_bulk_create?overwrite=true"), objects)
+    results = response.get("saved_objects", [])
+    failures = [obj for obj in results if "error" in obj]
+    if failures or len(results) != len(objects):
+        raise InstallError("Saved-object import was incomplete: " + compact([{"id": obj.get("id"), "error": obj.get("error")} for obj in failures]))
+    return len(results)
+
+
+def write_artifacts(output, objects, rules, report):
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "saved-objects.ndjson").write_text("\n".join(compact(obj) for obj in objects) + "\n", encoding="utf-8")
+    (output / "detection-rules.ndjson").write_text("\n".join(compact(rule) for rule in rules) + "\n", encoding="utf-8")
+    (output / "install-report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    notes = ["# Lane SOC detection inventory", "", "These are behavior hypotheses, not a claim of full ATT&CK coverage. Rules in this export are disabled for deliberate review before manual import. A live installer may create enabled rules after prerequisites pass. Existing rule tuning is preserved on reruns.", ""]
+    for rule in rules:
+        notes += ["## " + rule["name"], "", rule["description"], "", "```kql", rule["query"], "```", "", rule["note"], ""]
+    notes += ["## Elastic 7.17 API references", ""] + ["- " + url for url in SOURCES]
+    (output / "detection-notes.md").write_text("\n".join(notes) + "\n", encoding="utf-8")
+
+
+def parser():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--kibana-url", default="http://127.0.0.1:5601")
+    p.add_argument("--elasticsearch-url", default="http://127.0.0.1:9200")
+    p.add_argument("--space", default="default", help="Existing Kibana space ID (default: default)")
+    p.add_argument("--index", default="winlogbeat-*", help="Windows source index pattern (default: winlogbeat-*)")
+    p.add_argument("--rules", choices=["auto", "off", "enabled", "disabled"], default="auto", help="auto enables new rules if prerequisites pass, preserves existing states; off only exports rules")
+    p.add_argument("--output-dir", default="lane-soc-output")
+    p.add_argument("--ca-cert", help="PEM CA bundle for both services")
+    p.add_argument("--insecure", action="store_true", help="Explicitly disable HTTPS certificate verification")
+    p.add_argument("--export-only", action="store_true", help="Generate review artifacts without network requests; no telemetry or version validation")
+    return p
+
+
+def run(args):
+    if not re.fullmatch(r"[a-zA-Z0-9_*.,-]+", args.index) or any(not part or part.startswith(".") or part in ("*", "_all") for part in args.index.split(",")):
+        raise InstallError("--index must be a scoped Windows index pattern; hidden/system indices and all-index patterns are refused.")
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+", args.space):
+        raise InstallError("--space must be an existing Kibana space ID using letters, digits, underscores or hyphens.")
+    output = Path(args.output_dir).resolve()
+    report = {"bundle": OWNER, "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(), "space": args.space, "index": args.index, "warnings": [], "rules": [], "sources": SOURCES}
+    fields, alert_fields = {}, None
+    status = "**Offline export:** telemetry and Detection Engine readiness have not been checked."
+    ready = False
+    if not args.export_only:
+        es = Client(args.elasticsearch_url, "ELASTICSEARCH", args.ca_cert, args.insecure)
+        kibana = Client(args.kibana_url, "KIBANA", args.ca_cert, args.insecure)
+        es_version = es.request("GET", "/").get("version", {}).get("number")
+        kb_version = kibana.request("GET", "/api/status").get("version", {}).get("number")
+        validate_version("Elasticsearch", es_version)
+        validate_version("Kibana", kb_version)
+        report["versions"] = {"elasticsearch": es_version, "kibana": kb_version}
+        print("Verified Elasticsearch {} and Kibana {}.".format(es_version, kb_version))
+        fields = field_caps(es, args.index)
+        if not fields:
+            report["warnings"].append("No source indices or mapped fields found; dashboard installed but will be empty until Winlogbeat events arrive. Refresh the index pattern's fields in Kibana or rerun the installer afterward.")
+        else:
+            try:
+                report["telemetry"] = telemetry_report(es, args.index, fields)
+                for name, count in report["telemetry"]["coverage"].items():
+                    if not count:
+                        report["warnings"].append("No " + name + " observed in the last 24 hours; verify audit policy and sensor filtering.")
+            except InstallError as exc:
+                report["warnings"].append("Telemetry probe incomplete: " + str(exc))
+        for family, candidates in {"host identity": ["host.name", "winlog.computer_name"], "command line": ["process.command_line", "winlog.event_data.CommandLine"], "source IP": ["source.ip", "winlog.event_data.IpAddress"], "script blocks": ["powershell.file.script_block_text", "winlog.event_data.ScriptBlockText"]}.items():
+            if not any(field in fields for field in candidates):
+                report["warnings"].append("No mapped " + family + " field found.")
+        if args.rules != "off":
+            ready, reason = detection_readiness(es, kibana, args.space, args.index)
+            status = "**Detection status:** " + reason
+        else:
+            status = "**Detection status:** Rule installation disabled with --rules off; this dashboard shows observed event evidence."
+        if not ready and args.rules != "off":
+            report["warnings"].append(status)
+    source_field = field_choice(fields, "source.ip", "winlog.event_data.IpAddress")
+    rules = rule_catalog(args.index, source_field)
+    # Write review material before any remote mutation, including on partial failures.
+    objects = build_objects(args.index, fields, rules, status, space=args.space)
+    report["detection_status"] = status
+    write_artifacts(output, objects, rules, report)
+    if not args.export_only:
+        if ready:
+            try:
+                install_rules(kibana, args.space, rules, args.rules, report["rules"])
+                enabled = sum(r["enabled"] is True for r in report["rules"])
+                status = "**Detection status:** {} rules installed; {} enabled. Check Security → Rules for execution errors. This dashboard's behavior counts are source events; only the alert queue shows Detection Engine alerts.".format(len(report["rules"]), enabled)
+                alert_fields = field_caps(es, ".siem-signals-" + args.space)
+            except InstallError as exc:
+                status = "**Detection status:** Rule installation incomplete. " + str(exc)
+                report["warnings"].append(status)
+                report["partial_failure"] = True
+        objects = build_objects(args.index, fields, rules, status, alert_fields, args.space)
+        report["detection_status"] = status
+        # Persist the state before import so a failed import still leaves reviewable artifacts.
+        write_artifacts(output, objects, rules, report)
+        report["saved_objects_installed"] = install_objects(kibana, args.space, objects)
+        report["dashboard_url"] = kibana.base + scoped(args.space, "/app/dashboards#/view/" + DASHBOARD_ID)
+        print("Installed {} saved objects.".format(report["saved_objects_installed"]))
+        print("Dashboard: " + report["dashboard_url"])
+    report["saved_object_count"] = len(objects)
+    report["rule_count"] = len(rules)
+    write_artifacts(output, objects, rules, report)
+    print(status.replace("**", ""))
+    for warning in report["warnings"]:
+        print("CHECK: " + warning.replace("**", ""))
+    print("Artifacts: " + str(output))
+    if args.rules in ("enabled", "disabled") and not ready and not args.export_only:
+        print("Requested rule installation was unavailable; dashboard/hunts installed, rules exported only.", file=sys.stderr)
+        return 2
+    return 2 if report.get("partial_failure") else 0
+
+
+def main():
+    try:
+        return run(parser().parse_args())
+    except (InstallError, OSError) as exc:
+        print("ERROR: " + str(exc), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

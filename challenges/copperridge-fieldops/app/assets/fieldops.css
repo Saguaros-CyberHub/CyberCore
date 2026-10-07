@@ -1,0 +1,106 @@
+/* ==========================================================================
+   FieldOps intranet stylesheet
+   Copper Ridge Mining & Aggregate
+   Original: 2016 rebrand. Do not restyle without asking Dispatch first --
+   the control room runs this on a 1280x1024 panel and they will notice.
+   ========================================================================== */
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font: 13px/1.55 Tahoma, Verdana, Geneva, sans-serif;
+  background: #eceae6;
+  color: #2b2b2b;
+}
+
+.inner { max-width: 940px; margin: 0 auto; padding: 0 18px;
+         display: flex; justify-content: space-between; align-items: center; }
+
+/* --- masthead --- */
+.topbar {
+  background: #343a3f;
+  background: linear-gradient(#434a50, #2b3034);
+  border-bottom: 3px solid #b45309;
+  color: #fff;
+  padding: 12px 0;
+}
+.brand {
+  font-size: 18px; font-weight: bold; letter-spacing: 2px; text-transform: uppercase;
+}
+.brandsub {
+  font-size: 11px; letter-spacing: 1px; text-transform: uppercase;
+  color: #a9a29a; margin-left: 10px;
+}
+.topnav a { color: #e0b57a; text-decoration: none; font-size: 12px; margin-left: 16px; }
+.topnav a:hover { color: #fff; text-decoration: underline; }
+
+/* --- shift strip --- */
+.strip {
+  background: #dedbd5;
+  border-bottom: 1px solid #c3bdb4;
+  font-size: 11px; color: #5a544c;
+  padding: 5px 0; letter-spacing: .4px;
+}
+
+/* --- layout --- */
+.wrap { max-width: 940px; margin: 22px auto 0; padding: 0 18px; }
+
+/* --- panels: square, bordered, uppercase header strip --- */
+.panel { background: #fff; border: 1px solid #c3bdb4; margin-bottom: 16px; }
+.panel > h2 {
+  background: #3d4348; color: #e8e4de;
+  font-size: 11px; font-weight: bold; text-transform: uppercase; letter-spacing: 1.5px;
+  margin: 0; padding: 7px 12px;
+}
+.panel .body { padding: 14px 16px; }
+.panel p { margin: 0 0 10px; }
+.panel p:last-child { margin-bottom: 0; }
+
+/* --- data grid --- */
+table.grid { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.grid th {
+  background: #e6e3dd; color: #5a544c;
+  font-size: 10px; text-transform: uppercase; letter-spacing: .8px;
+  padding: 6px 8px; border: 1px solid #c3bdb4; text-align: left;
+}
+table.grid td { padding: 6px 8px; border: 1px solid #d8d3cb; vertical-align: top; }
+table.grid tr:nth-child(even) td { background: #f7f5f2; }
+table.grid td a { color: #8a3f07; }
+
+/* --- state colours --- */
+.ok    { color: #1f7a3d; font-weight: bold; }
+.warn  { color: #a8690a; font-weight: bold; }
+.down  { color: #a51c1c; font-weight: bold; }
+.hold  { color: #5b4b9a; font-weight: bold; }
+.muted { color: #7a736a; font-size: 12px; }
+.mono  { font-family: Consolas, 'Courier New', monospace; }
+
+/* --- forms --- */
+label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .6px;
+        color: #5a544c; margin: 12px 0 4px; }
+input[type=text], input[type=password] {
+  width: 100%; padding: 6px 8px; font: 13px Tahoma, Verdana, sans-serif;
+  border: 1px solid #a8a29a; background: #fdfdfc;
+}
+input[type=text]:focus, input[type=password]:focus { outline: 2px solid #b45309; outline-offset: -2px; }
+
+.btn {
+  margin-top: 16px; padding: 7px 18px;
+  background: #b45309; color: #fff; border: 1px solid #8a3f07;
+  font: bold 12px Tahoma, Verdana, sans-serif; text-transform: uppercase; letter-spacing: .8px;
+  cursor: pointer;
+}
+.btn:hover { background: #92400e; }
+
+.msg-ok  { display: block; margin-top: 12px; padding: 7px 10px; font-size: 12px;
+           color: #1f5c33; background: #e8f3ea; border: 1px solid #a9cdb4; }
+.msg-err { display: block; margin-top: 12px; padding: 7px 10px; font-size: 12px;
+           color: #8a1c1c; background: #fbeaea; border: 1px solid #ddaaaa; }
+
+/* --- footer --- */
+.foot {
+  max-width: 940px; margin: 26px auto; padding: 14px 18px 30px;
+  border-top: 1px solid #d3cec6;
+  font-size: 11px; color: #8a837a; line-height: 1.7;
+}

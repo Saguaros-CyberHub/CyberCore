@@ -1,0 +1,13 @@
+node_modules
+.env
+.git
+# Anchor with leading slash so these only exclude the top-level dirs.
+# Without the slash, Docker matches any nested dir of the same name and
+# strips out plugin data/migrations dirs we actually need (e.g.
+# modules/crucible/plugins/ciab/data/frameworks).
+/data/
+/Info/
+/migrations/
+# Offline verification tools, including the GOAD compiler reference, are not runtime code.
+/test/
+*.md
