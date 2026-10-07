@@ -1,0 +1,384 @@
+-- 011_ciab_engagement_model.sql — Track B, phase B0: the engagement MODEL.
+--
+-- 010 gave an engagement a NETWORK: a carved VXLAN block and a provision
+-- status. This file gives it a JOB — what is in scope, what is out, which
+-- techniques are permitted, which accounts the client agreed to hand over,
+-- which host bridges the two segments, and the brief the student reads.
+--
+-- One client, many engagements. "Internal, here are the credentials" and
+-- "External, here is the website" are different pieces of work against the same
+-- company. Until now the only thing distinguishing them was a slug.
+--
+-- ─── WHY THIS FILE CANNOT FAIL ──────────────────────────────────────────────
+--
+-- Every plugin migration re-runs on EVERY boot, and src/plugin-loader.js:134-147
+-- sends each file as ONE pool.query() — the whole file is one implicit
+-- transaction — inside a try/catch whose catch only console.error()s. One
+-- failing statement therefore reverts every OTHER statement in the same file,
+-- boot continues, and nothing surfaces the gap. 008_ciab_enrollment.sql:16-25
+-- documents this at length.
+--
+-- So every statement below is NATIVELY re-runnable: ADD COLUMN IF NOT EXISTS
+-- (the idiom from 002_real_client_intake.sql:37-40 and
+-- 009_engagement_scoped_lanes.sql:18-19) and CREATE INDEX IF NOT EXISTS. There
+-- is nothing here that can raise on boot #2, so a partial application of this
+-- file is structurally impossible.
+--
+-- ─── AND WHY THERE IS NO to_regclass GUARD, UNLIKE 012 AND 013 ──────────────
+--
+-- 012 and 013 open with `IF to_regclass('ciab_engagement') IS NULL THEN RETURN`
+-- and this file does not. That is deliberate, and it is the safer of the two
+-- options here — not an oversight.
+--
+-- A guard is worth having when a file has something to SAVE. 012 and 013 each
+-- add constraints to a table another file created, so a missing table there
+-- would take unrelated statements down with it. This file has nothing to save:
+-- EVERY statement in it — one ALTER TABLE and two CREATE INDEX — names
+-- ciab_engagement and nothing else. If 010 failed and the table is absent, the
+-- ALTER raises 42P01, the runner console.errors it, and the exact set of things
+-- lost is the set of things that could not have been created anyway. The next
+-- boot re-runs 010 and then this file, and both succeed. The failure is loud,
+-- self-healing, and costs nothing.
+--
+-- Adding the guard would cost something. ALTER TABLE ... ADD COLUMN IF NOT
+-- EXISTS cannot be conditionalised without wrapping the file in a DO $$ block,
+-- and that would:
+--   * turn thirteen lines of declarative, natively-idempotent DDL into a
+--     dollar-quoted PL/pgSQL body — the one construct in this directory that
+--     014_ciab_modules.sql:672-674 records as able to terminate early and take
+--     the whole file with it;
+--   * replace a loud 42P01 with a RAISE NOTICE the runner does not log, so a
+--     missing table would become SILENT rather than merely fatal-for-one-boot;
+--   * violate the property that makes this file trustworthy — that it contains
+--     no procedural code at all, asserted directly by
+--     test/ciab-engagement-model.test.js (B0-6, which fails the file for a
+--     `DO $`, an ADD CONSTRAINT, a DROP, an UPDATE or an INSERT).
+--
+-- So the guard stays out, and the reasoning lives here instead. "WHY THIS FILE
+-- CANNOT FAIL" means it cannot fail PARTIALLY, which is the failure mode a
+-- boot-rerun directory has to be designed against; a whole-file no-op on a
+-- database where its only table does not yet exist is not that failure.
+--
+-- The CHECK constraints live in 012_ciab_engagement_guards.sql and
+-- 013_ciab_engagement_secret_guard.sql, for exactly that reason: Postgres has
+-- no ADD CONSTRAINT IF NOT EXISTS, so those files need pg_constraint name
+-- guards and carry residual risk. Splitting means a mistake in a constraint
+-- expression cannot take the columns B1-B6 actually need with it.
+--
+-- ─── NO CHECK ON engagement_type — HERE OR EVER ─────────────────────────────
+--
+-- createEngagement sanitizes a caller's slug and never validates it against a
+-- vocabulary (engagement-provision.js:328), and sanitizeEngagementType
+-- (lane-reservation.js:108-111) DELETES disallowed characters rather than
+-- rejecting: 'External Blackbox' becomes 'externalblackbox' and a slug spelled
+-- as a SQL injection becomes 'droptable--', and both reach the INSERT today
+-- (pinned at test/ciab-reservation.test.js:296-297). A vocabulary CHECK would
+-- turn every off-vocabulary slug into a 23514 surfacing as an unhandled 500.
+--
+-- Worse: 'default' is the ONLY value any production writer emits today
+-- (public/js/admin-profile-lanes.js:411 posts it literally, 009's DEFAULT
+-- backfilled every pre-existing group to it, and lane-reservation.js's
+-- legacy-key fallbacks at :266 and :434 are keyed on it). A CHECK omitting it
+-- would fail validation against live rows and silently revert this file on
+-- every boot.
+--
+-- 009:22-24 and 010:41-43 both say "Track B is what defines a vocabulary".
+-- It defines it in JavaScript — utils/engagement-model.js — as a REGISTRY with
+-- a total fallback, not as an allowlist. The columns that ARE constrained are
+-- perspective and credential_posture (012), because they are authored,
+-- defaulted, and queried, and because every existing row already satisfies
+-- their DEFAULTs.
+--
+-- ─── NEVER A SECRET ─────────────────────────────────────────────────────────
+--
+-- issued_credentials records the ACCOUNT INTENT the client agreed to hand over
+-- — who, on which machine, at what privilege, delivered where.
+--   NEVER a password. NEVER an activation token. NEVER a key.
+-- (Same prohibition, same wording, as 008_ciab_enrollment.sql:159-161.)
+--
+-- This row is scoped to (client, engagement), so anything secret stored here is
+-- by construction the SAME secret for every student — which is already true in
+-- production for ciab_profile_vuln_apps.generation_meta.seed_data, and is a
+-- defect, not a precedent. There is no encryption helper anywhere in this
+-- codebase, and src/utils/lane-credentials.js:21-27 records that there is no
+-- rotation path for a lane credential at all. The real password is minted PER
+-- LANE at deploy time by src/utils/password-generator.js and already lives in
+-- the guest, in cybercore_lane.config, and in Guacamole. A third plaintext copy
+-- here would have no reader that needs it — and it would be tempting to hand to
+-- B3's delivery step, which must be a FILE precisely because the generator
+-- guarantees a punctuation symbol (password-generator.js:13) and script_args is
+-- interpolated UNQUOTED into a command line (script-executor.js:249 for
+-- PowerShell, :624 for sh), where a single ampersand backgrounds it.
+--
+-- utils/engagement-model.js normalizeCredentialSlot builds each entry from a
+-- WHITELIST of known keys and never copies an unrecognised one through, so a
+-- caller passing a password field loses it before the INSERT. 013's CHECK is a
+-- backstop for writers that are not that normalizer (a psql session, a future
+-- import script) — not the guarantee.
+--
+-- ─── CROSS-DB ───────────────────────────────────────────────────────────────
+--
+-- Same wall as 009 and 010: this runs against clinic_db ONLY. Every column
+-- below is a CIAB-owned fact, so none of it needs a boot hook in src/server.js
+-- (the ensureLaneWanColumns / ensureAuditLog / ensureTicketTables pattern), and
+-- none of it may reach crucible_challenge, cybercore_lane, cybercore_lane_flag
+-- or cybercore_lab_readiness. Bridge readiness still does not live here — see
+-- 010's NOTE, and the test that reads 010's raw text to enforce it.
+--
+-- ─── RETIREMENT IS A TIMESTAMP, NOT AN ENUM ─────────────────────────────────
+--
+-- 100.100.60.0/22 gives ONE WAN address per live lane, the VXLAN allocator only
+-- ever climbs and never re-uses, there is no DELETE /engagements route, and
+-- reprovisionEngagement refuses a 'ready' row (engagement-provision.js:386-394).
+-- So every engagement created holds its block until the whole client profile is
+-- deleted. Making engagements first-class multiplies that consumption, and the
+-- state that lets one be handed back has to exist from the start.
+--
+-- It is a NULLABLE TIMESTAMPTZ and not a lifecycle enum on purpose. A
+-- four-value CHECK would need DROP CONSTRAINT the first time a fifth state is
+-- wanted — inside a directory that re-runs every boot as one implicit
+-- transaction. A nullable timestamp can never need constraint surgery. Read it
+-- through engagement-model.isEngagementLive(). Nothing in B0 writes it.
+--
+-- ─── ALSO DELIBERATELY ABSENT ───────────────────────────────────────────────
+--
+--   * No change to provision_status. That column answers "is the VXLAN block
+--     carved" (provisioning|ready|failed). Widening ITS check is the one
+--     genuinely unsafe operation available in a boot-rerun directory.
+--   * No widening of UNIQUE (profile_id, engagement_type).
+--     adoptExistingReservation's ON CONFLICT targets that exact key on the READ
+--     path (engagement-provision.js:141-149, reached from every deploy); a
+--     widened key leaves the ON CONFLICT matching no index and the statement
+--     fails at runtime, inside a deploy, not at migration time.
+--   * Nothing readiness- or bridge-shaped.
+--   * Nothing gateway-shaped. There is no perimeter publish table, no DNAT
+--     list, and no WAN port anywhere in this file. See exposure_plan below.
+
+ALTER TABLE ciab_engagement
+  -- The instructor-facing name. engagement_type is a machine slug the sanitizer
+  -- has already mangled, and the mangling is lossy in exactly the case the
+  -- vocabulary cares about ('External Blackbox' -> 'externalblackbox'), so a
+  -- separate human label is the only way a screen can name an engagement
+  -- without printing the slug. NULL means "use the registry label for this
+  -- type" (engagement-model.engagementDisplayName). Vocabulary is
+  -- Section / Module / Client / Engagement / Environment — never course,
+  -- material, or challenge.
+  ADD COLUMN IF NOT EXISTS display_name       VARCHAR(200),
+
+  -- Which side of the perimeter the engagement is run FROM. Authored, defaulted
+  -- and queried (B1's per-perspective documents filter on it), so a real column
+  -- by house rule (cf. 006 status, 008 source). NOT derived from
+  -- engagement_type at read time: the slug is free-form, and a custom slug must
+  -- still be able to declare its perspective, or the two named engagement types
+  -- are the only ones the product can ever express.
+  --
+  -- Note what this does NOT decide. Both perspectives start the student on the
+  -- same attack box — the per-lane Kali at ext .50 — because nothing is ever
+  -- published past the gateway (see exposure_plan). What 'external' changes is
+  -- what is REACHABLE from the external segment and what the brief names as in
+  -- scope; it does not move where the tester sits, and it does not deploy a
+  -- smaller estate.
+  --
+  -- DEFAULT 'internal' is what every existing row does today.
+  ADD COLUMN IF NOT EXISTS perspective        VARCHAR(16) NOT NULL DEFAULT 'internal',
+
+  -- Whether the client hands over working accounts. Orthogonal to perspective:
+  -- the two named engagements are (internal, credentialed) and (external,
+  -- none), but (external, credentialed) is an authenticated web assessment and
+  -- must remain expressible. Kept separate from "issued_credentials is empty"
+  -- because an empty list meaning "none by design" and one meaning "not
+  -- authored yet" are different facts, and B3 has to tell them apart.
+  ADD COLUMN IF NOT EXISTS credential_posture VARCHAR(16) NOT NULL DEFAULT 'none',
+
+  -- Handed back. NULL means live. See the RETIREMENT note above.
+  ADD COLUMN IF NOT EXISTS retired_at         TIMESTAMPTZ,
+
+  -- This engagement's default deployable set, same shape as
+  -- ciab_profile_lane_groups.asset_selection: [{hostname, role, os, included}].
+  -- EMPTY means "fall back to the server-only default"
+  -- (routes/profile-deploy.js defaultAssetSelection, profile-to-spec isIncluded),
+  -- so every existing row behaves exactly as it does today. It lives here so a
+  -- deliberate per-engagement narrowing becomes a STORED fact rather than a
+  -- request-body opinion — the same divergence that already bit subnet_scheme.
+  --
+  -- SCOPE IS NOT PLACEMENT, AND NEITHER OF THEM IS A DEPLOY LIST. An external
+  -- engagement does NOT deploy fewer machines: it deploys the same estate and
+  -- exposes one of them. Narrowing the estate down to the public surface would
+  -- leave the student a single box with nothing behind it, and "exploit it,
+  -- then pivot to the internal segment" is the entire point of the external
+  -- track. What is in SCOPE lives in scope_in / scope_out; what is REACHABLE
+  -- lives in exposure_plan; what is DEPLOYED lives here — and the compile
+  -- leaves this at the server-only default for EVERY perspective.
+  ADD COLUMN IF NOT EXISTS asset_selection    JSONB NOT NULL DEFAULT '[]'::jsonb,
+
+  -- Scope, as RULES rather than prose, so "only the forward-facing website" is
+  -- machine-checkable against exposure_plan at the day-90 milestone.
+  --   [{kind, value, note}]
+  --   kind 'all'   -> every machine in the environment      (RESOLVABLE)
+  --        'vm'    -> value matches vms[].name or .hostname (RESOLVABLE)
+  --        'role'  -> value matches vms[].role              (RESOLVABLE)
+  --        'cidr' | 'url' | 'hostname_pattern' | 'text'
+  --                -> documentation for the brief and the scan documents.
+  --                   Carried verbatim into the compile's declared_only[] and
+  --                   NEVER used to include or exclude a machine, because a
+  --                   spec VM carries an ipOctet, not an address, and the lane
+  --                   base is per-lane and unknown offline. Saying so is more
+  --                   honest than a half-working match.
+  --
+  -- Two arrays rather than one array with a direction field: "is this in scope"
+  -- is asked far more often than "list every rule", and an empty out-of-scope
+  -- list must be distinguishable from an unauthored one.
+  --
+  -- The kind is EXPLICIT because asset.subnet is heterogeneous in the profile —
+  -- a subnet NAME on LLM-authored servers, a CIDR STRING on assets rebuilt by
+  -- reconcile-workstations — so a rule has to say which join it means rather
+  -- than leaving a resolver to guess.
+  ADD COLUMN IF NOT EXISTS scope_in           JSONB NOT NULL DEFAULT '[]'::jsonb,
+  ADD COLUMN IF NOT EXISTS scope_out          JSONB NOT NULL DEFAULT '[]'::jsonb,
+
+  -- Rules of engagement. [{key, label, allowed, constraint, note}] — one
+  -- ordered list carrying both permissions and prohibitions, because that is
+  -- how it renders in the brief. Per-entry qualifiers go in `constraint`
+  -- ("at most 5 attempts per account per hour"). Nothing joins or filters on
+  -- it. Same shape family as risk_findings.control_refs (004:32).
+  ADD COLUMN IF NOT EXISTS allowed_techniques JSONB NOT NULL DEFAULT '[]'::jsonb,
+
+  -- ACCOUNT INTENTS ONLY — see the NEVER A SECRET note above.
+  --   [{slot_key, username, account_kind, target_vm, privilege, source,
+  --     delivery: {target, vm_name, dir, filename, owner, mode}, note}]
+  -- slot_key is the stable handle the per-lane secret is minted AGAINST at
+  -- deploy time. `delivery` is split into dir + filename so no path is ever
+  -- built by interpolation, and both halves are validated against the character
+  -- class that makes script_args unusable — B3 lands this file with a single
+  -- agentShellExec (the flag-manager.plantLinuxRootFlag pattern), so that path
+  -- goes onto a command line and an unvalidated path is the same defect through
+  -- the back door.
+  -- An external black-box engagement has this array empty by definition.
+  ADD COLUMN IF NOT EXISTS issued_credentials JSONB NOT NULL DEFAULT '[]'::jsonb,
+
+  -- WHERE EACH MACHINE SITS RELATIVE TO THE PERIMETER. Not what is published
+  -- past it — nothing ever is.
+  --   [{vm_name, placement, services, note}]
+  --   placement 'pivot'    -> the dual-homed bridge: one host on BOTH segments
+  --             'public'   -> single-homed on the external segment
+  --             'internal' -> single-homed on the internal segment
+  --
+  -- ─── THE WEBSITE STAYS INSIDE THE LANE ────────────────────────────────────
+  --
+  -- There is no gateway DNAT here, no wan_port, no proto, and no perimeter
+  -- publish step anywhere in Track B. The external exercise happens ENTIRELY
+  -- INSIDE the lane: the student's Kali sits on the external segment at .50 and
+  -- reaches the exposed host as an ordinary L2 neighbour. Nothing on the public
+  -- internet, and nothing on the gateway's WAN interface, is involved — which
+  -- is also why the reserved-port hazard that would have governed a publish
+  -- table (the gateway image bakes wan0:3389 -> ext .50 for the Kali console
+  -- and its reaper deletes any stray rule that appears there) has no subject in
+  -- this schema at all. A column that cannot express a WAN port cannot publish
+  -- a bad one.
+  --
+  -- The mechanism already exists in shared core and needs no gateway change:
+  --   * src/utils/lane-networking.js:379 — on a v3 lane a non-LXC VM whose role
+  --     is 'dmz' resolves to BOTH segments, ['ext','int']. An explicit
+  --     vmSpec.nics array wins over that default (:374-375), which is how a
+  --     'public' or an 'internal' placement is expressed.
+  --   * src/utils/challenge-lane-deployer.js:758-772 pins that host to .240 on
+  --     each segment (:770-771), and says in its own comment that .240 is above
+  --     the gateway's DHCP pool (.10-.200) "so no lease can claim it and no
+  --     gateway re-bake is needed".
+  --   * src/utils/topology-validate.js:26,45 — EXTERNAL_ROLES = {dmz, attacker};
+  --     "role: 'dmz' VMs are deliberately external (the dual-homed vuln
+  --     website)".
+  --
+  -- Because the exposed host is ALSO homed on the internal segment,
+  -- compromising it IS the pivot. That is the whole external storyline, with no
+  -- firewall rule to order and no DNAT to get wrong.
+  --
+  -- ─── EXACTLY ONE PIVOT, AND THAT IS THE PEDAGOGY ──────────────────────────
+  --
+  -- The deployer defines ONE dual-homed address — .240 on each segment — so a
+  -- second 'pivot' entry has nowhere to land. That is a constraint to design
+  -- around, not one to work around. Extra EXPOSED hosts are free: 'public' is
+  -- already the v3 default for an ordinary VM, and standing several of them on
+  -- the external segment is the cheap way to make "which host is the bridge?"
+  -- a real question the student has to answer, instead of a host count of one
+  -- that answers it for them. A pivot that is ALSO named as the student console
+  -- is refused for a different reason: the deployer THROWS on that combination
+  -- (challenge-lane-deployer.js:729-735), because a dual-homed machine builds
+  -- its NICs inline and the console reservation cannot override the .240 pin.
+  --
+  -- Both rules are enforced in JavaScript — engagement-model.validateExposurePlan
+  -- and again in engagement-plan.compileEngagementPlan — and NOT here. Counting
+  -- the elements of a JSONB array that match a predicate needs
+  -- jsonb_array_elements, which is set-returning, and a CHECK constraint may not
+  -- contain a subquery. An expression that pretended to count would be wrong
+  -- rather than merely absent, so 012 constrains this column's SHAPE only.
+  ADD COLUMN IF NOT EXISTS exposure_plan      JSONB NOT NULL DEFAULT '[]'::jsonb,
+
+  -- Objective DEFINITIONS. Achievement is NOT stored here.
+  --   [{objective_key, title, points, maps_to}]
+  --   maps_to: {kind:'flag', vm_name, flag_type:'user'|'root'} | {kind:'manual'}
+  -- (vm_name, flag_type) is EXACTLY cybercore_lane_flag's unit — its UNIQUE is
+  -- (lane_id, vm_name, flag_type) and it already carries an unused `points`
+  -- column (migrations/023_lane_flags.sql:29-40). Per-engagement scoring is a
+  -- VIEW over that table, resolved lane-side through
+  --   ciab_engagement (profile_id, engagement_type)
+  --     -> ciab_profile_lane_groups (009 added the column) -> its id
+  --     -> cybercore_lane.config->>'group_id' -> cybercore_lane_flag.lane_id
+  -- which is a chain that is complete TODAY. This platform already has three
+  -- progress trackers (cybercore_lane_flag, assessment_progress,
+  -- nice_progress). Do not add a fourth, and do not add a table.
+  ADD COLUMN IF NOT EXISTS objectives         JSONB NOT NULL DEFAULT '[]'::jsonb,
+
+  -- The engagement brief, as prose. One free-text body rendered as written —
+  -- TEXT like every other long-prose column in this schema (006:76-78
+  -- dockerfile/install_script, 007:191-200 exec_current_posture, 002:18
+  -- raw_preview). Wrapping one string in JSONB buys nothing and makes it
+  -- awkward to render. NULL means unauthored; the compile emits a deterministic
+  -- suggested brief without writing it here.
+  ADD COLUMN IF NOT EXISTS brief              TEXT,
+
+  -- Which of the authorable fields a human has edited: a JSON array of column
+  -- names drawn from engagement-model.AUTHORABLE_FIELDS. A later "refresh from
+  -- the client file" action fills everything NOT listed here and leaves
+  -- everything that is.
+  --
+  -- This is the one column that CANNOT be added later: once instructors have
+  -- edited scope and a refresh action exists, which fields were authored is
+  -- unrecoverable retroactively. One ADD COLUMN now, or a permanent clobbering
+  -- bug. One column instead of a *_source flag per field.
+  ADD COLUMN IF NOT EXISTS authored_fields    JSONB NOT NULL DEFAULT '[]'::jsonb,
+
+  -- What the last pure compile saw, and what it could not derive.
+  --   { source, compile_version, synthesized_at, subnet_scheme,
+  --     perspective, credential_posture, spec_fingerprint,
+  --     problems: [{code, severity, message, ref}] }
+  -- `problems` is the same honesty channel as service_gaps / template_misses on
+  -- the group row. An AI profile carries NO services array on its assets, no
+  -- accounts of any kind, and no structured public surface, so a compiler that
+  -- pretended otherwise would be inventing. spec_fingerprint lets B2 and Track
+  -- C tell a stale proposal from a current one.
+  ADD COLUMN IF NOT EXISTS synthesis_meta     JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+  -- Who last edited the model (cybercore_user.user_id — cross-DB, no FK, same
+  -- pattern as created_by in 010).
+  ADD COLUMN IF NOT EXISTS updated_by         UUID;
+
+-- Every new column takes a DEFAULT that is a VALID EMPTY ENGAGEMENT. This is
+-- load-bearing: adoptExistingReservation (engagement-provision.js:141-149)
+-- INSERTs rows on the READ path with a fixed 8-column list and will never
+-- supply any of these, so every pre-A8 profile adopted from here on gets these
+-- defaults. A NOT NULL column with no default would break that INSERT inside a
+-- deploy rather than inside a create.
+--
+-- No UPDATE, no backfill, no ciab_meta marker row (the 008:182-286 idiom): the
+-- DEFAULTs backfill every existing row, exactly as 009:21-24 describes.
+
+-- "Which engagements still hold a block?" — the capacity question. Partial,
+-- mirroring 010's idx_ciab_engagement_status.
+CREATE INDEX IF NOT EXISTS idx_ciab_engagement_live
+  ON ciab_engagement(profile_id, engagement_type)
+  WHERE retired_at IS NULL;
+
+-- B1 lists a client's engagements by perspective.
+CREATE INDEX IF NOT EXISTS idx_ciab_engagement_perspective
+  ON ciab_engagement(profile_id, perspective);

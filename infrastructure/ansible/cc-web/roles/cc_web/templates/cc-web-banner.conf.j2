@@ -1,0 +1,11 @@
+{#
+  cc_web — server-scope banner settings.
+  MANAGED BY ANSIBLE. Local edits are overwritten on the next run.
+
+  ServerTokens decides how much of the real version reaches the Server response
+  header, which is what `nmap -sV` fingerprints and what the generated scan
+  report prints. It is server-scope: httpd refuses it inside <VirtualHost>.
+#}
+# THIS FILE IS MANAGED BY THE cc_web ANSIBLE ROLE. DO NOT EDIT ON THE HOST.
+ServerTokens {{ cc_web_server_tokens }}
+ServerSignature {{ cc_web_server_signature }}

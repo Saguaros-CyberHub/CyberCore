@@ -1,0 +1,810 @@
+{
+  "name": "Threat Scenario Library v1",
+  "description": "Canonical starter scenarios students instantiate into per-profile risk findings. Aligned to CIS Controls v8 IG1 + NIST CSF 2.0 + NIST 800-30 threat source taxonomy.",
+  "scenarios": [
+    {
+      "key": "ransomware-via-phishing",
+      "title": "Ransomware deployed via phishing email",
+      "category": "technical",
+      "threat_source": "adversarial",
+      "description": "An employee receives a phishing email with a malicious attachment or link. Opening the payload installs a ransomware loader. Without MFA on the workstation login, the attacker pivots to a domain controller within hours and encrypts file shares, backups, and production systems. Modern ransomware playbooks (Akira, LockBit, BlackBasta) explicitly target backup infrastructure before triggering encryption.",
+      "recommendation_template": "Defense-in-depth: (1) email security gateway with sandboxing; (2) EDR with behavioral detection on every endpoint; (3) MFA on all accounts (CIS 6.3); (4) network segmentation between user and server VLANs (CIS 12.1); (5) immutable offsite backups with tested quarterly restore (CIS 11.2, 11.3, 11.4); (6) documented IR plan with retainer cyber-insurance carrier (CIS 17.1).",
+      "default_likelihood": 4,
+      "default_impact": 5,
+      "default_residual_likelihood": 2,
+      "default_residual_impact": 4,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "10.1" },
+        { "framework": "CIS_IG1", "id": "11.2" },
+        { "framework": "NIST_CSF", "id": "PR.AA-03" },
+        { "framework": "NIST_CSF", "id": "RC.RP-01" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["ransomware", "email", "endpoint", "backup"]
+    },
+    {
+      "key": "business-email-compromise-wire",
+      "title": "Business Email Compromise (BEC) wire-transfer fraud",
+      "category": "people",
+      "threat_source": "adversarial",
+      "description": "An attacker compromises a finance or executive email account via credential phishing, then monitors inbound vendor invoices for several weeks before injecting a forged 'banking details have changed' email at the right moment. Wire transfers ranging from $50K to $2M leave the company before anyone notices. FBI IC3 data shows BEC is the single largest source of cyber-fraud loss in the SMB segment.",
+      "recommendation_template": "(1) Enforce MFA on all email accounts including service accounts (CIS 6.3); (2) implement a documented out-of-band verification policy for any banking-detail change (call the known number on file, not the number in the email); (3) configure DMARC at p=reject + DKIM + SPF; (4) deploy email-impersonation detection in the security gateway; (5) train finance staff with monthly BEC-specific simulated-phishing scenarios.",
+      "default_likelihood": 4,
+      "default_impact": 5,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 5,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "6.3" },
+        { "framework": "CIS_IG1", "id": "9.1" },
+        { "framework": "CIS_IG1", "id": "14.2" },
+        { "framework": "NIST_CSF", "id": "PR.AT-01" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["email", "fraud", "training"]
+    },
+    {
+      "key": "stolen-laptop-cached-creds",
+      "title": "Lost or stolen laptop with cached domain credentials",
+      "category": "physical",
+      "threat_source": "adversarial",
+      "description": "An employee laptop is stolen from a car, hotel, or airport. Without full-disk encryption, the drive can be removed and mounted on attacker hardware to extract cached AD credentials, browser-saved passwords, and any local files. A 2023 Verizon DBIR analysis attributes ~17% of small-business breaches to physical asset loss.",
+      "recommendation_template": "(1) Enforce full-disk encryption (BitLocker / FileVault) on every laptop via MDM, with recovery keys escrowed centrally (CIS 3.6); (2) require strong screen-lock policy (5 min idle, complex PIN); (3) deploy MDM with remote-wipe capability; (4) move credentials out of cached storage (use cloud identity provider with short-lived tokens).",
+      "default_likelihood": 3,
+      "default_impact": 4,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 2,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "3.6" },
+        { "framework": "CIS_IG1", "id": "4.3" },
+        { "framework": "NIST_CSF", "id": "PR.DS-01" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["endpoint", "physical", "encryption"]
+    },
+    {
+      "key": "insider-data-theft-departing",
+      "title": "Departing employee exfiltrates customer / IP data",
+      "category": "people",
+      "threat_source": "adversarial",
+      "description": "An employee resigns to join a competitor. Before their last day, they download the customer database, sales pipeline, and proprietary methodology documents to a personal cloud drive or USB. Without DLP, the only evidence is the future lawsuit. SMB segment data shows ~5% of employees admit to taking 'work product' to a new job.",
+      "recommendation_template": "(1) Deploy email + endpoint DLP rules that detect bulk exports of CRM/financial/IP data (CIS 3.1-3.3); (2) revoke access within 24h of resignation notice (CIS 6.2); (3) require signed IP-assignment + non-disclosure on exit; (4) periodic audit of personal-cloud-storage usage on managed endpoints; (5) require return of any personal devices used for work.",
+      "default_likelihood": 2,
+      "default_impact": 4,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 3,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "3.1" },
+        { "framework": "CIS_IG1", "id": "6.2" },
+        { "framework": "NIST_CSF", "id": "PR.DS-05" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["insider", "dlp", "offboarding"]
+    },
+    {
+      "key": "msp-supply-chain-breach",
+      "title": "Managed Service Provider (MSP) compromise grants lateral access",
+      "category": "process",
+      "threat_source": "adversarial",
+      "description": "The MSP that manages the company's networking and helpdesk is breached. The attacker uses the MSP's privileged remote-access tools (ConnectWise, Kaseya, N-able) to pivot into every MSP client simultaneously. The 2021 Kaseya VSA attack and 2020 SolarWinds supply-chain breach demonstrated this is a leading SMB compromise vector.",
+      "recommendation_template": "(1) Require MSP to provide SOC 2 Type II report annually (CIS 15.1); (2) limit MSP access to specific named accounts with MFA enforced; (3) network-segment MSP access into a jump host with full session recording; (4) require MSP to notify within 4h of any internal security incident affecting their environment; (5) maintain an alternate MSP relationship so termination is feasible.",
+      "default_likelihood": 2,
+      "default_impact": 5,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 4,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "15.1" },
+        { "framework": "CIS_IG1", "id": "6.5" },
+        { "framework": "NIST_CSF", "id": "GV.SC-04" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket"],
+      "tags": ["vendor", "msp", "supply-chain"]
+    },
+    {
+      "key": "rdp-brute-force",
+      "title": "Internet-exposed RDP brute-forced into ransomware deployment",
+      "category": "technical",
+      "threat_source": "adversarial",
+      "description": "Remote Desktop is exposed to the internet (port 3389 open, or via a poorly configured VPN gateway). Automated scanning identifies the service within hours; password-spray attacks discover weak or reused credentials within days. Once in, the attacker deploys ransomware or installs persistence. Microsoft data shows internet-exposed RDP is implicated in ~30% of ransomware incidents.",
+      "recommendation_template": "(1) Remove RDP from internet exposure — never directly accessible (CIS 12.1); (2) require RDP only through VPN with MFA (CIS 6.4); (3) implement account lockout after 5 failed attempts; (4) monitor Event ID 4625 spikes in SIEM (CIS 8.2); (5) consider Remote Desktop Gateway with Network Level Authentication.",
+      "default_likelihood": 4,
+      "default_impact": 5,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 5,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "4.4" },
+        { "framework": "CIS_IG1", "id": "6.4" },
+        { "framework": "NIST_CSF", "id": "PR.AC-03" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket"],
+      "tags": ["network", "remote-access", "credential"]
+    },
+    {
+      "key": "misconfigured-cloud-storage",
+      "title": "Misconfigured cloud storage exposes sensitive data publicly",
+      "category": "technical",
+      "threat_source": "accidental",
+      "description": "A developer or admin creates an S3 bucket, Azure Blob container, or Google Cloud Storage bucket with 'public read' permissions to make a one-time file share easier. The bucket accumulates sensitive data over months: customer PII, backups, configuration files with embedded credentials. Search engines and security researchers index the bucket; data appears for sale on criminal markets within weeks.",
+      "recommendation_template": "(1) Enforce 'block public access' at the AWS/Azure/GCP organization level; (2) deploy CSPM tooling (CloudSploit, Prowler) to scan for public-access misconfigurations weekly; (3) require code review on any infrastructure-as-code change that touches storage permissions; (4) annual cloud-architecture review with named security owner.",
+      "default_likelihood": 3,
+      "default_impact": 4,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 3,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "3.3" },
+        { "framework": "CIS_IG1", "id": "4.1" },
+        { "framework": "NIST_CSF", "id": "PR.DS-01" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["cloud", "data-exposure", "misconfiguration"]
+    },
+    {
+      "key": "unpatched-vpn-vulnerability",
+      "title": "Unpatched VPN appliance exploited for initial access",
+      "category": "technical",
+      "threat_source": "adversarial",
+      "description": "The company's VPN appliance (Fortinet FortiGate, Pulse Secure, Citrix ADC, Cisco ASA) has a publicly disclosed CVE that hasn't been patched within the vendor's recommended window. Mass-exploitation campaigns (often by ransomware affiliates) scan the internet for vulnerable instances. Once exploited, the attacker has authenticated network access without ever touching a user account.",
+      "recommendation_template": "(1) Subscribe to vendor security advisories for every internet-facing appliance and patch within 14 days of disclosure (CIS 7.3); (2) maintain an inventory of every device with management interface accessibility (CIS 1.1); (3) restrict management plane access to specific source IPs; (4) deploy a vulnerability scanner that covers network appliances, not just endpoints.",
+      "default_likelihood": 3,
+      "default_impact": 5,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 5,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "7.3" },
+        { "framework": "CIS_IG1", "id": "12.1" },
+        { "framework": "NIST_CSF", "id": "PR.PS-02" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["network", "patching", "vpn"]
+    },
+    {
+      "key": "shadow-it-data-leakage",
+      "title": "Shadow IT SaaS app stores sensitive data outside policy",
+      "category": "process",
+      "threat_source": "accidental",
+      "description": "Sales / marketing / operations teams sign up for SaaS tools (Notion, Airtable, Trello, ChatGPT) without IT approval and upload customer data, contracts, or strategic plans. The tool sits outside any data-classification policy, has no backup, no audit log, and frequently lacks SOC 2 attestation. When the credit card lapses or the employee leaves, the data is lost or exposed.",
+      "recommendation_template": "(1) Deploy a CASB or DNS-filtering solution to enumerate shadow-IT SaaS usage (CIS 9.2); (2) publish an approved-SaaS catalog with a fast-track approval workflow; (3) require finance approval for any recurring SaaS charge regardless of dollar amount; (4) annual review of SaaS inventory with each department head.",
+      "default_likelihood": 4,
+      "default_impact": 3,
+      "default_residual_likelihood": 2,
+      "default_residual_impact": 2,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "2.1" },
+        { "framework": "CIS_IG1", "id": "9.2" },
+        { "framework": "NIST_CSF", "id": "ID.AM-02" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket"],
+      "tags": ["shadow-it", "saas", "dlp"]
+    },
+    {
+      "key": "no-backup-restoration-test",
+      "title": "Backups have never been restoration-tested",
+      "category": "process",
+      "threat_source": "structural",
+      "description": "Backups are configured and appear to run successfully every night. No one has ever attempted a full restoration. Industry data shows ~25% of production backups silently fail in a way that's only detected during an actual incident — at which point recovery time stretches from hours to weeks or fails entirely.",
+      "recommendation_template": "(1) Establish a quarterly restore-test program: pick one non-critical workload, restore to an isolated VLAN, validate application function (CIS 11.4); (2) document the test results in the IR runbook; (3) at minimum once per year perform a full end-to-end disaster recovery exercise; (4) report restore-test success rate to leadership monthly.",
+      "default_likelihood": 5,
+      "default_impact": 4,
+      "default_residual_likelihood": 2,
+      "default_residual_impact": 4,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "11.4" },
+        { "framework": "NIST_CSF", "id": "RC.RP-01" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["backup", "recovery"]
+    },
+    {
+      "key": "no-incident-response-plan",
+      "title": "No documented incident response plan or call tree",
+      "category": "process",
+      "threat_source": "structural",
+      "description": "When (not if) an incident occurs, the first four hours of response — when most cost is incurred — will be spent locating people, deciding who has authority to engage law enforcement / cyber insurance / external IR firms, and reading other organizations' IR plan templates. Without preparation, average response cost is 2-3x higher and regulatory notification deadlines are frequently missed.",
+      "recommendation_template": "(1) Draft a 10-page IR plan covering top scenarios (ransomware, BEC, data theft, insider) using SANS or NIST templates (CIS 17.1); (2) populate the call tree with named individuals + backups + after-hours contact info; (3) pre-engage a retainer-based IR firm and cyber-insurance carrier (CIS 17.2); (4) run one tabletop exercise per quarter for the leadership team.",
+      "default_likelihood": 5,
+      "default_impact": 4,
+      "default_residual_likelihood": 2,
+      "default_residual_impact": 3,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "17.1" },
+        { "framework": "CIS_IG1", "id": "17.2" },
+        { "framework": "NIST_CSF", "id": "RS.MA-01" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["governance", "incident-response"]
+    },
+    {
+      "key": "no-mfa-on-admin-accounts",
+      "title": "Domain admin or root accounts without MFA",
+      "category": "people",
+      "threat_source": "adversarial",
+      "description": "Administrator accounts authenticate with passwords only. A successful credential phish, password reuse from a breach, or password-spray attack yields complete domain compromise. Modern attack frameworks (Cobalt Strike, Mythic) automate the lateral-movement path from any compromised user to domain admin in under 4 hours on a network without MFA.",
+      "recommendation_template": "(1) Enforce MFA on every administrative account immediately (CIS 6.5); (2) issue hardware security keys to all admins (FIDO2 / YubiKey); (3) require admin tasks be performed only from dedicated admin workstations (PAWs); (4) implement Just-in-Time admin elevation with audit trail.",
+      "default_likelihood": 4,
+      "default_impact": 5,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 5,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "6.5" },
+        { "framework": "CIS_IG1", "id": "5.4" },
+        { "framework": "NIST_CSF", "id": "PR.AA-03" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["identity", "mfa", "admin"]
+    },
+    {
+      "key": "flat-network-no-segmentation",
+      "title": "Flat network — no segmentation between user, server, and guest",
+      "category": "technical",
+      "threat_source": "structural",
+      "description": "All workstations, servers, IoT devices, and guest WiFi share a single broadcast domain or VLAN. A compromised workstation has direct east-west access to file shares, the domain controller, and management interfaces. Modern ransomware playbooks complete encryption in under 4 hours on a flat network; segmentation is the single most effective lateral-movement disruptor.",
+      "recommendation_template": "(1) Establish minimum three trust zones: User (workstations + printers), Server (DC, file, app, sql), Guest (BYOD + visitor WiFi) (CIS 12.1); (2) implement at existing firewall/L3 switch with default-deny between zones; (3) document firewall rules with named ownership and review quarterly; (4) consider micro-segmentation for the server tier.",
+      "default_likelihood": 4,
+      "default_impact": 4,
+      "default_residual_likelihood": 2,
+      "default_residual_impact": 3,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "12.1" },
+        { "framework": "CIS_IG1", "id": "13.1" },
+        { "framework": "NIST_CSF", "id": "PR.IR-01" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket"],
+      "tags": ["network", "segmentation"]
+    },
+    {
+      "key": "byod-malware-infection",
+      "title": "BYOD device introduces malware to corporate network",
+      "category": "technical",
+      "threat_source": "accidental",
+      "description": "An employee connects a personal laptop to the corporate WiFi to print or transfer files. The personal device has no EDR, no enforced patching, and may already be compromised. Once on the same network as corporate assets, the malware scans and propagates. Without network segmentation, BYOD becomes a constant low-grade infection vector.",
+      "recommendation_template": "(1) Isolate BYOD traffic to a guest VLAN with no access to corporate resources (CIS 12.1); (2) require corporate-issued devices for any access to corporate data; (3) deploy MDM enrollment as a precondition for BYOD WiFi access; (4) network access control (NAC) with posture assessment.",
+      "default_likelihood": 3,
+      "default_impact": 3,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 2,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "1.2" },
+        { "framework": "CIS_IG1", "id": "12.1" },
+        { "framework": "NIST_CSF", "id": "PR.IR-01" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket"],
+      "tags": ["network", "byod", "endpoint"]
+    },
+    {
+      "key": "no-security-awareness-training",
+      "title": "No formal security awareness training program",
+      "category": "people",
+      "threat_source": "structural",
+      "description": "New hires receive no documented security training. Existing staff have no annual refresher, no simulated-phishing program, no recorded acknowledgment of acceptable-use policies. Verizon DBIR data shows ~75% of SMB breaches start with social engineering — staff training is the cheapest, highest-leverage control available.",
+      "recommendation_template": "(1) License a training platform (KnowBe4, Hoxhunt, Curricula) at $20-35 per user per year; (2) deliver a 30-min onboarding module to all current staff; (3) launch monthly simulated-phishing campaign with click-rate tracking (CIS 14.2); (4) require annual recertification with HR-tracked completion (CIS 14.1).",
+      "default_likelihood": 4,
+      "default_impact": 3,
+      "default_residual_likelihood": 2,
+      "default_residual_impact": 3,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "14.1" },
+        { "framework": "CIS_IG1", "id": "14.2" },
+        { "framework": "NIST_CSF", "id": "PR.AT-01" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["training", "people"]
+    },
+    {
+      "key": "no-centralized-logging",
+      "title": "No SIEM / no centralized log management",
+      "category": "technical",
+      "threat_source": "structural",
+      "description": "Firewall, AD, EDR, and SaaS logs each live in their own vendor portal with their own retention policy. Detection requires manually pivoting across consoles — slow and error-prone. Cross-source correlation (e.g. 'unusual VPN login + unfamiliar workstation + privilege escalation') cannot be performed. Incident timeline reconstruction during IR takes days instead of hours.",
+      "recommendation_template": "(1) Stand up centralized log aggregation within 90 days — free tiers available (Wazuh, Microsoft Sentinel 3GB/day free, Datadog 5GB/day free) (CIS 8.1-8.3); (2) prioritize ingesting: AD auth+admin events, firewall block events, EDR detections, M365/Workspace audit log; (3) define at least 5 alert use-cases with named responders.",
+      "default_likelihood": 4,
+      "default_impact": 3,
+      "default_residual_likelihood": 2,
+      "default_residual_impact": 2,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "8.1" },
+        { "framework": "CIS_IG1", "id": "8.2" },
+        { "framework": "NIST_CSF", "id": "DE.AE-03" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket"],
+      "tags": ["logging", "detection", "siem"]
+    },
+    {
+      "key": "expired-tls-certificate",
+      "title": "TLS certificate expires, breaking customer-facing service",
+      "category": "technical",
+      "threat_source": "structural",
+      "description": "A TLS / SSL certificate on a customer-facing portal, API gateway, or VPN endpoint expires. Browsers show certificate warnings; mobile apps and API integrations fail outright. Without certificate inventory or automation, the outage continues for hours until someone notices and manually renews. Repeated incidents erode customer trust.",
+      "recommendation_template": "(1) Maintain a certificate inventory with expiration dates and named owners; (2) automate renewal via ACME / Let's Encrypt / managed-cert services wherever possible; (3) configure expiration alerts at 60/30/14 days; (4) include certificate validation in change-management deployment checks.",
+      "default_likelihood": 3,
+      "default_impact": 2,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 2,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "1.1" },
+        { "framework": "NIST_CSF", "id": "ID.AM-02" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["operations", "tls", "availability"]
+    },
+    {
+      "key": "weak-password-policy",
+      "title": "Weak password policy allows credential reuse and brute-force",
+      "category": "people",
+      "threat_source": "adversarial",
+      "description": "The current password policy requires 8 characters with complexity but no length minimum, no breach-database checking, and no enforcement against passwords known to be in major credential dumps. Employees reuse passwords across personal and corporate accounts. When a personal account is breached, the same password unlocks the corporate VPN.",
+      "recommendation_template": "(1) Move to passphrase-based policy: minimum 14 characters, no complexity requirement (CIS 5.2); (2) check passwords against Have I Been Pwned breach corpus at change time; (3) deploy enterprise password manager to all employees ($3-5/user/month); (4) disable password expiration (NIST 800-63B guidance — change only on compromise).",
+      "default_likelihood": 4,
+      "default_impact": 3,
+      "default_residual_likelihood": 2,
+      "default_residual_impact": 3,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "5.2" },
+        { "framework": "NIST_CSF", "id": "PR.AA-01" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["identity", "passwords"]
+    },
+    {
+      "key": "dormant-account-not-disabled",
+      "title": "Dormant accounts retain access months after employee departure",
+      "category": "process",
+      "threat_source": "structural",
+      "description": "Former employee accounts remain active in AD, M365, and SaaS apps weeks or months after departure. Even when the AD account is disabled, the M365 mailbox + SaaS app integrations continue to work via stored OAuth tokens. A disgruntled former employee, or anyone who acquires those credentials, retains access.",
+      "recommendation_template": "(1) Document offboarding process with named owner and required steps (HR / IT / each SaaS app) (CIS 6.2); (2) integrate HRIS with IdP to auto-disable on termination event; (3) quarterly audit of last-login dates across all systems; (4) require revocation of OAuth tokens + email forwards within 24h.",
+      "default_likelihood": 3,
+      "default_impact": 3,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 3,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "5.3" },
+        { "framework": "CIS_IG1", "id": "6.2" },
+        { "framework": "NIST_CSF", "id": "PR.AA-01" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["identity", "offboarding"]
+    },
+    {
+      "key": "unpatched-endpoints",
+      "title": "Endpoint patch compliance below 85%",
+      "category": "technical",
+      "threat_source": "structural",
+      "description": "Patching is configured but compliance hovers in the 60-80% range, leaving 20-40% of endpoints with known exploitable vulnerabilities. Modern attack tooling exploits disclosed CVEs within 24-72 hours of public disclosure; sustained sub-90% compliance puts the organization consistently behind the curve on critical patches.",
+      "recommendation_template": "(1) Inventory all endpoints to find the out-of-band machines; (2) institute a weekly patch window with explicit waiver process; (3) public dashboard with patch-compliance % reviewed weekly by IT lead; (4) escalate any waiver-pending endpoint to management at the 14-day mark (CIS 7.3).",
+      "default_likelihood": 4,
+      "default_impact": 4,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 4,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "7.1" },
+        { "framework": "CIS_IG1", "id": "7.3" },
+        { "framework": "NIST_CSF", "id": "PR.PS-02" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["patching", "endpoint"]
+    },
+    {
+      "key": "vendor-no-soc2",
+      "title": "Critical vendor lacks SOC 2 attestation or risk assessment",
+      "category": "process",
+      "threat_source": "structural",
+      "description": "A vendor with significant access to company data or systems (MSP, payroll provider, CRM, hosting provider) has never been formally risk-assessed. They may have weak security posture, lack incident-notification commitments, or store data in jurisdictions with weak data-protection law. Third-party / supply-chain compromise is the leading vector for SMB breaches per Verizon DBIR.",
+      "recommendation_template": "(1) Obtain vendor's most recent SOC 2 Type II report (or equivalent: ISO 27001, HITRUST, FedRAMP) (CIS 15.1); (2) review their MFA, encryption, IR posture; (3) require contractual notification within 72h of any security incident affecting the company's data; (4) annual review cadence with documented sign-off.",
+      "default_likelihood": 3,
+      "default_impact": 4,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 4,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "15.1" },
+        { "framework": "NIST_CSF", "id": "GV.SC-04" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["vendor", "compliance"]
+    },
+    {
+      "key": "no-dlp-on-email",
+      "title": "No data loss prevention (DLP) on outbound email",
+      "category": "technical",
+      "threat_source": "accidental",
+      "description": "No technical control prevents sensitive data (customer PII, financial records, intellectual property) from being attached to outbound email, copied to removable media, or uploaded to unauthorized cloud services. Both intentional exfiltration (insider threat) and accidental disclosure (autocomplete-to-wrong-recipient) are possible with no visibility or block.",
+      "recommendation_template": "(1) Enable Microsoft Purview / Google DLP default templates in audit-only mode for 30 days to baseline normal traffic (CIS 3.1); (2) convert top 3 violating rules from audit to block; (3) extend to endpoint DLP (USB exfil blocking) via existing EDR; (4) train end-users on DLP popup remediation.",
+      "default_likelihood": 3,
+      "default_impact": 4,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 3,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "3.1" },
+        { "framework": "CIS_IG1", "id": "3.2" },
+        { "framework": "NIST_CSF", "id": "PR.DS-05" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["MidMarket", "Enterprise"],
+      "tags": ["dlp", "email", "data"]
+    },
+    {
+      "key": "physical-server-room-unsecured",
+      "title": "Server room / IT closet has no physical access control",
+      "category": "physical",
+      "threat_source": "adversarial",
+      "description": "The server room or main IT closet has a standard door lock — no badge access, no visitor log, no security camera. Anyone in the office (cleaning staff, contractors, departing employees) can physically access servers, network equipment, backup media. A bad actor with brief unsupervised access can install hardware keystroke loggers, swap drives, or rip out cables.",
+      "recommendation_template": "(1) Install badge-access control on all server rooms and IT closets; (2) deploy a security camera covering the door; (3) maintain a visitor log signed by an escort; (4) review badge access quarterly and revoke unnecessary access; (5) lock individual server cabinets where feasible.",
+      "default_likelihood": 2,
+      "default_impact": 4,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 4,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "1.1" },
+        { "framework": "NIST_CSF", "id": "PR.AA-06" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket"],
+      "tags": ["physical"]
+    },
+    {
+      "key": "no-disaster-recovery-plan",
+      "title": "No disaster recovery plan beyond 'restore from backup'",
+      "category": "process",
+      "threat_source": "environmental",
+      "description": "The IT lead's DR plan is 'restore from backup.' There is no defined recovery time objective (RTO), no recovery point objective (RPO), no documented order of system restoration, no consideration of dependencies (must restore AD before file servers, must restore database before application), and no alternate-site planning if the primary datacenter is unavailable.",
+      "recommendation_template": "(1) Define RTO + RPO per critical workload with business-owner sign-off; (2) document a system restoration order with dependencies (CIS 11.1); (3) maintain a tested DR runbook with named on-call responders; (4) annual DR exercise simulating primary-site loss; (5) cloud-replica or warm-standby for tier-1 systems.",
+      "default_likelihood": 3,
+      "default_impact": 4,
+      "default_residual_likelihood": 2,
+      "default_residual_impact": 3,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "11.1" },
+        { "framework": "NIST_CSF", "id": "RC.RP-01" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["MidMarket", "Enterprise"],
+      "tags": ["recovery", "governance"]
+    },
+    {
+      "key": "no-mobile-device-management",
+      "title": "No MDM on company-issued mobile devices",
+      "category": "technical",
+      "threat_source": "structural",
+      "description": "Company phones and tablets are issued with no MDM enrollment. There is no remote-wipe capability if the device is lost or stolen, no enforcement of PIN/biometric lock, no separation of corporate and personal data, no centralized patch tracking. A lost executive phone with cached email and SaaS sessions is essentially a credential bundle for the attacker.",
+      "recommendation_template": "(1) Deploy MDM (Microsoft Intune, Jamf, JumpCloud) on all company mobile devices (CIS 1.1); (2) enforce minimum 6-digit PIN with biometric, auto-lock 2 min, encryption mandatory; (3) configure remote wipe with central admin authority; (4) corporate data containers separate from personal apps.",
+      "default_likelihood": 3,
+      "default_impact": 3,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 2,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "1.1" },
+        { "framework": "CIS_IG1", "id": "3.6" },
+        { "framework": "NIST_CSF", "id": "PR.DS-01" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["mobile", "mdm"]
+    },
+    {
+      "key": "legacy-os-end-of-life",
+      "title": "Production systems running end-of-life operating systems",
+      "category": "technical",
+      "threat_source": "structural",
+      "description": "One or more servers or specialized workstations run an operating system past its vendor support date (Windows Server 2012, Windows 7, CentOS 7). No security patches are being issued; any newly disclosed vulnerability remains exploitable indefinitely. These systems are typically running because of a legacy line-of-business application that hasn't been modernized.",
+      "recommendation_template": "(1) Inventory all systems on EOL operating systems (CIS 2.2); (2) for each, document business justification and 12-month migration plan; (3) interim compensating controls: network isolation, restricted access, enhanced monitoring; (4) consider Microsoft Extended Security Updates or equivalent paid support as a bridge.",
+      "default_likelihood": 4,
+      "default_impact": 4,
+      "default_residual_likelihood": 2,
+      "default_residual_impact": 4,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "2.2" },
+        { "framework": "NIST_CSF", "id": "PR.PS-02" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket"],
+      "tags": ["legacy", "patching"]
+    },
+    {
+      "key": "no-email-security-spf-dkim-dmarc",
+      "title": "Email authentication (SPF/DKIM/DMARC) not configured",
+      "category": "technical",
+      "threat_source": "structural",
+      "description": "The company's domain has weak or missing email authentication records. Attackers can spoof emails appearing to come from the company (e.g. CEO impersonation), reaching customer / partner inboxes that trust the domain. Legitimate email may also be marked as spam due to poor authentication posture.",
+      "recommendation_template": "(1) Publish SPF record listing all authorized sending sources (CIS 9.1); (2) configure DKIM signing on the email platform; (3) publish DMARC record starting at p=none for monitoring, progress to p=quarantine then p=reject within 90 days; (4) monitor DMARC aggregate reports for unauthorized sending sources.",
+      "default_likelihood": 4,
+      "default_impact": 3,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 3,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "9.1" },
+        { "framework": "NIST_CSF", "id": "PR.DS-02" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["email", "authentication"]
+    },
+    {
+      "key": "no-privileged-access-management",
+      "title": "No Privileged Access Management (PAM) for admin accounts",
+      "category": "technical",
+      "threat_source": "structural",
+      "description": "Administrator credentials are stored in shared password managers or spreadsheets. There is no checkout/checkin workflow, no session recording, no automatic password rotation. Multiple staff can use the same admin credential simultaneously with no accountability trail.",
+      "recommendation_template": "(1) Deploy PAM (CyberArk, Delinea, HashiCorp Vault, BeyondTrust) for shared admin credentials; (2) require checkout workflow with documented business reason; (3) automatic password rotation post-checkout; (4) full session recording for high-privilege actions; (5) integration with SIEM for audit trail (CIS 5.4).",
+      "default_likelihood": 3,
+      "default_impact": 4,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 3,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "5.4" },
+        { "framework": "NIST_CSF", "id": "PR.AA-05" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["MidMarket", "Enterprise"],
+      "tags": ["identity", "pam"]
+    },
+    {
+      "key": "wifi-weak-encryption",
+      "title": "Corporate WiFi using deprecated encryption (WEP/WPA/WPA2-Personal)",
+      "category": "technical",
+      "threat_source": "structural",
+      "description": "The corporate WiFi uses an outdated encryption standard or a shared password (WPA2-Personal / PSK). Anyone with the password — current staff, former staff, contractors who ever connected, visitors who were given the password — retains the ability to capture and decrypt corporate WiFi traffic. WPA/WEP are trivially crackable.",
+      "recommendation_template": "(1) Upgrade to WPA3-Enterprise authentication tied to AD/RADIUS (CIS 12.1); (2) each user authenticates with their own credentials; (3) rotate guest WiFi password monthly; (4) consider separate corporate vs guest SSIDs; (5) network access control with device posture check.",
+      "default_likelihood": 2,
+      "default_impact": 3,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 2,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "12.1" },
+        { "framework": "NIST_CSF", "id": "PR.IR-01" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket"],
+      "tags": ["wireless", "network"]
+    },
+    {
+      "key": "no-web-application-firewall",
+      "title": "Public-facing web application has no WAF or DDoS protection",
+      "category": "technical",
+      "threat_source": "adversarial",
+      "description": "Company web applications, customer portals, and APIs are directly internet-exposed without a Web Application Firewall or DDoS mitigation layer. Automated bots scan continuously for OWASP Top 10 vulnerabilities (SQLi, XSS, SSRF). Application-layer DDoS or credential-stuffing campaigns can take services offline with minimal attacker resources.",
+      "recommendation_template": "(1) Deploy a managed WAF in front of all public web services (Cloudflare, AWS WAF, Azure Front Door); (2) enable OWASP Top 10 ruleset in detection mode for 2 weeks, then progress to block mode; (3) implement rate limiting on authentication endpoints; (4) consider DDoS-protection service for tier-1 applications.",
+      "default_likelihood": 4,
+      "default_impact": 3,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 2,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "12.1" },
+        { "framework": "NIST_CSF", "id": "PR.IR-04" }
+      ],
+      "applicable_industries": ["retail", "finance", "healthcare", "all"],
+      "applicable_sizes": ["MidMarket", "Enterprise"],
+      "tags": ["network", "application", "ddos"]
+    },
+    {
+      "key": "no-asset-inventory",
+      "title": "No accurate enterprise asset inventory",
+      "category": "process",
+      "threat_source": "structural",
+      "description": "The IT team cannot produce an accurate count of company workstations, servers, mobile devices, or network equipment. The 'inventory' is a spreadsheet last updated 18 months ago. Without a current inventory, vulnerability management is impossible (can't patch what you don't know about) and incident response is hobbled (can't tell what is and isn't compromised).",
+      "recommendation_template": "(1) Deploy automated asset discovery (Lansweeper, ManageEngine, Microsoft Defender for Endpoint inventory) (CIS 1.1); (2) integrate with HR / procurement workflows so device issuance auto-updates inventory; (3) monthly reconciliation review with named owner; (4) flag unmanaged devices on the network for investigation (CIS 1.2).",
+      "default_likelihood": 5,
+      "default_impact": 3,
+      "default_residual_likelihood": 2,
+      "default_residual_impact": 3,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "1.1" },
+        { "framework": "CIS_IG1", "id": "1.2" },
+        { "framework": "NIST_CSF", "id": "ID.AM-01" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket"],
+      "tags": ["asset-management", "governance"]
+    },
+    {
+      "key": "no-data-inventory",
+      "title": "No documented data inventory or classification",
+      "category": "process",
+      "threat_source": "structural",
+      "description": "No one can produce a list of sensitive data types the company processes, where each lives, who has access, and what retention applies. PII, PHI, PCI, IP, and financial data are scattered across email, file shares, SaaS apps, and personal laptops with no oversight. Regulatory breach notification within statutory deadlines (HIPAA 60 days, GDPR 72 hours) is functionally impossible.",
+      "recommendation_template": "(1) Stand up a data inventory effort with named owner from Legal + IT (CIS 3.2); (2) categorize data into Public / Internal / Confidential / Restricted; (3) document each data category's location, processing, retention, and applicable regulations; (4) annual review with sample-based validation; (5) feeds into data classification labeling tooling.",
+      "default_likelihood": 4,
+      "default_impact": 4,
+      "default_residual_likelihood": 2,
+      "default_residual_impact": 4,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "3.1" },
+        { "framework": "CIS_IG1", "id": "3.2" },
+        { "framework": "NIST_CSF", "id": "ID.AM-05" }
+      ],
+      "applicable_industries": ["healthcare", "finance", "retail", "all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["data", "governance", "privacy"]
+    },
+    {
+      "key": "open-firewall-rules",
+      "title": "Firewall rule list contains overly permissive 'any-any' rules",
+      "category": "technical",
+      "threat_source": "structural",
+      "description": "Firewall rule audit reveals multiple rules with source 'any', destination 'any', and ports left wide open. Rules were added years ago for one-off troubleshooting and never removed. No rule ownership, no review cadence, no documentation explaining why each rule exists. Attack surface is much larger than necessary.",
+      "recommendation_template": "(1) Annual firewall rule review with named owner per rule (CIS 12.1); (2) document business justification + expiration date for each rule; (3) implement deny-all-by-default with explicit allow rules; (4) automated rule-analysis tooling (Tufin, FireMon) for larger environments; (5) prune unused rules quarterly.",
+      "default_likelihood": 3,
+      "default_impact": 3,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 3,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "12.1" },
+        { "framework": "NIST_CSF", "id": "PR.IR-01" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["network", "firewall"]
+    },
+    {
+      "key": "edr-not-deployed-everywhere",
+      "title": "EDR coverage below 80% — gaps in endpoint detection",
+      "category": "technical",
+      "threat_source": "structural",
+      "description": "EDR is deployed but coverage is incomplete: 15-30% of endpoints are missing agents (BYOD, contractor laptops, special-purpose workstations, servers excluded from standard imaging). Attackers specifically seek out the unprotected endpoints — those become the foothold from which they pivot to detected systems.",
+      "recommendation_template": "(1) Reconcile EDR console against authoritative asset inventory monthly (CIS 10.1); (2) deploy agents on remaining endpoints — including servers, contractor devices, special-purpose workstations; (3) network access control to flag unmanaged devices on corporate network; (4) report coverage % weekly with target ≥98%.",
+      "default_likelihood": 3,
+      "default_impact": 4,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 3,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "10.1" },
+        { "framework": "NIST_CSF", "id": "DE.CM-01" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["endpoint", "detection"]
+    },
+    {
+      "key": "social-engineering-helpdesk",
+      "title": "Help desk vulnerable to social engineering for password resets",
+      "category": "people",
+      "threat_source": "adversarial",
+      "description": "An attacker calls the help desk impersonating a senior executive who 'forgot' their password and needs urgent reset. Help desk staff, trained for customer service, accommodate the request without robust identity verification. The attacker now has access to the executive's email and connected systems. This is the documented MGM 2023 breach pattern.",
+      "recommendation_template": "(1) Implement strict identity verification policy for password resets — knowledge-based questions are insufficient (CIS 14.3); (2) require callback to the verified employee phone number; (3) for executive accounts, require in-person or video-verified reset; (4) regular social-engineering simulation against help desk staff; (5) log + review all password resets.",
+      "default_likelihood": 3,
+      "default_impact": 5,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 4,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "14.3" },
+        { "framework": "NIST_CSF", "id": "PR.AT-01" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["MidMarket", "Enterprise"],
+      "tags": ["people", "social-engineering", "helpdesk"]
+    },
+    {
+      "key": "no-secure-software-development",
+      "title": "Custom-developed software lacks secure-development practices",
+      "category": "technical",
+      "threat_source": "structural",
+      "description": "The company develops internal applications or customer-facing software but has no formal secure-development lifecycle: no security training for developers, no code review for security, no SAST/DAST tooling, no dependency-scanning, no security testing before deployment. Application-layer vulnerabilities accumulate over time and ship to production.",
+      "recommendation_template": "(1) OWASP secure coding training for all developers annually; (2) integrate SAST (SonarQube, Snyk, Semgrep) into CI/CD pipeline; (3) dependency scanning (Dependabot, Snyk, npm audit) blocking known-vulnerable packages; (4) require security review for any change touching authentication, authorization, or data handling; (5) annual penetration test of production applications.",
+      "default_likelihood": 3,
+      "default_impact": 4,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 3,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "16.1" },
+        { "framework": "NIST_CSF", "id": "PR.PS-06" }
+      ],
+      "applicable_industries": ["software", "fintech", "all"],
+      "applicable_sizes": ["MidMarket", "Enterprise"],
+      "tags": ["development", "application"]
+    },
+    {
+      "key": "unmanaged-iot-devices",
+      "title": "Unmanaged IoT devices on production network",
+      "category": "technical",
+      "threat_source": "structural",
+      "description": "Smart TVs in conference rooms, IP cameras, printers, building-automation controllers, and other IoT devices live on the same network as production servers and workstations. Most IoT devices ship with default credentials, no security updates, and known vulnerabilities. The 2016 Mirai botnet demonstrated mass exploitation of IoT for both DDoS and pivot attacks.",
+      "recommendation_template": "(1) Inventory all IoT devices on the network (CIS 1.1); (2) isolate to dedicated VLAN with no inbound access from corporate (CIS 12.1); (3) change default credentials and rotate annually; (4) disable unused services on each device; (5) replace devices that no longer receive security updates.",
+      "default_likelihood": 4,
+      "default_impact": 3,
+      "default_residual_likelihood": 2,
+      "default_residual_impact": 2,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "1.1" },
+        { "framework": "CIS_IG1", "id": "12.1" },
+        { "framework": "NIST_CSF", "id": "PR.IR-01" }
+      ],
+      "applicable_industries": ["manufacturing", "healthcare", "all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["iot", "network"]
+    },
+    {
+      "key": "no-encryption-at-rest",
+      "title": "Sensitive data stored without encryption at rest",
+      "category": "technical",
+      "threat_source": "structural",
+      "description": "Customer databases, file shares, and backup media store sensitive data unencrypted. If physical media is stolen, if a backup tape is lost in transit, or if a cloud-storage misconfiguration exposes a database snapshot, the data is immediately accessible. State breach-notification laws (CA, NY, MA) generally exempt encrypted data from notification requirements.",
+      "recommendation_template": "(1) Enable database transparent data encryption (TDE) for all sensitive databases; (2) full-disk encryption on all file servers and backup storage; (3) encrypt backup media in transit and at rest; (4) document key management procedures with owner; (5) integrate with KMS / HSM for enterprise key lifecycle.",
+      "default_likelihood": 2,
+      "default_impact": 4,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 3,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "3.6" },
+        { "framework": "NIST_CSF", "id": "PR.DS-01" }
+      ],
+      "applicable_industries": ["healthcare", "finance", "all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["data", "encryption"]
+    },
+    {
+      "key": "no-tabletop-exercise",
+      "title": "Leadership has never conducted an incident-response tabletop exercise",
+      "category": "people",
+      "threat_source": "structural",
+      "description": "The leadership team has never walked through a hypothetical incident scenario. The first time the CEO, CFO, and IT lead discuss who calls the lawyer / insurance carrier / law enforcement / customers will be during an actual incident, under stress, with the clock running. Tabletops are the lowest-cost, highest-leverage IR preparation control available.",
+      "recommendation_template": "(1) Schedule first tabletop within 60 days — leadership team + key IT, 90 minutes (CIS 17.1); (2) use a published scenario (CISA, SANS) for first exercise to lower the lift; (3) document gaps identified during tabletop and assign owners; (4) quarterly cadence going forward, varying scenarios (ransomware, BEC, data breach, insider).",
+      "default_likelihood": 4,
+      "default_impact": 3,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 3,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "17.1" },
+        { "framework": "NIST_CSF", "id": "RS.MA-01" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["governance", "incident-response"]
+    },
+    {
+      "key": "weather-event-single-site",
+      "title": "Single-site operations vulnerable to natural disaster",
+      "category": "physical",
+      "threat_source": "environmental",
+      "description": "All production infrastructure runs from a single physical location. Tornado, hurricane, flood, fire, or extended power outage at that location takes the entire business offline for days or weeks. Cyber insurance increasingly requires geographic resilience for tier-1 systems; without it, claims may be denied or premiums become prohibitive.",
+      "recommendation_template": "(1) Document current site-failure RPO and RTO honestly; (2) cloud-replica for tier-1 systems with documented failover procedure; (3) cross-site backup strategy with geographic separation ≥250 miles; (4) hosted phone system + work-from-anywhere capability for staff continuity; (5) annual DR exercise simulating primary-site loss.",
+      "default_likelihood": 2,
+      "default_impact": 5,
+      "default_residual_likelihood": 1,
+      "default_residual_impact": 3,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "11.1" },
+        { "framework": "NIST_CSF", "id": "RC.RP-01" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket"],
+      "tags": ["physical", "resilience", "environmental"]
+    },
+    {
+      "key": "no-vulnerability-scanning",
+      "title": "No regular vulnerability scanning program",
+      "category": "process",
+      "threat_source": "structural",
+      "description": "The company has never run a vulnerability scan, or runs one annually before an audit. Attackers run automated vulnerability scans continuously — defenders should too. Without ongoing scanning, the company learns about exploitable vulnerabilities from breach notifications rather than from internal discovery.",
+      "recommendation_template": "(1) Deploy authenticated vulnerability scanning (Tenable Nessus, Qualys, Rapid7, OpenVAS) covering all internal systems weekly (CIS 7.1); (2) external/perimeter scan monthly; (3) define remediation SLAs by severity (critical: 7 days, high: 30 days); (4) track remediation rate as a key metric; (5) feed findings into the risk register.",
+      "default_likelihood": 4,
+      "default_impact": 4,
+      "default_residual_likelihood": 2,
+      "default_residual_impact": 3,
+      "control_refs": [
+        { "framework": "CIS_IG1", "id": "7.1" },
+        { "framework": "CIS_IG1", "id": "7.2" },
+        { "framework": "NIST_CSF", "id": "DE.CM-08" }
+      ],
+      "applicable_industries": ["all"],
+      "applicable_sizes": ["SMB", "MidMarket", "Enterprise"],
+      "tags": ["vulnerability", "scanning"]
+    }
+  ]
+}

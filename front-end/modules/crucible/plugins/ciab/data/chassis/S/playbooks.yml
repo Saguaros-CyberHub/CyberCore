@@ -1,0 +1,22 @@
+# Tier S chain — ad/GOAD-Mini's own entry in the fork's top-level playbooks.yml,
+# verbatim. It is NOT the `default:` chain: Mini has no child domain, no external
+# trust, no member servers and no LAPS, so ad-child_domain.yml, wait5m.yml,
+# ad-members.yml, ad-trusts.yml, ad-gmsa.yml, laps.yml and servers.yml are all
+# absent. Falling through to `default:` would run ad-child_domain.yml against an
+# empty [child_dc] and ad-trusts.yml against an empty [trust].
+#
+# The key below is a PLACEHOLDER. goad/provisioner/ansible/ansible.py resolves
+# the chain by looking up the LAB DIRECTORY NAME in the fork's single top-level
+# playbooks.yml (falling back to `default:`), so the composer must merge this
+# list back into that file under the emitted lab name (CIAB-<hash>) — writing
+# this file into ad/<lab>/ does nothing on its own.
+CHASSIS-S:
+  - build.yml
+  - ad-servers.yml
+  - ad-parent_domain.yml
+  - ad-data.yml
+  - ad-relations.yml
+  - adcs.yml
+  - ad-acl.yml
+  - security.yml
+  - vulnerabilities.yml

@@ -1,0 +1,43 @@
+{
+  "schema_version": "1.0",
+  "cover_name": "AZ Cyber Initiative",
+  "sections": {
+    "company": {
+      "cover_name": "AZ Cyber Initiative",
+      "industry": "Non-profit",
+      "employees_band": "1-10",
+      "region": "United States",
+      "revenue_band": "< $1M",
+      "frameworks": ["NIST-CSF"]
+    },
+    "network": {
+      "workstation_count": "3",
+      "laptop_count": "3",
+      "server_count": "0",
+      "os_count_win_server": "0",
+      "os_count_win_client": "1",
+      "os_count_linux": "0",
+      "os_count_macos": "2",
+      "os_count_other": "0",
+      "role_dc": "unknown",
+      "role_file": "no",
+      "role_mail": "yes",
+      "role_web": "yes",
+      "role_db": "no",
+      "role_backup": "unknown",
+      "role_print": "no",
+      "role_other": "no",
+      "services": ["SMB", "HTTP", "VPN"],
+      "domain_mode": "",
+      "segments": [{ "vlan": "", "cidr": "", "purpose": "" }]
+    },
+    "wireless": { "ssid_count": "0", "wifi_encryption": "unknown", "guest_wifi": "No", "guest_isolated": "N/A" },
+    "endpoint": { "av_vendor": "None", "disk_encryption": "No", "usb_policy": "Blocked entirely", "patch_cadence": "Automated, monthly" },
+    "email_web": { "email_provider": "Google Workspace", "web_filtering": "Unknown", "spf": "No", "dkim": "No", "dmarc": "No" },
+    "access": { "mfa_coverage": "All users, all systems", "priv_count_band": "1-2", "password_manager": "Yes, company-wide", "lockout_policy": "Yes", "dormant_cleanup": "Manual, periodic" },
+    "data": { "backup_cadence": "Unknown", "offsite_backup": "No", "offline_backup": "No", "encryption_at_rest": "No", "dlp": "No", "restore_test": "No" },
+    "vuln_audit": { "vuln_scanning": "Annually / audit-only", "logging_coverage": "None / unknown", "siem": "No", "audit_retention": "1-3 years" },
+    "ig1": {},
+    "notes": { "free_text": "Website Vulnerabilities, and permissions." }
+  }
+}

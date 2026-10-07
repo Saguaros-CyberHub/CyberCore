@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Synthesize Challenge | Clinic-in-a-Box</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <style>
+    .pill { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--gray-200, #e2e8f0); background: var(--bg-card, #fff); color: var(--gray-600, #4a5568); margin-right: 4px; }
+    .pill.exact       { border-color: #16a34a; color: #166534; background: #dcfce7; }
+    .pill.fuzzy_version, .pill.family_only { border-color: #d97706; color: #92400e; background: #fef3c7; }
+    .pill.weak        { border-color: #dc2626; color: #991b1b; background: #fee2e2; }
+    .pill.phantom     { border-color: var(--gray-300, #cbd5e0); color: var(--gray-600, #4a5568); background: var(--gray-100, #edf2f7); font-style: italic; }
+    .warnings-panel { border: 1px solid #f59e0b; background: #fffbeb; border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 1rem; }
+    .warnings-panel h3 { margin: 0 0 0.4rem 0; font-size: 0.9rem; color: #92400e; }
+    .warnings-panel ul { margin: 0; padding-left: 1.25rem; font-size: 0.85rem; color: #78350f; }
+    .warnings-panel li { margin-bottom: 0.15rem; }
+    .warning-code { display: inline-block; font-family: monospace; font-size: 0.7rem; color: #78350f; background: #fef3c7; border-radius: 3px; padding: 0 4px; margin-right: 4px; }
+    .stats { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .stat { background: var(--bg-page, #f7fafc); border: 1px solid var(--gray-200, #e2e8f0); border-radius: 8px; padding: 0.6rem 0.9rem; min-width: 120px; flex: 1; }
+    .stat .val { font-size: 1.5rem; color: var(--primary, #0c234b); font-weight: 700; line-height: 1.2; }
+    .stat .lbl { font-size: 0.7rem; color: var(--gray-500, #718096); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px; }
+    table.vmtbl { width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.85rem; }
+    table.vmtbl th, table.vmtbl td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--gray-200, #e2e8f0); vertical-align: top; }
+    table.vmtbl th { color: var(--gray-500, #718096); font-weight: 600; background: var(--bg-page, #f7fafc); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    table.vmtbl tr.phantom-row td { background: #fafafa; color: var(--gray-500, #718096); }
+    table.vmtbl input[type=text], table.vmtbl select { width: 100%; padding: 4px 6px; font-size: 0.85rem; border: 1px solid var(--gray-200, #e2e8f0); border-radius: 4px; background: var(--bg-card, #fff); color: inherit; font-family: inherit; }
+    .scripts-cell { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+    .scripts-cell .script-pill {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: 11px; padding: 3px 6px 3px 8px;
+      background: rgba(30, 82, 136, 0.12); border: 1px solid var(--primary-light, #1e5288); color: var(--primary, #0c234b);
+      border-radius: 12px; font-family: ui-monospace, SFMono-Regular, monospace;
+      line-height: 1.2;
+    }
+    .scripts-cell .script-pill.baseline   { background: #ecfdf5; border-color: #6ee7b7; color: #065f46; }
+    .scripts-cell .script-pill.vulnerable { background: #fef2f2; border-color: #fca5a5; color: #991b1b; }
+    .scripts-cell .script-pill.missing    { background: #fef2f2; border-color: #f87171; color: #7f1d1d; font-style: italic; }
+    .scripts-cell .script-pill .x {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 14px; height: 14px; margin-left: 2px;
+      border-radius: 50%; background: transparent;
+      cursor: pointer; opacity: 0.55; font-size: 13px; line-height: 1;
+      border: 0; padding: 0; color: inherit;
+    }
+    .scripts-cell .script-pill .x:hover { opacity: 1; background: rgba(0,0,0,.08); }
+    .scripts-cell .add-scripts-btn {
+      font-size: 11.5px; padding: 3px 9px;
+      border: 1px dashed var(--gray-300, #cbd5e0); background: transparent;
+      color: var(--primary, #0c234b);
+      border-radius: 12px; cursor: pointer; font-family: inherit;
+    }
+    .scripts-cell .add-scripts-btn:hover { background: var(--bg-page, #f7fafc); border-style: solid; }
+    .scripts-summary { font-size: 10.5px; color: var(--gray-500, #718096); margin-top: 4px; }
+    .scripts-summary strong { color: var(--gray-700, #2d3748); font-weight: 600; }
+
+    /* Script picker modal */
+    .modal-overlay { position: fixed; inset: 0; background: rgba(15,23,42,.55); display: none; align-items: center; justify-content: center; z-index: 1000; }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: var(--bg-card, #fff); border-radius: 10px; width: min(720px, 92vw);
+      max-height: 85vh; display: flex; flex-direction: column; overflow: hidden;
+      box-shadow: 0 20px 40px rgba(0,0,0,.25);
+    }
+    .modal .modal-header { padding: 14px 18px; border-bottom: 1px solid var(--gray-200, #e2e8f0); display: flex; justify-content: space-between; align-items: center; }
+    .modal .modal-header h3 { margin: 0; font-size: 1rem; }
+    .modal .modal-header .close { background: none; border: 0; font-size: 1.25rem; cursor: pointer; color: var(--gray-500, #718096); }
+    .modal .modal-toolbar { padding: 10px 18px; border-bottom: 1px solid var(--gray-200, #e2e8f0); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .modal .modal-toolbar input[type=text] { flex: 1; min-width: 180px; padding: 6px 10px; border: 1px solid var(--gray-200, #e2e8f0); border-radius: 6px; font-size: 0.9rem; font-family: inherit; }
+    .modal .type-filter { display: inline-flex; border: 1px solid var(--gray-200, #e2e8f0); border-radius: 6px; overflow: hidden; }
+    .modal .type-filter button {
+      background: var(--bg-card, #fff); border: 0; padding: 5px 10px; font-size: 0.8rem; cursor: pointer;
+      color: var(--gray-600, #4a5568); border-right: 1px solid var(--gray-200, #e2e8f0); font-family: inherit;
+    }
+    .modal .type-filter button:last-child { border-right: 0; }
+    .modal .type-filter button.active { background: var(--primary, #0c234b); color: #fff; }
+    .modal .modal-body { flex: 1; overflow-y: auto; padding: 6px 0; }
+    .modal .category-group { padding: 8px 18px 2px; }
+    .modal .category-group h4 { margin: 0 0 4px 0; font-size: 0.7rem; color: var(--gray-500, #718096); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
+    .modal .script-option {
+      display: flex; align-items: flex-start; gap: 10px;
+      padding: 6px 18px; cursor: pointer; border-radius: 0;
+    }
+    .modal .script-option:hover { background: var(--bg-page, #f7fafc); }
+    .modal .script-option input[type=checkbox] { margin-top: 3px; cursor: pointer; }
+    .modal .script-option .meta { flex: 1; min-width: 0; }
+    .modal .script-option .meta .top { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .modal .script-option .meta .name { font-weight: 600; font-size: 0.85rem; }
+    .modal .script-option .meta .slug { font-family: ui-monospace, monospace; font-size: 0.75rem; color: var(--gray-500, #718096); }
+    .modal .script-option .meta .desc { font-size: 0.8rem; color: var(--gray-600, #4a5568); margin-top: 2px; line-height: 1.35; }
+    .modal .script-option .meta .badges { margin-top: 2px; display: flex; gap: 4px; flex-wrap: wrap; }
+    .modal .modal-footer { padding: 10px 18px; border-top: 1px solid var(--gray-200, #e2e8f0); display: flex; justify-content: space-between; align-items: center; font-size: 0.8rem; color: var(--gray-500, #718096); }
+    .type-badge { display: inline-block; font-size: 9.5px; padding: 1px 5px; border-radius: 8px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+    .type-badge.baseline   { background: #dcfce7; color: #166534; border: 1px solid #16a34a; }
+    .type-badge.vulnerable { background: #fee2e2; color: #991b1b; border: 1px solid #dc2626; }
+    .category-badge { display: inline-block; font-size: 9.5px; padding: 1px 5px; border-radius: 8px; font-weight: 600; background: var(--bg-page, #f7fafc); color: var(--gray-600, #4a5568); border: 1px solid var(--gray-200, #e2e8f0); }
+    .challenge-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-bottom: 1rem; }
+    .challenge-form label { display: block; font-size: 0.75rem; color: var(--gray-500, #718096); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 3px; }
+    .challenge-form input, .challenge-form select, .challenge-form textarea { width: 100%; padding: 0.4rem 0.5rem; font-size: 0.9rem; border: 1px solid var(--gray-200, #e2e8f0); border-radius: 6px; background: var(--bg-card, #fff); color: inherit; font-family: inherit; }
+    .challenge-form textarea { min-height: 60px; resize: vertical; }
+    .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; gap: 0.5rem; flex-wrap: wrap; }
+    .toolbar .actions { display: flex; gap: 0.5rem; }
+    .sub { color: var(--gray-500, #718096); font-size: 0.85rem; font-style: italic; }
+    .template-meta { font-size: 0.72rem; color: var(--gray-500, #718096); font-family: monospace; margin-top: 2px; }
+    .delete-btn { background: transparent; border: 0; color: #dc2626; cursor: pointer; font-size: 1rem; padding: 0 4px; }
+    .create-bar { position: sticky; bottom: 0; background: var(--bg-page, #fff); border-top: 1px solid var(--gray-200, #e2e8f0); padding: 1rem; display: flex; justify-content: space-between; align-items: center; margin: 1rem -1rem -1rem -1rem; }
+    .busy { opacity: 0.5; pointer-events: none; }
+    #status { font-size: 0.85rem; color: var(--gray-600, #4a5568); }
+    #status.err { color: #dc2626; }
+    #status.ok  { color: #166534; }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
+
+    <main class="main-content">
+      <header class="main-header">
+        <div class="header-left">
+          <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
+          <a id="back-link" href="/ciab/real-client-intakes" class="btn btn-outline btn-sm">← Back to intake</a>
+        </div>
+      </header>
+
+      <div class="page-content" id="content">
+        <div class="card"><div class="card-body">Loading…</div></div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Script picker modal (single instance, retargeted per VM) -->
+  <div class="modal-overlay" id="picker-overlay" onclick="if(event.target===this)closeScriptPicker()">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="picker-title">
+      <div class="modal-header">
+        <h3 id="picker-title">Scripts</h3>
+        <button class="close" type="button" onclick="closeScriptPicker()" aria-label="Close">×</button>
+      </div>
+      <div class="modal-toolbar">
+        <input type="text" id="picker-search" placeholder="Search by slug, name, or description…" oninput="onPickerSearch(event)">
+        <div class="type-filter" role="group" aria-label="Filter by script type">
+          <button type="button" data-type="all" class="active" onclick="setPickerType('all')">All</button>
+          <button type="button" data-type="baseline"   onclick="setPickerType('baseline')">Baseline</button>
+          <button type="button" data-type="vulnerable" onclick="setPickerType('vulnerable')">Vulnerable</button>
+        </div>
+      </div>
+      <div class="modal-body" id="picker-body"></div>
+      <div class="modal-footer">
+        <div><span id="picker-count">0 selected</span> · changes save as you toggle</div>
+        <button class="btn btn-primary btn-sm" type="button" onclick="closeScriptPicker()">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script src="/ciab/js/ciab-api.js"></script>
+  <script src="/js/layout.js"></script>
+  <script>
+    const intakeId = location.pathname.split('/')[3];
+    let synth = null;       // last synthesize response
+    let catalogTemplates = [];
+    let catalogScripts = [];
+
+    function esc(s) {
+      return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+    }
+    function el(id) { return document.getElementById(id); }
+    function setStatus(msg, kind) { const s = el('status'); if (!s) return; s.textContent = msg || ''; s.className = kind || ''; }
+
+    document.addEventListener('DOMContentLoaded', async () => {
+      if (!await Auth.requireAuth()) return;
+      el('back-link').href = `/ciab/real-client-intake/${encodeURIComponent(intakeId)}`;
+      // Escape closes the script picker modal.
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && document.getElementById('picker-overlay').classList.contains('open')) {
+          closeScriptPicker();
+        }
+      });
+      try {
+        await loadCatalogs();
+        await runSynthesize();
+      } catch (err) {
+        el('content').innerHTML = `<div class="card"><div class="card-body" style="color:#dc2626;">Failed to load: ${esc(err.message)}</div></div>`;
+      }
+    });
+
+    async function loadCatalogs() {
+      const [tRes, sRes] = await Promise.all([
+        fetch('/api/admin/vm-templates', { credentials: 'same-origin' }),
+        fetch('/api/admin/vuln-scripts?active_only=true', { credentials: 'same-origin' })
+      ]);
+      if (!tRes.ok) throw new Error(`vm-templates: ${tRes.status}`);
+      if (!sRes.ok) throw new Error(`vuln-scripts: ${sRes.status}`);
+      catalogTemplates = await tRes.json();
+      catalogScripts = await sRes.json();
+    }
+
+    // Admin's per-phantom substitution choices, accumulated across re-syntheses.
+    // Default: empty — server applies its DEFAULT_PHANTOM_POLICY. Each change
+    // here gets POSTed as `substitutions: { phantomName: subType }`.
+    let substitutionChoices = {};
+
+    async function runSynthesize() {
+      setStatus('Synthesizing…');
+      const res = await fetch(`/api/real-client/intake/${encodeURIComponent(intakeId)}/synthesize-challenge`, {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ substitutions: substitutionChoices }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || ('HTTP ' + res.status));
+      }
+      synth = await res.json();
+      // Seed local choices from server-applied defaults so the dropdowns
+      // reflect the policy decisions on first load.
+      if (synth.applied_substitutions) {
+        for (const [name, choice] of Object.entries(synth.applied_substitutions)) {
+          if (!(name in substitutionChoices)) substitutionChoices[name] = choice;
+        }
+      }
+      render();
+      setStatus('');
+    }
+
+    async function onSubstitutionChange(phantomName, newChoice) {
+      substitutionChoices[phantomName] = newChoice;
+      try {
+        await runSynthesize();
+      } catch (err) {
+        setStatus('Substitution failed: ' + err.message);
+      }
+    }
+    // Expose for inline onchange handlers.
+    window.onSubstitutionChange = onSubstitutionChange;
+
+    function render() {
+      const d = synth;
+      document.title = `Synthesize: ${d.cover_name}`;
+
+      const warningsHtml = d.warnings.length
+        ? `<div class="warnings-panel">
+             <h3>⚠ ${d.warnings.length} warning${d.warnings.length === 1 ? '' : 's'} from synthesis</h3>
+             <ul>${d.warnings.map(w => `<li><span class="warning-code">${esc(w.code)}</span>${esc(w.msg)}</li>`).join('')}</ul>
+           </div>`
+        : `<div class="sub" style="margin-bottom:1rem;">No warnings — intake mapped cleanly.</div>`;
+
+      const vmRowsHtml = d.vms.map((v, idx) => vmRowHtml(v, idx)).join('');
+      const subOptions = d.substitution_options || [{ key: 'phantom', label: 'Phantom (no VM)' }];
+      const phantomRowsHtml = d.phantom_assets.length
+        ? d.phantom_assets.map(p => {
+            const current = substitutionChoices[p.hostname] || 'phantom';
+            const dropdown = `<select class="phantom-sub" onchange="onSubstitutionChange('${esc(p.hostname)}', this.value)">
+              ${subOptions.map(o => `<option value="${esc(o.key)}" ${o.key === current ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}
+            </select>`;
+            return `
+            <tr class="phantom-row">
+              <td>${esc(p.hostname)}</td>
+              <td>${esc(p.role)}</td>
+              <td>${esc(p.os)} <span class="pill phantom">phantom</span></td>
+              <td colspan="2" class="sub">${esc(p.notes)}</td>
+              <td>${dropdown}</td>
+            </tr>`;
+          }).join('')
+        : '';
+
+      el('content').innerHTML = `
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">🧬 Synthesize Challenge: ${esc(d.cover_name)}</h1>
+            <div class="sub">Review the derived challenge spec below, then click <b>Create Challenge</b>.</div>
+          </div>
+        </div>
+
+        <div class="card"><div class="card-body">
+          <div class="stats">
+            <div class="stat"><div class="val">${d.stats.deployable_vms}</div><div class="lbl">Deployable VMs</div></div>
+            <div class="stat"><div class="val">${d.stats.phantoms}</div><div class="lbl">Phantom Assets</div></div>
+            <div class="stat"><div class="val">${d.stats.warnings}</div><div class="lbl">Warnings</div></div>
+            <div class="stat"><div class="val">${d.stats.total_devices_reported}</div><div class="lbl">Devices Reported</div></div>
+          </div>
+          ${warningsHtml}
+        </div></div>
+
+        <div class="card"><div class="card-header"><span class="card-title">Challenge settings</span></div>
+          <div class="card-body">
+            <div class="challenge-form">
+              <div>
+                <label>Name</label>
+                <input type="text" id="f-name" value="${esc(d.suggested_name)}">
+              </div>
+              <div>
+                <label>Challenge key</label>
+                <input type="text" id="f-key" value="${esc(d.suggested_challenge_key)}">
+              </div>
+              <div>
+                <label>Difficulty</label>
+                <select id="f-difficulty">
+                  ${['beginner','intermediate','advanced','expert','impossible'].map(x => `<option value="${x}" ${x===d.suggested_difficulty?'selected':''}>${x}</option>`).join('')}
+                </select>
+              </div>
+              <div>
+                <label>Max lanes</label>
+                <input type="number" id="f-lanes" min="1" max="200" value="${d.suggested_max_lanes}">
+              </div>
+              <div style="grid-column: 1 / -1;">
+                <label>Description</label>
+                <textarea id="f-description">${esc(d.suggested_description)}</textarea>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card"><div class="card-header">
+          <span class="card-title">VMs (${d.vms.length} deployable${d.phantom_assets.length ? ` + ${d.phantom_assets.length} phantom` : ''})</span>
+          <div class="toolbar" style="margin:0;">
+            <div></div>
+            <div class="actions">
+              <button class="btn btn-outline btn-sm" onclick="runSynthesize().catch(e=>setStatus(e.message,'err'))">↻ Regenerate</button>
+            </div>
+          </div>
+        </div><div class="card-body">
+          <table class="vmtbl">
+            <thead><tr>
+              <th style="width: 120px;">Name</th>
+              <th style="width: 120px;">Role</th>
+              <th style="width: 220px;">OS / Template</th>
+              <th>Services</th>
+              <th>Scripts</th>
+              <th style="width: 40px;"></th>
+            </tr></thead>
+            <tbody id="vm-tbody">${vmRowsHtml}${phantomRowsHtml}</tbody>
+          </table>
+        </div></div>
+
+        <div class="create-bar">
+          <div id="status"></div>
+          <div class="actions">
+            <button class="btn btn-primary" id="btn-create" onclick="createChallenge().catch(e=>setStatus(e.message,'err'))">🎯 Create Challenge</button>
+          </div>
+        </div>
+      `;
+    }
+
+    function vmRowHtml(v, idx) {
+      const templateOptions = catalogTemplates
+        .filter(t => t.os_family === v.os_family || !v.os_family)
+        .map(t => `<option value="${t.template_vmid}" ${t.template_vmid===v.template_vmid?'selected':''}>${esc(t.os_name)}${t.os_version?` (${esc(t.os_version)})`:''} · vmid ${t.template_vmid}</option>`).join('')
+        || catalogTemplates.map(t => `<option value="${t.template_vmid}" ${t.template_vmid===v.template_vmid?'selected':''}>${esc(t.os_name)} · vmid ${t.template_vmid}</option>`).join('');
+
+      // Quick lookups used by the pill renderer.
+      const scriptTypeBySlug = Object.fromEntries(catalogScripts.map(s => [s.slug, (s.script_type || 'vulnerable').toLowerCase()]));
+      const scriptNameBySlug = Object.fromEntries(catalogScripts.map(s => [s.slug, s.name || s.slug]));
+
+      const pills = (v.default_scripts || []).map(slug => {
+        const t = scriptTypeBySlug[slug] || 'vulnerable';
+        const name = scriptNameBySlug[slug] || slug;
+        return `<span class="script-pill ${t}" title="${esc(name)} (${t})">${esc(slug)}<button class="x" title="Remove" onclick="removeScriptFromVm(${idx}, '${esc(slug)}')">×</button></span>`;
+      }).join('');
+      const missingPills = (v.missing_scripts || []).map(m =>
+        `<span class="script-pill missing" title="No script in catalog for this service">${esc(m.service)}${m.version?' v'+esc(m.version):''}?</span>`
+      ).join('');
+
+      const counts = { baseline: 0, vulnerable: 0 };
+      (v.default_scripts || []).forEach(slug => { counts[scriptTypeBySlug[slug] || 'vulnerable']++; });
+      const summary = (v.default_scripts || []).length
+        ? `<div class="scripts-summary"><strong>${v.default_scripts.length}</strong> assigned · <strong style="color:#166534">${counts.baseline}</strong> baseline · <strong style="color:#991b1b">${counts.vulnerable}</strong> vulnerable</div>`
+        : `<div class="scripts-summary" style="color:var(--gray-500,#718096)">No scripts assigned yet.</div>`;
+
+      // Substituted VMs (originally a phantom os family) get a "from <orig>"
+      // badge + a dropdown to change the substitution type or revert to phantom.
+      const subOpts = (synth && synth.substitution_options) || [];
+      const subBadge = v.substituted_from
+        ? `<div class="template-meta sub" style="margin-top:4px;">
+             <span class="pill" style="background:#e0e7ff;color:#3730a3;">substituted from ${esc(v.substituted_from)}</span>
+             <select class="phantom-sub" style="margin-left:6px;font-size:11px;" onchange="onSubstitutionChange('${esc(v.name)}', this.value)">
+               ${subOpts.map(o => `<option value="${esc(o.key)}" ${o.key === (v.substitution_type || '') ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}
+             </select>
+           </div>`
+        : '';
+
+      return `
+        <tr data-idx="${idx}">
+          <td><input type="text" data-field="name" value="${esc(v.name)}"></td>
+          <td><input type="text" data-field="role" value="${esc(v.role)}"></td>
+          <td>
+            <select data-field="template_vmid">${templateOptions}</select>
+            <div class="template-meta">${esc(v.os)} <span class="pill ${esc(v.template_match)}">${esc(v.template_match)}</span></div>
+            ${subBadge}
+          </td>
+          <td><input type="text" data-field="services" value="${esc((v.services||[]).join(', '))}" placeholder="SMB, RDP, ..."></td>
+          <td>
+            <div class="scripts-cell">
+              ${pills}
+              ${missingPills}
+              <button type="button" class="add-scripts-btn" onclick="openScriptPicker(${idx})">+ Add scripts</button>
+            </div>
+            ${summary}
+          </td>
+          <td><button class="delete-btn" title="Remove VM" onclick="removeVm(${idx})">×</button></td>
+        </tr>`;
+    }
+
+    // ------------------------------------------------------------------
+    // Script picker modal: state + open/close/filter handlers
+    // ------------------------------------------------------------------
+    let pickerState = { vmIndex: null, typeFilter: 'all', search: '' };
+
+    function openScriptPicker(vmIdx) {
+      pickerState = { vmIndex: vmIdx, typeFilter: 'all', search: '' };
+      document.getElementById('picker-search').value = '';
+      document.querySelectorAll('.type-filter button').forEach(b => b.classList.toggle('active', b.dataset.type === 'all'));
+      renderPickerBody();
+      const vm = synth.vms[vmIdx];
+      document.getElementById('picker-title').textContent = `Scripts for ${vm.name}`;
+      document.getElementById('picker-overlay').classList.add('open');
+    }
+
+    function closeScriptPicker() {
+      document.getElementById('picker-overlay').classList.remove('open');
+      // Preserve any pending form edits before the re-render, then repaint pills.
+      syncDomToState();
+      render();
+    }
+
+    function setPickerType(type) {
+      pickerState.typeFilter = type;
+      document.querySelectorAll('.type-filter button').forEach(b => b.classList.toggle('active', b.dataset.type === type));
+      renderPickerBody();
+    }
+
+    function onPickerSearch(e) {
+      pickerState.search = (e.target.value || '').toLowerCase();
+      renderPickerBody();
+    }
+
+    function toggleScriptSelection(slug, checked) {
+      const vm = synth.vms[pickerState.vmIndex];
+      if (!vm) return;
+      vm.default_scripts = vm.default_scripts || [];
+      const has = vm.default_scripts.includes(slug);
+      if (checked && !has)  vm.default_scripts.push(slug);
+      if (!checked && has)  vm.default_scripts = vm.default_scripts.filter(s => s !== slug);
+      // Live-update the footer count inside the open modal.
+      updatePickerFooterCount();
+    }
+
+    function removeScriptFromVm(vmIdx, slug) {
+      const vm = synth.vms[vmIdx];
+      if (!vm) return;
+      vm.default_scripts = (vm.default_scripts || []).filter(s => s !== slug);
+      render();
+    }
+
+    function updatePickerFooterCount() {
+      const vm = synth.vms[pickerState.vmIndex];
+      if (!vm) return;
+      document.getElementById('picker-count').textContent = `${(vm.default_scripts || []).length} selected`;
+    }
+
+    function renderPickerBody() {
+      const body = document.getElementById('picker-body');
+      const vm = synth.vms[pickerState.vmIndex];
+      if (!vm) { body.innerHTML = ''; return; }
+      const selected = new Set(vm.default_scripts || []);
+      const q = pickerState.search;
+      const type = pickerState.typeFilter;
+
+      // Filter catalog + group by category, baseline first within each group.
+      const filtered = catalogScripts.filter(s => {
+        if (type !== 'all' && (s.script_type || 'vulnerable').toLowerCase() !== type) return false;
+        if (!q) return true;
+        const hay = `${s.slug} ${s.name || ''} ${s.description || ''} ${s.category || ''}`.toLowerCase();
+        return hay.includes(q);
+      });
+      const byCategory = {};
+      for (const s of filtered) {
+        const cat = s.category || 'Uncategorized';
+        (byCategory[cat] ||= []).push(s);
+      }
+      // Within each category, baseline before vulnerable, then alpha by name.
+      const categories = Object.keys(byCategory).sort();
+      const typeRank = t => ((t || 'vulnerable').toLowerCase() === 'baseline' ? 0 : 1);
+      categories.forEach(c => byCategory[c].sort((a,b) =>
+        typeRank(a.script_type) - typeRank(b.script_type) || String(a.name || a.slug).localeCompare(String(b.name || b.slug))
+      ));
+
+      if (!categories.length) {
+        body.innerHTML = `<div style="padding: 30px 20px; text-align: center; color: var(--gray-500, #718096);">No scripts match this filter.</div>`;
+        updatePickerFooterCount();
+        return;
+      }
+
+      body.innerHTML = categories.map(cat => {
+        const rows = byCategory[cat].map(s => {
+          const t = (s.script_type || 'vulnerable').toLowerCase();
+          const isSelected = selected.has(s.slug);
+          return `
+            <label class="script-option">
+              <input type="checkbox" ${isSelected ? 'checked' : ''} onchange="toggleScriptSelection('${esc(s.slug)}', this.checked)">
+              <div class="meta">
+                <div class="top">
+                  <span class="name">${esc(s.name || s.slug)}</span>
+                  <span class="slug">${esc(s.slug)}</span>
+                  <span class="type-badge ${t}">${t}</span>
+                </div>
+                ${s.description ? `<div class="desc">${esc(s.description)}</div>` : ''}
+              </div>
+            </label>`;
+        }).join('');
+        return `
+          <div class="category-group">
+            <h4>${esc(cat)}</h4>
+            ${rows}
+          </div>`;
+      }).join('');
+
+      updatePickerFooterCount();
+    }
+
+    function removeVm(idx) {
+      syncDomToState();
+      synth.vms.splice(idx, 1);
+      render();
+    }
+
+    // Capture whatever is in the form inputs back into synth.vms so a re-render
+    // doesn't blow away edits made to name/role/services/template.
+    function syncDomToState() {
+      document.querySelectorAll('#vm-tbody tr[data-idx]').forEach(tr => {
+        const idx = parseInt(tr.getAttribute('data-idx'), 10);
+        const vm = synth.vms[idx];
+        if (!vm) return;
+        const name    = tr.querySelector('[data-field=name]');
+        const role    = tr.querySelector('[data-field=role]');
+        const tmpl    = tr.querySelector('[data-field=template_vmid]');
+        const svcsEl  = tr.querySelector('[data-field=services]');
+        if (name) vm.name = name.value.trim();
+        if (role) vm.role = role.value.trim();
+        if (tmpl) vm.template_vmid = parseInt(tmpl.value, 10);
+        if (svcsEl) vm.services = svcsEl.value.split(',').map(s => s.trim()).filter(Boolean);
+      });
+    }
+
+    function readForm() {
+      const vms = [];
+      document.querySelectorAll('#vm-tbody tr[data-idx]').forEach(tr => {
+        const idx = parseInt(tr.getAttribute('data-idx'), 10);
+        const stateVm = synth.vms[idx] || {};
+        const name = tr.querySelector('[data-field=name]').value.trim();
+        const role = tr.querySelector('[data-field=role]').value.trim();
+        const template_vmid = parseInt(tr.querySelector('[data-field=template_vmid]').value, 10);
+        const servicesRaw = tr.querySelector('[data-field=services]').value;
+        const services = servicesRaw.split(',').map(s => s.trim()).filter(Boolean);
+        vms.push({
+          name, role, template_vmid,
+          os: tr.querySelector('.template-meta').textContent.trim().split(' ').slice(0, -1).join(' ') || 'Windows',
+          type: 'qemu',
+          vm_offset: 600000 + vms.length * 10000,
+          services,
+          default_scripts: [...(stateVm.default_scripts || [])]
+        });
+      });
+      return {
+        name: el('f-name').value.trim(),
+        challenge_key: el('f-key').value.trim(),
+        description: el('f-description').value.trim(),
+        difficulty: el('f-difficulty').value,
+        max_lanes: parseInt(el('f-lanes').value, 10),
+        challenge_type: vms.length > 1 ? 'multi_vm' : 'single_vm',
+        vms
+      };
+    }
+
+    async function createChallenge() {
+      const btn = el('btn-create');
+      btn.classList.add('busy');
+      setStatus('Creating challenge (this can take ~30s — SDN zone + VNets)…');
+
+      const body = readForm();
+      if (!body.name || !body.challenge_key || !body.max_lanes) {
+        btn.classList.remove('busy');
+        return setStatus('Name, challenge key, and max lanes are required.', 'err');
+      }
+      if (!body.vms.length) {
+        btn.classList.remove('busy');
+        return setStatus('At least one deployable VM is required.', 'err');
+      }
+
+      const res = await fetch('/api/admin/create-lab', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        btn.classList.remove('busy');
+        return setStatus(out.error || `HTTP ${res.status}`, 'err');
+      }
+
+      // Link intake → challenge
+      try {
+        await fetch(`/api/real-client/intake/${encodeURIComponent(intakeId)}/link`, {
+          method: 'PUT', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ linked_challenge_id: out.challenge_id })
+        });
+      } catch (_) { /* non-fatal; detail page will show the link */ }
+
+      setStatus(`✓ Challenge ${out.challenge_key} created (${out.vnets_created} VNets).`, 'ok');
+      setTimeout(() => { location.href = `/ciab/real-client-intake/${encodeURIComponent(intakeId)}`; }, 1200);
+    }
+  </script>
+</body>
+</html>
