@@ -1,0 +1,17 @@
+{
+  "schema_version": 2,
+  "extension": "lx01",
+  "stock": {
+    "forest_root": "sevenkingdoms.local",
+    "root_dn": "DC=sevenkingdoms,DC=local",
+    "netbios": "SEVENKINGDOMS",
+    "first_label": "sevenkingdoms",
+    "hosts": {
+      "lx01": {
+        "hostname": "dragonstone",
+        "roster_name": "lx01"
+      }
+    }
+  },
+  "controller_recipe": "lx01"
+}

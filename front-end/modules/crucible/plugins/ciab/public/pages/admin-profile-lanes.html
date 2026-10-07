@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin: Deploy Lanes | Clinic-in-a-Box</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <!-- .topo-canvas / .topo-legend / .topo-lg-*. Fully namespaced (.topo-*), so it
+       cannot collide with the page-local .card/.btn/.tabs re-declarations below. -->
+  <link rel="stylesheet" href="/css/topology.css">
+  <style>
+    .tabs { display:flex; gap:0.5rem; border-bottom:2px solid var(--gray-200); margin-bottom:1.5rem; }
+    .tab { padding:0.75rem 1.5rem; cursor:pointer; font-weight:500; color:var(--gray-500);
+           border-bottom:2px solid transparent; margin-bottom:-2px; transition:all 0.2s; }
+    .tab:hover { color: var(--primary); }
+    .tab.active { color:var(--primary); border-bottom-color:var(--primary); background:rgba(30, 82, 136, 0.08); }
+    .tab-content { display:none; }
+    .tab-content.active { display:block; }
+
+    .card { background:var(--bg-card, white); border-radius:12px; padding:1.5rem;
+            box-shadow:0 2px 8px rgba(0,0,0,0.08); margin-bottom:1rem; }
+    .card h3 { margin-top:0; }
+
+    .form-row { display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-bottom:1rem; }
+    .form-row.three { grid-template-columns:1fr 1fr 1fr; }
+    label { display:block; font-size:0.85rem; color:var(--gray-700); margin-bottom:0.35rem; font-weight:500; }
+    input[type=text], input[type=number], select, textarea {
+      width:100%; padding:0.55rem 0.75rem; border:1px solid var(--gray-300);
+      border-radius:8px; font-family:inherit; font-size:0.95rem;
+      background:var(--bg-input, white); color:var(--gray-900);
+    }
+
+    .asset-table { width:100%; border-collapse:collapse; font-size:0.9rem; }
+    .asset-table th, .asset-table td { padding:0.5rem 0.75rem; text-align:left;
+                                       border-bottom:1px solid var(--gray-200); }
+    .asset-table th { color:var(--gray-700); font-weight:600; background:var(--gray-50); }
+    .role-server { color:var(--primary-light); font-weight:600; }
+    .role-workstation { color:var(--gray-500); }
+
+    .pill { display:inline-block; padding:0.15rem 0.6rem; border-radius:999px;
+            font-size:0.75rem; font-weight:600; }
+    .pill-active { background:#d1fae5; color:#065f46; }
+    .pill-deploying { background:rgba(30, 82, 136, 0.12); color:var(--primary); }
+    .pill-partial { background:#fef3c7; color:#92400e; }
+    .pill-error { background:#fee2e2; color:#991b1b; }
+    .pill-deleted { background:var(--gray-200); color:var(--gray-700); }
+    .pill-pending { background:var(--gray-200); color:var(--gray-700); }
+    .pill-cloning { background:rgba(30, 82, 136, 0.12); color:var(--primary); }
+    .pill-firstboot { background:#fef3c7; color:#92400e; }
+
+    .gap-card { background:#fef3c7; border-left:4px solid #f59e0b;
+                padding:0.75rem 1rem; border-radius:6px; margin:0.5rem 0; }
+    .miss-card { background:#fee2e2; border-left:4px solid #ef4444;
+                 padding:0.75rem 1rem; border-radius:6px; margin:0.5rem 0; }
+    .gap-card code, .miss-card code { background:rgba(0,0,0,0.05); padding:0.1rem 0.4rem; border-radius:4px; }
+
+    .lane-row { display:grid; grid-template-columns:60px 100px 1fr 120px 120px;
+                gap:0.5rem; padding:0.5rem 0.75rem; border-bottom:1px solid var(--gray-200);
+                align-items:center; font-size:0.9rem; }
+    .lane-row.header { font-weight:600; color:var(--gray-700); background:var(--gray-50); }
+    .ip-list { font-family:monospace; font-size:0.85rem; color:var(--gray-700); }
+
+    .btn { padding:0.55rem 1.1rem; border-radius:8px; border:none; cursor:pointer;
+           font-weight:500; font-size:0.9rem; }
+    .btn-primary { background:var(--primary, #0c234b); color:white; }
+    .btn-primary:hover { background:var(--primary-dark, #001c48); }
+    .btn-secondary { background:var(--gray-200); color:var(--gray-900); }
+    .btn-danger { background:#ef4444; color:white; }
+    .btn-small { padding:0.3rem 0.7rem; font-size:0.8rem; }
+    .btn:disabled { opacity:0.5; cursor:not-allowed; }
+
+    .muted { color:var(--gray-500); font-size:0.85rem; }
+    .empty { padding:2rem; text-align:center; color:var(--gray-500); }
+
+    /* ── the split pane: controls left, live lane diagram right ──────────
+       minmax(0,1fr) on the diagram column is load-bearing and copied from
+       courses.html: a bare 1fr cannot shrink below its content, and Cytoscape
+       sizes its canvas from the container, so a wide graph would widen the whole
+       page instead of scrolling inside its own pane. */
+    .dep-split { display:grid; grid-template-columns: minmax(400px, 480px) minmax(0, 1fr);
+                 gap:1.5rem; align-items:start; }
+    .dep-split > #dep-controls { min-width:0; }
+    /* The diagram stays put while the controls scroll — on a 30-asset client the
+       list is the long part and the diagram is what you check it against. */
+    .dep-topo { position:sticky; top:0; display:flex; flex-direction:column; min-width:0; }
+    .dep-topo .topo-canvas { min-height:520px; flex:1; min-width:0; max-width:100%;
+                             overflow:hidden; border:1px solid var(--border-color);
+                             border-radius:10px 10px 0 0; }
+    .dep-topo .topo-legend { border:1px solid var(--border-color); border-top:none;
+                             border-radius:0 0 10px 10px; }
+    .topo-caption { display:flex; justify-content:space-between; align-items:center;
+                    gap:1rem; font-size:0.8rem; color:var(--text-muted);
+                    margin-bottom:0.4rem; }
+    /* A frame that is being recomputed is dimmed, never cleared: a blank canvas
+       mid-keystroke reads as "nothing will be built". */
+    .topo-canvas.is-stale { opacity:0.55; pointer-events:none; transition:opacity .12s; }
+    .topo-updating { display:none; color:var(--primary); font-weight:600; }
+    .topo-canvas.is-stale ~ .topo-legend .topo-updating,
+    .topo-caption .topo-updating.on { display:inline; }
+    #depTopoMeta { font-size:0.8rem; color:var(--text-muted); margin:0.5rem 0 0; }
+    .topo-empty { display:flex; align-items:center; justify-content:center; height:100%;
+                  min-height:520px; padding:2rem; text-align:center;
+                  color:var(--text-muted); }
+    @media (max-width: 1100px) {
+      /* Diagram ABOVE the controls, not below: it is the thing being consulted. */
+      .dep-split { grid-template-columns:1fr; }
+      .dep-split > .dep-topo { order:-1; position:static; }
+      .dep-topo .topo-canvas { min-height:380px; }
+    }
+
+    /* ── the asset rail ────────────────────────────────────────────────── */
+    .rail-tools { display:flex; flex-direction:column; gap:0.5rem; margin:0.75rem 0; }
+    #rail-search { width:100%; }
+    .rail-chips { display:flex; gap:0.4rem; flex-wrap:wrap; }
+    .rail-chip { border:1px solid var(--border-color); background:transparent;
+                 color:var(--text-secondary); border-radius:999px; padding:0.15rem 0.7rem;
+                 font-size:0.78rem; cursor:pointer; font-family:inherit; }
+    .rail-chip.active { background:var(--primary); border-color:var(--primary); color:#fff; }
+    .rail-bulk { font-size:0.78rem; color:var(--text-muted); }
+    .linkish { background:none; border:none; padding:0; font:inherit; font-size:0.78rem;
+               color:var(--primary); cursor:pointer; text-decoration:underline; }
+    .rail-group { margin-top:0.9rem; }
+    .rail-group-head { font-size:0.72rem; letter-spacing:0.04em; text-transform:uppercase;
+                       color:var(--text-muted); display:flex; justify-content:space-between;
+                       gap:0.5rem; padding:0 0.2rem 0.25rem; border-bottom:1px solid var(--border-light); }
+    .asset-row { display:grid; grid-template-columns:auto 1fr auto; align-items:center;
+                 gap:0.5rem; padding:0.3rem 0.2rem; border-radius:6px; cursor:pointer;
+                 font-size:0.85rem; }
+    .asset-row:hover { background:var(--bg-card-hover, rgba(30,82,136,0.06)); }
+    .asset-row code { font-size:0.85rem; }
+    .asset-row .asset-sub { display:block; font-size:0.72rem; color:var(--text-muted); }
+    /* The fate glyph reuses the canvas colours exactly, so the colour is learned
+       once on the diagram and read for free in the list. ext/int are the values
+       topology-render.js bakes and topology.css declares. */
+    .fate { font-size:0.95rem; line-height:1; width:1.1em; text-align:center; }
+    .fate-pivot    { color:#378dbd; }
+    .fate-internal { color:#378dbd; }
+    .fate-external { color:#f59e0b; }
+    .fate-lan      { color:var(--text-muted); }
+    .fate-gap      { color:var(--warning); }
+    .fate-ghost    { color:var(--danger); }
+    .fate-parked   { color:var(--text-muted); opacity:0.6; }
+    .asset-row.is-ghost code { text-decoration:line-through; text-decoration-thickness:1px; }
+    .parked-strip { margin-top:0.9rem; padding-top:0.6rem; border-top:1px solid var(--border-light); }
+    .parked-chip { display:inline-block; border:1px dashed var(--border-color); border-radius:999px;
+                   padding:0.1rem 0.55rem; margin:0 0.25rem 0.25rem 0; font-size:0.75rem;
+                   color:var(--text-muted); background:none; cursor:pointer; font-family:inherit; }
+    .parked-chip:hover { color:var(--primary); border-color:var(--primary); border-style:solid; }
+
+    .status-banner { padding:0.75rem 1rem; border-radius:8px; margin:0.5rem 0;
+                     border:1px solid transparent; }
+    .status-banner.success { background:rgba(79,145,83,0.12);  color:var(--success);
+                             border-color:rgba(79,145,83,0.35); }
+    .status-banner.error   { background:rgba(171,5,32,0.10);   color:var(--danger);
+                             border-color:rgba(171,5,32,0.35); }
+    .status-banner.warning { background:rgba(245,158,11,0.12); color:var(--warning);
+                             border-color:rgba(245,158,11,0.40); }
+    .status-banner.info    { background:rgba(30,82,136,0.12);  color:var(--primary);
+                             border-color:rgba(30,82,136,0.30); }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
+
+    <main class="main-content">
+      <header class="main-header">
+        <div class="header-left">
+          <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
+        </div>
+      </header>
+
+      <div class="page-content">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">Admin: Deploy Lanes from Profile</h1>
+            <p class="page-subtitle">Deploy N identical classroom lanes from a CIAB profile.
+               Servers are ticked by default, but any asset that resolves a VM template can be
+               deployed. Default subnet scheme: <strong>v3</strong> (segmented DMZ).</p>
+          </div>
+        </div>
+
+        <div class="tabs">
+          <!-- Generation moved to /ciab/generator, which already has full parity:
+               client type, industry, difficulty, the sizing ranges and the same model
+               selector. This page is a DEPLOY console; a profile generated anywhere
+               appears in the picker below (refreshProfiles lists with user_id=*). -->
+          <div class="tab active" data-tab="existing" onclick="switchTab('existing')">1. Deploy Lanes</div>
+          <div class="tab" data-tab="groups" onclick="switchTab('groups')">2. Active Groups</div>
+        </div>
+
+        <!-- ───────────────────────────── TAB 1: Deploy Lanes ───────────────────────────── -->
+        <div class="tab-content active" id="tab-existing">
+         <div class="dep-split">
+          <div id="dep-controls">
+          <div class="card">
+            <h3>Pick or upload a profile</h3>
+            <div class="form-row">
+              <div>
+                <label>Existing profile</label>
+                <select id="profile-picker"><option>Loading…</option></select>
+              </div>
+              <div>
+                <label>Or upload profile JSON</label>
+                <input type="file" id="profile-upload" accept="application/json" />
+              </div>
+            </div>
+            <div style="display:flex; gap:0.5rem;">
+              <button class="btn btn-secondary" onclick="refreshProfiles()">Refresh list</button>
+              <button class="btn btn-secondary" onclick="loadSelectedProfile()">Load profile</button>
+              <a class="btn btn-secondary" href="/ciab/generator"
+                 style="text-decoration:none;">Generate a new profile →</a>
+            </div>
+            <div id="profile-load-result"></div>
+          </div>
+
+          <div class="card" id="asset-selection-card" style="display:none;">
+            <h3>Machines from assets <span class="muted" id="rail-count" style="font-weight:400;"></span></h3>
+            <p class="muted">Servers are ticked for you, but any asset that resolves a VM template
+               can be deployed. The glyph is the machine's fate in the lane, not its role.</p>
+            <div class="rail-tools">
+              <input type="search" id="rail-search" placeholder="Filter by hostname, OS or role…"
+                     autocomplete="off" />
+              <div class="rail-chips" id="rail-filters">
+                <button type="button" class="rail-chip active" data-rail-filter="all">All</button>
+                <button type="button" class="rail-chip" data-rail-filter="servers">Servers</button>
+                <button type="button" class="rail-chip" data-rail-filter="ghosts">✖ Will not build</button>
+              </div>
+              <div class="rail-bulk">
+                select:
+                <button type="button" class="linkish" data-rail-select="all">all</button> ·
+                <button type="button" class="linkish" data-rail-select="servers">servers</button> ·
+                <button type="button" class="linkish" data-rail-select="none">none</button>
+              </div>
+            </div>
+            <div id="dep-asset-list" data-plan-input></div>
+            <div id="dep-parked"></div>
+
+            <!-- Reservation status banner — populated when a profile is loaded -->
+            <div id="dep-reservation-status" style="margin-top:1rem"></div>
+
+            <div class="form-row three" style="margin-top:1rem;">
+              <div>
+                <label>Number of lanes (deploy now)</label>
+                <input type="number" id="dep-num-lanes" value="3" min="1" max="100" />
+              </div>
+              <div>
+                <label>Max students (only if new profile)</label>
+                <input type="number" id="dep-max-students" value="25" min="1" max="200" />
+                <div class="muted" style="font-size:0.8em">Locked once profile is deployed.
+                  If profile already has a reservation, this field is ignored — existing reservation will be reused.</div>
+              </div>
+              <div>
+                <label>Group name (optional)</label>
+                <input type="text" id="dep-group-name" placeholder="default = company-date" />
+              </div>
+            </div>
+            <div class="form-row three">
+              <div>
+                <label>Subnet scheme</label>
+                <select id="dep-subnet-scheme">
+                  <option value="v3" selected>v3 (segmented DMZ — recommended)</option>
+                  <option value="v2">v2 (single flat 10.x.x.x segment)</option>
+                </select>
+                <div class="muted" id="dep-scheme-note" style="font-size:0.78rem;"></div>
+              </div>
+            </div>
+            <div class="form-row three">
+              <div><label>&nbsp;</label><label><input type="checkbox" id="dep-attack-boxes" data-plan-input checked /> Kali per lane</label></div>
+              <div><label>&nbsp;</label><label><input type="checkbox" id="dep-vuln-app" data-plan-input checked /> AI vulnerable web app</label></div>
+              <div><label>&nbsp;</label><span class="muted" style="font-size:0.78rem;">
+                The app is delivered by Docker onto the pivot host. If no selected asset
+                serves web, a dedicated VM is added automatically.</span></div>
+            </div>
+
+            <!-- Vuln-App difficulty (admin/instructor choice per deploy). Hidden when "AI vulnerable
+                 web app" is unchecked. Drives the LLM prompt's vuln-pool selection. -->
+            <div class="form-row" id="dep-vuln-difficulty-row">
+              <div>
+                <label>Vuln-App difficulty <span style="color:#718096; font-weight: normal; font-size:0.85em;">(controls vulnerability complexity & required skillset)</span></label>
+                <div style="display:flex; gap:1rem; align-items:center; flex-wrap:wrap; margin-top:0.25rem;">
+                  <label style="font-weight: normal; cursor: pointer;"><input type="radio" name="dep-vuln-difficulty" value="easy" data-plan-input checked> <strong style="color:#38a169;">Easy</strong> — OWASP basics, browser+curl, 3-stage chain</label>
+                  <label style="font-weight: normal; cursor: pointer;"><input type="radio" name="dep-vuln-difficulty" value="medium" data-plan-input> <strong style="color:#d69e2e;">Medium</strong> — adds file-upload RCE / JWT / stored XSS, 4-stage chain</label>
+                  <label style="font-weight: normal; cursor: pointer;"><input type="radio" name="dep-vuln-difficulty" value="hard" data-plan-input> <strong style="color:#c53030;">Hard</strong> — SSTI / deserialization / race conditions, 4-5 stage chain, Burp expected</label>
+                </div>
+              </div>
+            </div>
+
+            <div style="display:flex; gap:0.5rem; justify-content:flex-end;">
+              <button class="btn btn-secondary" onclick="runPreview()">Preview impact</button>
+              <button class="btn btn-primary" onclick="runDeploy()">Deploy lanes</button>
+            </div>
+            <div id="preview-result"></div>
+            <div id="deploy-result"></div>
+          </div>
+          </div><!-- /#dep-controls -->
+
+          <!-- ── the live lane blueprint ──────────────────────────────────────
+               Drawn entirely from POST /api/profile-deploy/plan, which runs the
+               same synthesizer the deploy does. Nothing here decides placement. -->
+          <div class="dep-topo" id="dep-topo">
+            <div class="topo-caption">
+              <span id="depTopoScope">Pick a profile to see the lane it builds.</span>
+              <span class="topo-updating" id="depTopoBusy">updating…</span>
+            </div>
+            <div class="topo-canvas" id="depTopoCanvas">
+              <div class="topo-empty" id="depTopoEmpty">
+                Pick a profile and this shows the machines one lane will actually build.
+              </div>
+            </div>
+            <div class="topo-legend">
+              <span><i class="topo-lg-ext"></i> External / Attacker</span>
+              <span><i class="topo-lg-int"></i> Internal / Corp</span>
+              <span><i class="topo-lg-console"></i> Student console</span>
+            </div>
+            <p id="depTopoMeta"></p>
+          </div>
+         </div><!-- /.dep-split -->
+        </div>
+
+        <!-- ───────────────────────────── TAB 2: Active Groups ───────────────────────────── -->
+        <div class="tab-content" id="tab-groups">
+          <div class="card">
+            <h3>Lane groups</h3>
+            <div style="display:flex; gap:0.5rem; margin-bottom:1rem;">
+              <button class="btn btn-secondary btn-small" onclick="refreshGroups()">Refresh</button>
+              <span class="muted" id="groups-status"></span>
+            </div>
+            <div id="groups-list"><div class="empty">Loading…</div></div>
+          </div>
+        </div>
+
+      </div>
+    </main>
+  </div>
+
+  <!-- ── the deployed lane's real topology ─────────────────────────────────
+       Same renderer as the pre-deploy blueprint, fed by
+       GET /api/admin/lanes/:laneId/topology, which reads each VM's actual netN
+       bridge back off Proxmox. So "what I asked for" and "what is running" are
+       drawn the same way and can be compared. -->
+  <div class="modal-overlay" id="laneTopologyModal">
+    <div class="modal" style="max-width:1000px;">
+      <div class="modal-header">
+        <h3 class="modal-title" id="laneTopologyTitle">Topology</h3>
+        <button class="modal-close" onclick="LaneTopo.closeLive()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="muted" id="laneTopologyMeta" style="font-size:0.8rem;"></p>
+        <div class="topo-canvas" id="laneTopologyCanvas" style="min-height:460px;"></div>
+        <div class="topo-legend">
+          <span><i class="topo-lg-ext"></i> External / Attacker</span>
+          <span><i class="topo-lg-int"></i> Internal / Corp</span>
+          <span><i class="topo-lg-console"></i> Student console</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- The read-only topology renderer. See admin-profile-lanes-topo.js for why
+       this is three files and not five. -->
+  <script src="/vendor/cytoscape.min.js"></script>
+  <script src="/js/topology/topology-icons.js"></script>
+  <script src="/js/topology/topology-render.js"></script>
+
+  <script src="/js/app.js"></script>
+  <script src="/ciab/js/ciab-api.js"></script>
+  <script src="/js/layout.js"></script>
+  <script src="/ciab/js/admin-profile-lanes.js"></script>
+  <script src="/ciab/js/admin-profile-lanes-topo.js"></script>
+</body>
+</html>

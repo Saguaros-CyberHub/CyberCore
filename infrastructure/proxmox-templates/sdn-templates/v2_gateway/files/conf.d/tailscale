@@ -1,0 +1,15 @@
+# /etc/conf.d/tailscale
+# Installed by the v2 gateway bake (scripts/50-install-tailscale.sh).
+#
+# Userspace mode means no TUN device needed — works in unprivileged LXC.
+# Subnet routing still works (the BYOAB use case).
+#
+# NOTE: the openrc service is named "tailscale" (not "tailscaled"), so this
+# config must live at /etc/conf.d/tailscale to match the service name. Writing
+# to /etc/conf.d/tailscaled is a no-op the daemon never reads, and tailscaled
+# then tries default kernel-TUN mode, which fails in unprivileged LXC.
+#
+# The v3 gateway deliberately overrides this with KERNEL mode — it needs a real
+# tailscale0 device for reverse connections out of the lane, and pairs that with
+# a /dev/net/tun passthrough added at deploy time.
+command_args="--tun=userspace-networking --state=/var/lib/tailscale/tailscaled.state"

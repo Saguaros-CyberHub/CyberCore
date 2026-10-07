@@ -1,8 +1,24 @@
 -- Crucible (CTF range) module: enabled tables + badges
 
-INSERT INTO module (key, name, active)
+INSERT INTO cybercore_module (key, name, active)
 VALUES ('crucible', 'The Crucible', TRUE)
 ON CONFLICT (key) DO NOTHING;
+
+-- Extend cybercore_event for Crucible CTF event type, status, and metadata
+ALTER TABLE cybercore_event
+  ADD COLUMN IF NOT EXISTS event_type  TEXT,
+  ADD COLUMN IF NOT EXISTS status      TEXT NOT NULL DEFAULT 'draft',
+  ADD COLUMN IF NOT EXISTS description TEXT,
+  ADD COLUMN IF NOT EXISTS max_players INTEGER,
+  ADD COLUMN IF NOT EXISTS is_public   BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS created_by  UUID REFERENCES cybercore_user(user_id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS module_key  TEXT REFERENCES cybercore_module(key)   ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ADD COLUMN IF NOT EXISTS updated_at  TIMESTAMPTZ NOT NULL DEFAULT now();
+
+CREATE INDEX IF NOT EXISTS idx_cybercore_event_type   ON cybercore_event (event_type);
+CREATE INDEX IF NOT EXISTS idx_cybercore_event_status ON cybercore_event (status);
+CREATE INDEX IF NOT EXISTS idx_cybercore_event_module ON cybercore_event (module_key);
 
 -- Module tables (enabled)
 
@@ -77,6 +93,19 @@ CREATE TABLE IF NOT EXISTS crucible_challenge (
   -- Owning module / logical group (e.g. 'crucible', 'cyberlabs', 'forge')
   module_key    TEXT DEFAULT 'crucible',
 
+  -- Lane gateway subnet scheme this challenge uses.
+  --   (v1 was retired by migration 038: VMID 1691/1692/1693 by module, one flat
+  --    192.18.0.0/24 shared by EVERY lane, wan0 off a per-module transit /16.
+  --    No code path deploys it any more and the CHECK below no longer allows it.)
+  --   v2: VMID 1694 subnet-agnostic lane gateway, unique
+  --       10.<vxlan_high>.<vxlan_low>.0/24 per lane, gateway WAN directly on
+  --       lab bridge (100.100.60.<derived>/24). Required for Tailscale BYOAB.
+  --   v3: VMID 1695 segmented gateway (wan0 + ext0 + int0). Two SDN VNets per
+  --       lane — external (Kali/BYOD) and internal (GOAD AD) — with the gateway
+  --       firewall-blocking traffic between them. Forces a DMZ-pivot attack path.
+  subnet_scheme VARCHAR(8) NOT NULL DEFAULT 'v2'
+                 CHECK (subnet_scheme IN ('v2', 'v3')),
+
   -- JSONB spec that defines the actual infra and scoring model.
   -- Suggested structure:
   -- {
@@ -134,6 +163,9 @@ CREATE INDEX IF NOT EXISTS crucible_challenge_type_idx
 
 CREATE INDEX IF NOT EXISTS crucible_challenge_status_idx
   ON crucible_challenge (status);
+
+CREATE INDEX IF NOT EXISTS crucible_challenge_subnet_scheme_idx
+  ON crucible_challenge (subnet_scheme);
 
 -- Optional GIN index if you plan to search by tags in metadata/spec
 CREATE INDEX IF NOT EXISTS crucible_challenge_spec_gin_idx
@@ -204,7 +236,7 @@ COMMENT ON TABLE cybercore_lane IS
 ----------------------------------------------------------------------------
 -- Module-scoped badges
 ----------------------------------------------------------------------------
-INSERT INTO badge (key, name, description, module_key, active) VALUES
+INSERT INTO cybercore_badge (key, name, description, module_key, active) VALUES
   ('crucible_ctf_scorer', 'CTF Scorer', 'Scored in a Crucible CTF event', 'crucible', TRUE),
   ('crucible_ctf_winner', 'CTF Winner', 'Won a Crucible CTF event', 'crucible', TRUE)
 ON CONFLICT (key) DO NOTHING;
@@ -220,7 +252,7 @@ WITH latest_allocations AS (
          a.ends_at,
          a.purpose,
          a.metadata AS allocation_metadata
-  FROM allocation a
+  FROM cybercore_allocation a
   WHERE a.ends_at IS NULL OR a.ends_at > now()
   ORDER BY a.resource_id, a.starts_at DESC
 )
@@ -255,10 +287,83 @@ SELECT
   la.starts_at AS allocation_starts_at,
   la.ends_at AS allocation_ends_at,
   la.purpose AS allocation_purpose
-FROM resource r
-JOIN vm_instance vi ON vi.resource_id = r.resource_id
-LEFT JOIN vm_template t ON vi.template_id = t.template_id
+FROM cybercore_resource r
+JOIN cybercore_vm_instance vi ON vi.resource_id = r.resource_id
+LEFT JOIN cybercore_vm_template t ON vi.template_id = t.template_id
 LEFT JOIN latest_allocations la ON la.resource_id = r.resource_id
-LEFT JOIN app_user u ON la.user_id = u.user_id
+LEFT JOIN cybercore_user u ON la.user_id = u.user_id
 WHERE r.type = 'vm'
   AND r.module_key = 'crucible';
+
+-- ============================================================================
+-- Attachable lab challenge seeds
+-- Consumed by POST /api/admin/lanes/:id/modules. Templates must be baked
+-- on a Proxmox node before these rows can deploy. node is resolved at runtime.
+-- ============================================================================
+
+INSERT INTO crucible_challenge (challenge_key, name, description, challenge_type, difficulty, module_key, spec, status)
+VALUES (
+  'juice-shop-v1',
+  'OWASP Juice Shop',
+  'Modern vulnerable web app (Node/Angular). Covers JWT, NoSQLi, SSRF, prototype pollution, and ~95 other web bugs.',
+  'single_vm', 2, 'crucible',
+  '{"attachable":true,"vms":[{"name":"juice-shop","template_vmid":1701,"type":"qemu","role":"web"}]}'::jsonb,
+  'active'
+)
+ON CONFLICT (challenge_key) DO UPDATE
+  SET spec = EXCLUDED.spec, name = EXCLUDED.name, description = EXCLUDED.description,
+      challenge_type = EXCLUDED.challenge_type, difficulty = EXCLUDED.difficulty,
+      module_key = EXCLUDED.module_key, status = EXCLUDED.status, updated_at = now();
+
+INSERT INTO crucible_challenge (challenge_key, name, description, challenge_type, difficulty, module_key, spec, status)
+VALUES (
+  'dvwa-v1',
+  'DVWA + Linux PE',
+  'Damn Vulnerable Web Application on Debian 13. Three shell-yielding modules with Linux privesc primitives baked in.',
+  'single_vm', 1, 'crucible',
+  '{"attachable":true,"vms":[{"name":"dvwa","template_vmid":1702,"type":"qemu","role":"web"}]}'::jsonb,
+  'active'
+)
+ON CONFLICT (challenge_key) DO UPDATE
+  SET spec = EXCLUDED.spec, name = EXCLUDED.name, description = EXCLUDED.description,
+      challenge_type = EXCLUDED.challenge_type, difficulty = EXCLUDED.difficulty,
+      module_key = EXCLUDED.module_key, status = EXCLUDED.status, updated_at = now();
+
+INSERT INTO crucible_challenge (challenge_key, name, description, challenge_type, difficulty, module_key, spec, status)
+VALUES (
+  'cybersaguaros-ssrf',
+  'CyberSaguaros — SSRF Research Portal',
+  'Custom vulnerable web app. SSRF chain → localhost admin API → session mint → upload filter bypass → PHP webshell RCE → leaked deploy key → SSH → sudo NOPASSWD / cron privesc → root.',
+  'single_vm', 3, 'crucible',
+  -- Keep this spec byte-identical to migrations/020_seed_cybersaguaros_module.sql.
+  -- Both statements upsert the same challenge_key, so whichever applies last
+  -- wins; they previously disagreed (this one was missing template_node).
+  '{"attachable":true,"template_node":"cyberhub-node-5","vms":[{"name":"cybersaguaros","template_vmid":1703,"type":"qemu","role":"web","os":"linux","flags":{"user":{"path":"/home/hrivera/user.txt"},"root":{"path":"/root/root.txt"}}}]}'::jsonb,
+  'active'
+)
+ON CONFLICT (challenge_key) DO UPDATE
+  SET spec = EXCLUDED.spec, name = EXCLUDED.name, description = EXCLUDED.description,
+      challenge_type = EXCLUDED.challenge_type, difficulty = EXCLUDED.difficulty,
+      module_key = EXCLUDED.module_key, status = EXCLUDED.status, updated_at = now();
+
+INSERT INTO crucible_challenge (challenge_key, name, description, challenge_type, difficulty, module_key, spec, status)
+VALUES (
+  'copperridge-fieldops',
+  'Copper Ridge — FieldOps (IIS + Windows PE)',
+  'Custom vulnerable ASP.NET app on IIS 10. Directory browsing leaks web.config.bak → portal login → case-sensitive upload filter bypass (cmd.AspX) → webshell as the IIS application pool identity → SYSTEM via SeImpersonate/PrintSpoofer, a weak service DACL, a writable SYSTEM scheduled task, an unquoted service path, or recovered local-admin credentials.',
+  'single_vm', 3, 'crucible',
+  -- Keep byte-identical to migrations/023_seed_copperridge_module.sql.
+  -- Three fields here are load-bearing, see that file for the reasoning:
+  --   nic_model=e1000  Windows has no virtio-net driver; virtio never DHCPs.
+  --   os=windows       flag-manager throws if detectGuestOs() comes back empty.
+  --   flags.user.path  This box has no interactive user profile (the foothold
+  --                    is a virtual app-pool account), and the default Windows
+  --                    user-flag planter hard-fails when C:\Users has no
+  --                    non-builtin profile.
+  '{"attachable":true,"template_node":"cyberhub-node-5","vms":[{"name":"tuc-web01","template_vmid":1704,"type":"qemu","role":"web","os":"windows","nic_model":"e1000","flags":{"user":{"path":"C:\\Users\\Public\\Desktop\\user.txt"},"root":{"path":"C:\\Users\\Administrator\\Desktop\\root.txt"}}}]}'::jsonb,
+  'active'
+)
+ON CONFLICT (challenge_key) DO UPDATE
+  SET spec = EXCLUDED.spec, name = EXCLUDED.name, description = EXCLUDED.description,
+      challenge_type = EXCLUDED.challenge_type, difficulty = EXCLUDED.difficulty,
+      module_key = EXCLUDED.module_key, status = EXCLUDED.status, updated_at = now();

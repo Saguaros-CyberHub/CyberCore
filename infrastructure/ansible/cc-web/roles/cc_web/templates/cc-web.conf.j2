@@ -1,0 +1,60 @@
+{#
+  cc_web — the site.
+  MANAGED BY ANSIBLE. Local edits are overwritten on the next run.
+
+  One <VirtualHost> per declared port. Every value below comes from the
+  web-facts contract or from a cc_web_* variable: there is no tenant identity in
+  this template, because the AI writes the site and this role only installs it.
+#}
+# THIS FILE IS MANAGED BY THE cc_web ANSIBLE ROLE. DO NOT EDIT ON THE HOST.
+{% for port in cc_web_http_ports %}
+<VirtualHost *:{{ port }}>
+    ServerName {{ cc_web_server_name }}
+    DocumentRoot {{ cc_web_docroot }}
+
+    <Directory {{ cc_web_docroot }}>
+        # -Indexes on purpose: a directory listing would hand a student every
+        # route at once, including the ones web_facts deliberately does not
+        # declare, and would make the report's path list meaningless.
+        Options -Indexes +FollowSymLinks
+        AllowOverride None
+        Require all granted
+    </Directory>
+
+    ErrorLog {{ cc_web_log_dir }}/cc-web-{{ port }}-error.log
+    CustomLog {{ cc_web_log_dir }}/cc-web-{{ port }}-access.log combined
+</VirtualHost>
+
+{% endfor %}
+{% if cc_web_tls_enabled | bool %}
+<VirtualHost *:{{ cc_web_tls_port }}>
+    ServerName {{ cc_web_server_name }}
+    DocumentRoot {{ cc_web_docroot }}
+
+    SSLEngine on
+    SSLCertificateFile {{ cc_web_tls_cert }}
+    SSLCertificateKeyFile {{ cc_web_tls_key }}
+
+    # EXHAUSTIVE BY CONSTRUCTION. '-all' first, then one '+' per declared
+    # protocol, so the listener offers exactly the set web_facts names and
+    # nothing httpd happened to compile in. tasks/verify.yml proves both
+    # directions: every declared protocol completes a handshake, and every
+    # undeclared one does not.
+    SSLProtocol {{ cc_web_ssl_protocol | trim }}
+    SSLCipherSuite {{ cc_web_ssl_cipher_suite | trim }}
+
+    # Off so the CLIENT picks. A scanner enumerating the offered suites needs to
+    # drive the choice; with the server ordering enforced it sees one suite per
+    # protocol and reports a narrower surface than the host really has.
+    SSLHonorCipherOrder off
+
+    <Directory {{ cc_web_docroot }}>
+        Options -Indexes +FollowSymLinks
+        AllowOverride None
+        Require all granted
+    </Directory>
+
+    ErrorLog {{ cc_web_log_dir }}/cc-web-{{ cc_web_tls_port }}-error.log
+    CustomLog {{ cc_web_log_dir }}/cc-web-{{ cc_web_tls_port }}-access.log combined
+</VirtualHost>
+{% endif %}

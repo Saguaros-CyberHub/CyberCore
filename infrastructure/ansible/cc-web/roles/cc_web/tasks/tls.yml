@@ -1,0 +1,120 @@
+---
+# ===========================================================================
+# cc_web — a REAL TLS listener, including a deliberately weak one.
+#
+# THIS FILE EXISTS BECAUSE OF THE BIGGEST PAPER-VS-LANE GAP IN THE PRODUCT.
+# The generated scan documents routinely carry POODLE and "TLS 1.0 enabled"
+# findings, because inference resolves every :443 through PORT_DEFAULTS. The
+# lane meanwhile deploys a container bound to port 80 with no TLS listener at
+# all, so a student who runs `sslscan` finds nothing to find and learns that the
+# report is fiction. Standing up 443 for real, speaking exactly the protocol set
+# the facts declare, is what makes those findings true.
+#
+# A WEAK PROTOCOL NEEDS TWO CHANGES, NOT ONE, AND THE SECOND IS INVISIBLE.
+# `SSLProtocol +TLSv1` on a Debian 12 host produces a listener that ADVERTISES
+# TLS 1.0 and then fails every handshake, because OpenSSL 3 applies
+# /etc/ssl/openssl.cnf's [system_default_sect] policy — CipherString at
+# SECLEVEL=2 and, on some builds, a MinProtocol floor — to httpd as a library
+# consumer. Nothing logs a complaint; apache starts, the port is open, and
+# `openssl s_client -tls1` just says "no protocols available". That is the exact
+# silent-success shape this project exists to eliminate, so the system policy is
+# relaxed here and tasks/verify.yml proves the handshake afterwards.
+# ===========================================================================
+
+- name: Create the directory the lane certificate lives in
+  ansible.builtin.file:
+    path: "{{ cc_web_tls_cert_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Generate the self-signed lane certificate
+  # The openssl CLI rather than community.crypto: the baked GOAD controller
+  # installs only the collections in upstream's requirements.yml, and adding a
+  # galaxy dependency to satisfy one task would make this role unrunnable on the
+  # controller that actually has to run it.
+  #
+  # `creates:` is what makes a replay a no-op — regenerating the certificate on
+  # every run would change the fingerprint under a student mid-exercise — and it
+  # is also what makes changed_when honest: the body only executes when the
+  # certificate was absent, so "it ran" and "it changed something" are the same
+  # statement.
+  ansible.builtin.command:
+    cmd: >-
+      openssl req -x509 -nodes -newkey rsa:{{ cc_web_tls_key_bits }}
+      -days {{ cc_web_tls_cert_days }}
+      -keyout {{ cc_web_tls_key }} -out {{ cc_web_tls_cert }}
+      -subj /CN={{ cc_web_server_name }}
+      -addext subjectAltName=DNS:{{ cc_web_server_name }}
+    creates: "{{ cc_web_tls_cert }}"
+  register: cc_web_openssl_req
+  changed_when: "(cc_web_openssl_req.rc | default(1)) == 0"
+  failed_when: "(cc_web_openssl_req.rc | default(0)) != 0"
+  notify: cc_web restart
+
+- name: Lock down the private key
+  ansible.builtin.file:
+    path: "{{ cc_web_tls_key }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+# --- the system OpenSSL policy, only when a weak protocol was declared ------
+
+- name: Read the system OpenSSL configuration
+  ansible.builtin.slurp:
+    src: "{{ cc_web_openssl_cnf }}"
+  register: cc_web_openssl_cnf_raw
+  when:
+    - cc_web_tls_weak_requested | bool
+    - cc_web_relax_system_openssl | bool
+
+- name: Refuse to guess at an OpenSSL configuration that has no system policy section
+  # If [system_default_sect] is absent, the lineinfile tasks below would append
+  # their directives at the end of the file, outside every section — where
+  # OpenSSL ignores them completely. The relaxation would report changed, the
+  # handshake would still fail, and the only symptom would be a scan that finds
+  # no weak protocol on a host the report says has one.
+  ansible.builtin.assert:
+    that:
+      - "(cc_web_openssl_cnf_raw.content | b64decode) is search('(?m)^\\s*\\[\\s*system_default_sect\\s*\\]')"
+    fail_msg: >-
+      cc_web: {{ cc_web_openssl_cnf }} has no [system_default_sect] section, so
+      this role cannot relax the system OpenSSL policy in a way OpenSSL will
+      actually read. web_facts declares
+      {{ cc_web_tls_protocols | intersect(cc_web_weak_protocols) | join(', ') }},
+      which needs that policy relaxed. Either point cc_web_openssl_cnf at the
+      configuration this host's OpenSSL really loads, or build the lane on an
+      image whose OpenSSL defaults already permit the protocol.
+    quiet: true
+  when:
+    - cc_web_tls_weak_requested | bool
+    - cc_web_relax_system_openssl | bool
+
+- name: Relax the system cipher policy so the weak protocol can complete a handshake
+  ansible.builtin.lineinfile:
+    path: "{{ cc_web_openssl_cnf }}"
+    regexp: '^\s*CipherString\s*='
+    line: "CipherString = {{ cc_web_openssl_weak_cipher_string }}"
+    insertafter: '^\s*\[\s*system_default_sect\s*\]'
+    backup: true
+  when:
+    - cc_web_tls_weak_requested | bool
+    - cc_web_relax_system_openssl | bool
+  notify: cc_web restart
+
+- name: Lower the system minimum protocol version
+  # Debian 12 does not ship a MinProtocol line, so this one is an insert rather
+  # than a replace; anchoring it to the CipherString line keeps it inside
+  # [system_default_sect] in both cases.
+  ansible.builtin.lineinfile:
+    path: "{{ cc_web_openssl_cnf }}"
+    regexp: '^\s*MinProtocol\s*='
+    line: "MinProtocol = {{ cc_web_openssl_weak_min_protocol }}"
+    insertafter: '^\s*CipherString\s*='
+    backup: true
+  when:
+    - cc_web_tls_weak_requested | bool
+    - cc_web_relax_system_openssl | bool
+  notify: cc_web restart
