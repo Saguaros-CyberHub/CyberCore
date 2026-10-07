@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign In | CyberHub</title>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/auth.css">
+</head>
+<body>
+  <div class="auth-container">
+    <div class="auth-card">
+      <div class="auth-header">
+        <div class="auth-logo">🏥</div>
+        <h1 id="siteName">CyberHub</h1>
+        <p id="siteDescription">University of Arizona Cyber Training Platform</p>
+      </div>
+      
+      <div class="auth-body">
+        <div id="errorAlert" class="alert alert-danger" style="display: none;"></div>
+
+        <!-- Step 1: email + password -->
+        <div id="loginStep">
+          <form id="loginForm">
+            <div class="form-group">
+              <label class="form-label" for="email">Email or Username</label>
+              <!-- type="text", not "email": the browser's own validation would
+                   reject a bare cohort username like cybr-480-7w1-1-student1
+                   before our handler ever runs. -->
+              <input type="text" class="form-input" id="email" name="email" placeholder="you@example.com" required autocomplete="username" inputmode="email">
+              <div class="form-error" id="emailError"></div>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label" for="password">Password</label>
+              <input type="password" class="form-input" id="password" name="password" placeholder="••••••••" required autocomplete="current-password">
+              <div class="form-error" id="passwordError"></div>
+            </div>
+
+            <button type="submit" class="btn btn-primary btn-block btn-lg" id="submitBtn">
+              Sign In
+            </button>
+          </form>
+
+          <div class="auth-footer">
+            <p><a href="#" id="forgotLink">Didn't get your setup email, or forgot your password?</a></p>
+            <p id="registerPrompt" style="display: none;">Don't have an account? <a href="/register">Create one</a></p>
+          </div>
+        </div>
+
+        <!-- Self-service: send me a new setup / reset link.
+             No new page — this is the same step pattern the MFA and password
+             screens already use. -->
+        <div id="forgotStep" style="display: none;">
+          <p style="color: var(--text-secondary, #555); margin-bottom: 1rem;">
+            Enter your email address and we'll send you a link to set your password.
+            It works whether you're setting one up for the first time or replacing
+            one you've forgotten.
+          </p>
+          <form id="forgotForm">
+            <div class="form-group">
+              <label class="form-label" for="forgotEmail">Email</label>
+              <input type="email" class="form-input" id="forgotEmail" placeholder="you@example.com"
+                     autocomplete="username" inputmode="email" autofocus>
+              <div class="form-error" id="forgotEmailError"></div>
+            </div>
+            <button type="submit" class="btn btn-primary btn-block btn-lg" id="forgotSubmitBtn">Send me a link</button>
+          </form>
+          <div id="forgotSent" class="alert alert-success" style="display: none; margin-top: 1rem;"></div>
+          <div class="auth-footer">
+            <p><a href="#" id="forgotBackLink">← Back to sign in</a></p>
+          </div>
+        </div>
+
+        <!-- Step 2a: TOTP code prompt (MFA already enrolled) -->
+        <div id="mfaStep" style="display: none;">
+          <p style="color: var(--text-secondary, #555); margin-bottom: 1rem;">
+            Enter the 6-digit code from your authenticator app. You can also use a recovery code.
+          </p>
+          <form id="mfaForm">
+            <div class="form-group">
+              <label class="form-label" for="mfaCode">Authentication Code</label>
+              <input type="text" class="form-input" id="mfaCode" placeholder="123456" inputmode="text"
+                     autocomplete="one-time-code" autofocus>
+              <div class="form-error" id="mfaCodeError"></div>
+            </div>
+            <button type="submit" class="btn btn-primary btn-block btn-lg" id="mfaSubmitBtn">Verify</button>
+          </form>
+          <div class="auth-footer">
+            <p><a href="#" id="mfaBackLink">← Back to sign in</a></p>
+          </div>
+        </div>
+
+        <!-- Step 2b: forced TOTP enrollment -->
+        <div id="enrollStep" style="display: none;">
+          <p style="color: var(--text-secondary, #555); margin-bottom: 1rem;">
+            Your account requires multi-factor authentication. Scan this QR code with an
+            authenticator app (Google Authenticator, Authy, 1Password…), then enter the code to finish.
+          </p>
+          <div style="text-align: center; margin-bottom: 1rem;">
+            <img id="enrollQr" alt="MFA QR code" style="width: 220px; height: 220px;">
+            <div style="font-size: 0.8rem; color: var(--text-secondary, #777); margin-top: 0.5rem;">
+              Can't scan? Enter this key manually:<br>
+              <code id="enrollSecret" style="font-size: 0.8rem; word-break: break-all;"></code>
+            </div>
+          </div>
+          <form id="enrollForm">
+            <div class="form-group">
+              <label class="form-label" for="enrollCode">Authentication Code</label>
+              <input type="text" class="form-input" id="enrollCode" placeholder="123456" inputmode="numeric" autocomplete="one-time-code">
+              <div class="form-error" id="enrollCodeError"></div>
+            </div>
+            <button type="submit" class="btn btn-primary btn-block btn-lg" id="enrollSubmitBtn">Verify &amp; Continue</button>
+          </form>
+        </div>
+
+        <!-- Step 3: forced password change (temporary credential must be replaced) -->
+        <div id="pwChangeStep" style="display: none;">
+          <p style="color: var(--text-secondary, #555); margin-bottom: 1rem;">
+            This account is using a temporary password. Choose a password of your own to finish signing in.
+          </p>
+          <form id="pwChangeForm">
+            <div class="form-group">
+              <label class="form-label" for="newPassword">New Password</label>
+              <input type="password" class="form-input" id="newPassword" placeholder="••••••••"
+                     autocomplete="new-password" autofocus>
+              <div class="form-error" id="newPasswordError"></div>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="confirmPassword">Confirm New Password</label>
+              <input type="password" class="form-input" id="confirmPassword" placeholder="••••••••"
+                     autocomplete="new-password">
+              <div class="form-error" id="confirmPasswordError"></div>
+            </div>
+            <div style="font-size: 0.8rem; color: var(--text-secondary, #777); margin-bottom: 1rem;">
+              At least 8 characters, including an uppercase letter, a lowercase letter, and a number.
+            </div>
+            <button type="submit" class="btn btn-primary btn-block btn-lg" id="pwChangeSubmitBtn">
+              Set Password &amp; Continue
+            </button>
+          </form>
+        </div>
+
+        <!-- Recovery codes shown once after enrollment -->
+        <div id="recoveryStep" style="display: none;">
+          <div class="alert alert-success" style="margin-bottom: 1rem;">
+            MFA is enabled. Save these one-time recovery codes somewhere safe — each works once if you lose your device. <strong>They won't be shown again.</strong>
+          </div>
+          <pre id="recoveryCodes" style="background: var(--bg-muted, #f4f4f6); padding: 0.75rem; border-radius: 6px; font-size: 0.9rem; line-height: 1.7; text-align: center;"></pre>
+          <button class="btn btn-primary btn-block btn-lg" id="recoveryContinueBtn">Continue to Dashboard</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script>
+    // Load site configuration (branding)
+    async function loadSiteConfig() {
+      try {
+        const response = await fetch('/api/site-config');
+        if (response.ok) {
+          const config = await response.json();
+          if (config.site_name) {
+            document.getElementById('siteName').textContent = config.site_name;
+            document.title = `Sign In | ${config.site_name}`;
+          }
+          if (config.site_description) {
+            document.getElementById('siteDescription').textContent = config.site_description;
+          }
+          // Logo was the piece missing here: the field was stored, served by
+          // /api/site-config and read straight back into the admin form, but
+          // no page ever rendered it. See Branding in app.js.
+          Branding.applyLogo(config);
+          Branding.applyFavicon(config);
+          // Accounts come from a roster, so don't offer a route the API refuses.
+          // Starts hidden in the markup and is revealed only on an explicit true:
+          // if this fetch fails the prompt stays hidden, which is the harmless
+          // way to be wrong. The authoritative check is in POST /auth/register.
+          if (config.self_registration_enabled) {
+            const el = document.getElementById('registerPrompt');
+            if (el) el.style.display = '';
+          }
+        }
+      } catch (e) {
+        console.warn('[Login] Could not load site config:', e.message);
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      loadSiteConfig();
+
+      const form = document.getElementById('loginForm');
+      const submitBtn = document.getElementById('submitBtn');
+      const errorAlert = document.getElementById('errorAlert');
+
+      // Short-lived stage tokens held in memory only (never localStorage).
+      let mfaToken = null;
+      let enrollToken = null;
+      let pwChangeToken = null;
+      // Set when forced MFA enrollment ALSO returns a password gate: the
+      // recovery codes must be read before we move the user on.
+      let pendingPasswordChange = null;
+
+      // Check if redirected due to expired session
+      if (Utils.getQueryParam('expired')) {
+        errorAlert.textContent = 'Your session has expired. Please sign in again.';
+        errorAlert.style.display = 'block';
+      }
+
+      function showError(msg) {
+        errorAlert.textContent = msg || 'Something went wrong';
+        errorAlert.style.display = 'block';
+      }
+      function clearError() { errorAlert.style.display = 'none'; }
+      function showStep(id) {
+        ['loginStep', 'mfaStep', 'enrollStep', 'pwChangeStep', 'recoveryStep', 'forgotStep'].forEach(s => {
+          document.getElementById(s).style.display = s === id ? '' : 'none';
+        });
+      }
+
+      /**
+       * Every sign-in path can now end in "you must replace this password", so
+       * each one routes through here rather than calling finishLogin directly.
+       * Returns true when the caller should stop and let the user set a password.
+       */
+      function handlePasswordChange(result) {
+        if (!result.password_change_required) return false;
+        if (result.password_change_expired || !result.password_change_token) {
+          showError(result.error || 'This temporary password has expired. Ask your instructor for a new invitation.');
+          showStep('loginStep');
+          return true;
+        }
+        pwChangeToken = result.password_change_token;
+        showStep('pwChangeStep');
+        document.getElementById('newPassword').focus();
+        return true;
+      }
+      function finishLogin(token) {
+        if (token) localStorage.setItem('token', token);
+        // The sidebar payload and the AI-assistant probe are cached per TAB and
+        // keyed to whoever was signed in. Logout clears them, but a session that
+        // simply expired never called logout — so a second person signing in on
+        // the same tab would inherit the first one's menu, including modules they
+        // are not enrolled in.
+        if (typeof Auth !== 'undefined') Auth.clearSessionCaches();
+        Toast.success('Welcome!', 'Signed in successfully');
+        setTimeout(() => { window.location.href = '/hub'; }, 500);
+      }
+
+      // ── Step 1: password ──────────────────────────────────────────────────
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const email = document.getElementById('email').value.trim();
+        const password = document.getElementById('password').value;
+
+        // Drop any stale session token so it can't override the stage-token
+        // Authorization header on the MFA/enrollment step calls.
+        localStorage.removeItem('token');
+
+        clearError();
+        document.getElementById('emailError').textContent = '';
+        document.getElementById('passwordError').textContent = '';
+
+        let hasError = false;
+        // Accept an email OR a bare username: cohort accounts are handed out as
+        // `cybr-480-7w1-1-student1`, and requiring the synthetic @-domain here
+        // would reject exactly the credential the instructor printed out.
+        const looksLikeUsername = !email.includes('@') && /^[a-z0-9._-]+$/i.test(email);
+        if (!Validator.email(email) && !looksLikeUsername) {
+          document.getElementById('emailError').textContent = 'Enter your email address or username';
+          hasError = true;
+        }
+        if (!Validator.required(password)) {
+          document.getElementById('passwordError').textContent = 'Password is required';
+          hasError = true;
+        }
+        if (hasError) return;
+
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Signing in...';
+
+        try {
+          const result = await API.auth.login(email, password);
+
+          if (result.mfa_required) {
+            mfaToken = result.mfa_token;
+            showStep('mfaStep');
+            document.getElementById('mfaCode').focus();
+            return;
+          }
+          if (result.enrollment_required) {
+            enrollToken = result.enroll_token;
+            await beginEnrollment();
+            return;
+          }
+          if (handlePasswordChange(result)) return;
+          finishLogin(result.token);
+        } catch (error) {
+          showError(error.message || 'Invalid email or password');
+        } finally {
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Sign In';
+        }
+      });
+
+      // ── Step 2a: TOTP code (already enrolled) ─────────────────────────────
+      document.getElementById('mfaForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        clearError();
+        const code = document.getElementById('mfaCode').value.trim();
+        const btn = document.getElementById('mfaSubmitBtn');
+        if (!code) { document.getElementById('mfaCodeError').textContent = 'Enter your code'; return; }
+        document.getElementById('mfaCodeError').textContent = '';
+        btn.disabled = true; btn.textContent = 'Verifying...';
+        try {
+          const result = await API.auth.loginMfa(mfaToken, code);
+          if (handlePasswordChange(result)) return;
+          finishLogin(result.token);
+        } catch (error) {
+          showError(error.message || 'Invalid code');
+        } finally {
+          btn.disabled = false; btn.textContent = 'Verify';
+        }
+      });
+
+      document.getElementById('mfaBackLink').addEventListener('click', (e) => {
+        e.preventDefault();
+        mfaToken = null;
+        clearError();
+        showStep('loginStep');
+      });
+
+      // ── Self-service: send me a setup / reset link ────────────────────────
+      // The server's answer is deliberately the same whether or not the address
+      // has an account, so there is nothing here to branch on. Rendering it
+      // verbatim is what keeps this page from becoming the oracle the endpoint
+      // refuses to be — do not add a "no such account" branch.
+      document.getElementById('forgotLink').addEventListener('click', (e) => {
+        e.preventDefault();
+        clearError();
+        document.getElementById('forgotSent').style.display = 'none';
+        document.getElementById('forgotForm').style.display = '';
+        document.getElementById('forgotEmailError').textContent = '';
+        // Carry over whatever they already typed; it is usually the address.
+        const typed = document.getElementById('email').value.trim();
+        if (typed.includes('@')) document.getElementById('forgotEmail').value = typed;
+        showStep('forgotStep');
+        document.getElementById('forgotEmail').focus();
+      });
+
+      document.getElementById('forgotBackLink').addEventListener('click', (e) => {
+        e.preventDefault();
+        clearError();
+        showStep('loginStep');
+      });
+
+      document.getElementById('forgotForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        clearError();
+        const emailErr = document.getElementById('forgotEmailError');
+        emailErr.textContent = '';
+
+        const email = document.getElementById('forgotEmail').value.trim();
+        if (!Validator.required(email)) {
+          emailErr.textContent = 'Email is required';
+          return;
+        }
+
+        const btn = document.getElementById('forgotSubmitBtn');
+        btn.disabled = true; btn.textContent = 'Sending...';
+        try {
+          const result = await API.auth.requestPasswordLink(email);
+          const sent = document.getElementById('forgotSent');
+          sent.textContent = result.message
+            || 'If that address has an account, a link is on its way.';
+          sent.style.display = '';
+          // Hide the form so a second submit does not look like the first failed.
+          document.getElementById('forgotForm').style.display = 'none';
+        } catch (error) {
+          // Reaches here only for a transport failure or the rate limit — the
+          // endpoint itself answers 200 on every path.
+          showError(error.message || 'Could not send the link. Please try again shortly.');
+        } finally {
+          btn.disabled = false; btn.textContent = 'Send me a link';
+        }
+      });
+
+      // ── Step 2b: forced enrollment ────────────────────────────────────────
+      async function beginEnrollment() {
+        clearError();
+        showStep('enrollStep');
+        try {
+          const setup = await API.auth.mfaSetup(enrollToken);
+          document.getElementById('enrollQr').src = setup.qr_data_url;
+          document.getElementById('enrollSecret').textContent = setup.secret;
+        } catch (error) {
+          showError(error.message || 'Could not start MFA setup');
+          showStep('loginStep');
+        }
+      }
+
+      document.getElementById('enrollForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        clearError();
+        const code = document.getElementById('enrollCode').value.trim();
+        const btn = document.getElementById('enrollSubmitBtn');
+        if (!code) { document.getElementById('enrollCodeError').textContent = 'Enter the code'; return; }
+        document.getElementById('enrollCodeError').textContent = '';
+        btn.disabled = true; btn.textContent = 'Verifying...';
+        try {
+          const result = await API.auth.mfaVerify(code, enrollToken);
+          if (result.token) localStorage.setItem('token', result.token);
+          document.getElementById('recoveryCodes').textContent = (result.recovery_codes || []).join('\n');
+          // Recovery codes are shown exactly once and are unrecoverable, so they
+          // take priority over the password step. Stash the gate and apply it
+          // when the user clicks through.
+          pendingPasswordChange = result.password_change_required ? result : null;
+          document.getElementById('recoveryContinueBtn').textContent =
+            pendingPasswordChange ? 'Continue' : 'Continue to Dashboard';
+          showStep('recoveryStep');
+        } catch (error) {
+          showError(error.message || 'Invalid code');
+        } finally {
+          btn.disabled = false; btn.textContent = 'Verify & Continue';
+        }
+      });
+
+      document.getElementById('recoveryContinueBtn').addEventListener('click', () => {
+        if (pendingPasswordChange) {
+          const gate = pendingPasswordChange;
+          pendingPasswordChange = null;
+          if (handlePasswordChange(gate)) return;
+        }
+        finishLogin(null);
+      });
+
+      // ── Step 3: replace the temporary password ────────────────────────────
+      document.getElementById('pwChangeForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        clearError();
+        const newPassword = document.getElementById('newPassword').value;
+        const confirmPassword = document.getElementById('confirmPassword').value;
+        const btn = document.getElementById('pwChangeSubmitBtn');
+
+        document.getElementById('newPasswordError').textContent = '';
+        document.getElementById('confirmPasswordError').textContent = '';
+
+        // Mirrors the server rules so the common mistakes don't cost a round
+        // trip; the server remains the authority.
+        if (newPassword.length < 8) {
+          document.getElementById('newPasswordError').textContent = 'Password must be at least 8 characters';
+          return;
+        }
+        if (!/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/.test(newPassword)) {
+          document.getElementById('newPasswordError').textContent = 'Include an uppercase letter, a lowercase letter, and a number';
+          return;
+        }
+        if (newPassword !== confirmPassword) {
+          document.getElementById('confirmPasswordError').textContent = 'Passwords do not match';
+          return;
+        }
+
+        btn.disabled = true; btn.textContent = 'Saving...';
+        try {
+          const result = await API.auth.setInitialPassword(pwChangeToken, newPassword);
+          pwChangeToken = null;
+          finishLogin(result.token);
+        } catch (error) {
+          showError(error.message || 'Could not set your password');
+        } finally {
+          btn.disabled = false; btn.textContent = 'Set Password & Continue';
+        }
+      });
+    });
+  </script>
+</body>
+</html>

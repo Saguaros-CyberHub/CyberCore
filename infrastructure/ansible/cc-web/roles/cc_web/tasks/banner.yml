@@ -1,0 +1,59 @@
+---
+# ===========================================================================
+# cc_web — the server banner.
+#
+# WHY THIS IS ITS OWN FILE AND ITS OWN CONF
+# ServerTokens and ServerSignature are server-scope directives: httpd refuses to
+# parse either one inside a <VirtualHost> block. Putting them in the site conf
+# would work only because Debian Includes sites-enabled at server scope, which
+# is an accident of layout rather than a contract. conf-available is where
+# server-scope settings belong, so they go there.
+#
+# WHAT THE SCAN REPORT ACTUALLY READS
+# `nmap -sV` fingerprints an HTTP service primarily from the Server response
+# header. ServerTokens is the only knob that decides how much of the real
+# version that header carries:
+#
+#   Prod     Server: Apache
+#   Major    Server: Apache/2
+#   Minor    Server: Apache/2.4
+#   Minimal  Server: Apache/2.4.62
+#   OS       Server: Apache/2.4.62 (Debian)
+#   Full     Server: Apache/2.4.62 (Debian) PHP/8.2.7
+#
+# So a fact block that declares a version needs Minimal or wider, and one that
+# declares no version gets Prod. The version itself comes from the installed
+# binary and CANNOT be dictated from here — see the header of tasks/verify.yml
+# for what the role does about a declared version that does not match.
+# ===========================================================================
+
+- name: Choose how much of the version the banner discloses
+  # Derived here rather than in defaults so an operator overriding
+  # cc_web_server_tokens gets the last word: role defaults lose to extra-vars,
+  # but a set_fact would beat them, so this only fires when nothing was passed.
+  ansible.builtin.set_fact:
+    cc_web_server_tokens: "{{ 'Minimal' if (cc_web_version | length > 0) else 'Prod' }}"
+  when: cc_web_server_tokens is not defined
+
+- name: Write the server-scope banner configuration
+  ansible.builtin.template:
+    src: cc-web-banner.conf.j2
+    dest: "{{ cc_web_conf_available }}/{{ cc_web_banner_conf_name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  # NO `validate:` HERE. `apache2ctl -t -f %s` would check this fragment as if
+  # it were the whole httpd.conf, which it is not; the fragments are proved
+  # together by the single configtest at the end of tasks/vhosts.yml, which is
+  # the only check that sees the same file set httpd will load.
+  notify: cc_web restart
+
+- name: Enable the banner configuration
+  # a2enconf would do the same thing; a symlink is what a2enconf creates, and
+  # ansible.builtin.file reports changed honestly on a replay without needing a
+  # command task and a creates: guard.
+  ansible.builtin.file:
+    src: "{{ cc_web_conf_available }}/{{ cc_web_banner_conf_name }}"
+    dest: "{{ cc_web_conf_enabled }}/{{ cc_web_banner_conf_name }}"
+    state: link
+  notify: cc_web restart

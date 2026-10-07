@@ -1,0 +1,102 @@
+{
+    "key": "ciab",
+    "name": "Clinic-in-a-Box",
+    "icon": "🏥",
+    "description": "AI-powered cyber risk assessment training",
+    "entry_url": "/ciab/dashboard",
+    "category": "plugin",
+    "color": "#48bb78",
+    "active": true,
+    "display_order": 3,
+    "parent_module": "crucible",
+    "routes": [
+        {
+            "file": "routes/pages.js",
+            "mountPath": "/ciab"
+        },
+        {
+            "file": "routes/api.js",
+            "mountPath": "/"
+        }
+    ],
+    "staticDir": "public",
+    "staticMountPath": "/ciab",
+    "database": {
+        "name": "clinic_db",
+        "migrations": "migrations"
+    },
+    "subnav": {
+        "_note": "DO NOT add \"roles\" to the student entries below as a way of hiding Clinic-in-a-Box. layout.js reads that array cosmetically -- it hides links, it does not protect URLs -- and it can only express \"is an instructor\", not \"is enrolled\". Visibility is decided server-side by GET /api/modules through the access gate ciab/utils/enrollment.js:canSeeCiab, registered in routes/api.js. Adding roles here would also hide /ciab/dashboard from genuine students and break test/view-mode-nav.test.js.",
+        "label": "Clinic-in-a-Box",
+        "items": [
+            {
+                "label": "Dashboard",
+                "icon": "📊",
+                "url": "/ciab/dashboard",
+                "page": "dashboard"
+            },
+            {
+                "label": "Generate New",
+                "icon": "⚡",
+                "url": "/ciab/generator",
+                "page": "generator"
+            },
+            {
+                "label": "Real-Client Intakes",
+                "icon": "📨",
+                "url": "/ciab/real-client-intakes",
+                "page": "real-client-intakes"
+            },
+            {
+                "label": "Workspace",
+                "icon": "📝",
+                "url": "/ciab/workspace",
+                "page": "workspace"
+            },
+            {
+                "label": "Risk Assessment",
+                "icon": "📋",
+                "url": "/ciab/clinic-risk-assessment",
+                "page": "clinic-risk-assessment"
+            },
+            {
+                "label": "My Progress",
+                "icon": "📈",
+                "url": "/ciab/progress",
+                "page": "progress"
+            },
+            {
+                "label": "Interview Sim",
+                "icon": "🎤",
+                "url": "/ciab/interview",
+                "page": "interview"
+            },
+            {
+                "label": "Instructor",
+                "icon": "👨‍🏫",
+                "url": "/ciab/instructor",
+                "page": "instructor",
+                "roles": [
+                    "instructor",
+                    "admin"
+                ]
+            },
+            {
+                "label": "Admin: Deploy Lanes",
+                "icon": "🚀",
+                "url": "/ciab/admin-profile-lanes",
+                "page": "admin-profile-lanes",
+                "roles": [
+                    "admin"
+                ]
+            },
+            {
+                "label": "AI Assistant",
+                "icon": "🤖",
+                "url": "#",
+                "page": "ai-assistant",
+                "onclick": "Layout.openChat(); return false;"
+            }
+        ]
+    }
+}

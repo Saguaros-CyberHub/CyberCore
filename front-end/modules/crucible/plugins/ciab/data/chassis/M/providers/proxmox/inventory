@@ -1,0 +1,14 @@
+[default]
+; ------------------------------------------------
+; chassis.invalid
+; ------------------------------------------------
+dc01 ansible_host={{ip_range}}.10 dns_domain=dc01 dict_key=dc01
+; ------------------------------------------------
+; child.chassis.invalid
+; ------------------------------------------------
+dc02 ansible_host={{ip_range}}.11 dns_domain=dc01 dict_key=dc02
+srv02 ansible_host={{ip_range}}.22 dns_domain=dc02 dict_key=srv02
+
+[all:vars]
+force_dns_server=yes
+dns_server={{ip_range}}.1
