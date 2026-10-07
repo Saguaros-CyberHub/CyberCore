@@ -1,0 +1,8 @@
+# Attachment drop directory.
+#
+# Writable by the FieldOps application pool identity at runtime -- that ACL is
+# what makes the upload flaw exploitable. Granted by Provision-FieldOps.ps1;
+# do not tighten it here.
+#
+# Deliberately has NO web.config of its own: inheriting the parent's handler
+# mappings is what lets an uploaded .AspX execute.

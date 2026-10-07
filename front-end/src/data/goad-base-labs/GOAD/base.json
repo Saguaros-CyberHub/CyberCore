@@ -1,0 +1,125 @@
+{
+  "schema_version": 2,
+  "lab": "GOAD",
+  "chain": [
+    "build.yml",
+    "ad-servers.yml",
+    "ad-parent_domain.yml",
+    "ad-child_domain.yml",
+    "wait5m.yml",
+    "ad-members.yml",
+    "ad-trusts.yml",
+    "ad-data.yml",
+    "ad-gmsa.yml",
+    "laps.yml",
+    "ad-relations.yml",
+    "adcs.yml",
+    "ad-acl.yml",
+    "servers.yml",
+    "security.yml",
+    "vulnerabilities.yml"
+  ],
+  "lab_definition": {
+    "displayName": "GOAD \u2014 full (5 Win VMs, 3 domains, 2 forests)",
+    "description": "Full GOAD lab with cross-forest scenarios (Essos). Heaviest variant.",
+    "forestRoot": "sevenkingdoms.local",
+    "domains": [
+      "sevenkingdoms.local",
+      "north.sevenkingdoms.local",
+      "essos.local"
+    ],
+    "childSubdomain": "north",
+    "vms": [
+      {
+        "name": "DC01",
+        "role": "dc",
+        "os": "Windows Server 2019",
+        "template_vmid": 1004,
+        "ipOctet": 10,
+        "nic_model": "e1000"
+      },
+      {
+        "name": "DC02",
+        "role": "dc",
+        "os": "Windows Server 2019",
+        "template_vmid": 1004,
+        "ipOctet": 11,
+        "nic_model": "e1000"
+      },
+      {
+        "name": "DC03",
+        "role": "dc",
+        "os": "Windows Server 2019",
+        "template_vmid": 1004,
+        "ipOctet": 12,
+        "nic_model": "e1000"
+      },
+      {
+        "name": "SRV02",
+        "role": "member",
+        "os": "Windows Server 2019",
+        "template_vmid": 1004,
+        "ipOctet": 22,
+        "nic_model": "e1000"
+      },
+      {
+        "name": "SRV03",
+        "role": "member",
+        "os": "Windows Server 2019",
+        "template_vmid": 1004,
+        "ipOctet": 23,
+        "nic_model": "e1000"
+      }
+    ]
+  },
+  "stock": {
+    "forest_root": "sevenkingdoms.local",
+    "netbios": "SEVENKINGDOMS",
+    "first_label": "sevenkingdoms",
+    "hosts": {
+      "dc01": {
+        "hostname": "kingslanding",
+        "roster_name": "DC01",
+        "domain": "sevenkingdoms.local"
+      },
+      "dc02": {
+        "hostname": "winterfell",
+        "roster_name": "DC02",
+        "domain": "north.sevenkingdoms.local"
+      },
+      "srv02": {
+        "hostname": "castelblack",
+        "roster_name": "SRV02",
+        "domain": "north.sevenkingdoms.local"
+      },
+      "dc03": {
+        "hostname": "meereen",
+        "roster_name": "DC03",
+        "domain": "essos.local"
+      },
+      "srv03": {
+        "hostname": "braavos",
+        "roster_name": "SRV03",
+        "domain": "essos.local"
+      }
+    },
+    "domains": {
+      "essos.local": {
+        "netbios": "ESSOS",
+        "dc": "dc03",
+        "kind": "partner"
+      },
+      "north.sevenkingdoms.local": {
+        "netbios": "NORTH",
+        "dc": "dc02",
+        "kind": "child"
+      },
+      "sevenkingdoms.local": {
+        "netbios": "SEVENKINGDOMS",
+        "dc": "dc01",
+        "kind": "root"
+      }
+    }
+  },
+  "controller_recipe": "GOAD"
+}

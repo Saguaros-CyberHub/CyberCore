@@ -1,6 +1,6 @@
 -- The Forge (malware/dev lab) module: enabled tables + badges
 
-INSERT INTO module (key, name, active)
+INSERT INTO cybercore_module (key, name, active)
 VALUES ('forge', 'The Forge', TRUE)
 ON CONFLICT (key) DO NOTHING;
 
@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS forge_artifact (
 );
 
 -- Module-scoped badges
-INSERT INTO badge (key, name, description, module_key, active) VALUES
+INSERT INTO cybercore_badge (key, name, description, module_key, active) VALUES
   ('forge_builder', 'Forge Builder', 'Built a tool or sample in The Forge', 'forge', TRUE),
   ('forge_reverser', 'Reverser', 'Completed a reversing exercise', 'forge', TRUE)
 ON CONFLICT (key) DO NOTHING;
