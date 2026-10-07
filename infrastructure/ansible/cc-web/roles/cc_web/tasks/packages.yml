@@ -1,0 +1,45 @@
+---
+# ===========================================================================
+# cc_web — install the engine and the tools verification depends on.
+#
+# THIS ROLE NEVER DOMAIN-JOINS THIS HOST. The web box is a standalone machine in
+# the DMZ; its only relationship with Active Directory is that a file on it
+# names a domain account. Anything that would make it a member — realmd, sssd,
+# adcli, a krb5 keytab, a GOAD role pulled in through roles_path — belongs to a
+# different exercise and would delete the pivot: a joined host is already inside
+# the domain, so compromising it proves nothing.
+# ===========================================================================
+
+- name: Install the web engine and the verification tools
+  ansible.builtin.apt:
+    name: "{{ cc_web_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  register: cc_web_apt
+  retries: 3
+  delay: 10
+  until: cc_web_apt is succeeded
+
+- name: Enable the apache modules the vhosts require
+  # a2enmod is the sanctioned Debian path and creates BOTH the .load and (where
+  # one exists) the .conf symlink; hand-linking only the .load leaves mod_ssl
+  # without its SSLRandomSeed/SSLSessionCache defaults and httpd refuses to
+  # start. `creates:` makes it a no-op on a replay, and changed_when is then
+  # honest: the task body only ever executes when the symlink was missing.
+  ansible.builtin.command:
+    cmd: "a2enmod {{ item }}"
+    creates: "{{ cc_web_mods_enabled }}/{{ item }}.load"
+  loop: "{{ cc_web_apache_modules }}"
+  register: cc_web_a2enmod
+  changed_when: "(cc_web_a2enmod.rc | default(1)) == 0"
+  failed_when: "(cc_web_a2enmod.rc | default(0)) != 0"
+  notify: cc_web restart
+
+- name: Create the directory the observed-facts file is published into
+  ansible.builtin.file:
+    path: "{{ cc_web_facts_out | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"

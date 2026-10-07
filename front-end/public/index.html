@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CyberHub | Saguaros Cybersecurity Platform</title>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <style>
+    .landing-hero {
+      min-height: 100vh;
+      background: linear-gradient(135deg, var(--primary-dark) 0%, var(--primary) 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      color: white;
+      padding: 2rem;
+    }
+    .hero-content {
+      max-width: 800px;
+    }
+    .hero-logo {
+      font-size: 5rem;
+      margin-bottom: 1.5rem;
+    }
+    .hero-title {
+      font-size: 3rem;
+      font-weight: 700;
+      margin-bottom: 1rem;
+      color: white;
+    }
+    .hero-subtitle {
+      font-size: 1.25rem;
+      opacity: 0.9;
+      margin-bottom: 2.5rem;
+      line-height: 1.6;
+    }
+    .hero-buttons {
+      display: flex;
+      gap: 1rem;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .btn-hero {
+      padding: 1rem 2rem;
+      font-size: 1.1rem;
+      border-radius: 0.5rem;
+    }
+    .btn-hero-primary {
+      background: white;
+      color: var(--primary);
+    }
+    .btn-hero-primary:hover {
+      background: var(--gray-100);
+    }
+    .btn-hero-outline {
+      background: transparent;
+      border: 2px solid white;
+      color: white;
+    }
+    .btn-hero-outline:hover {
+      background: rgba(255,255,255,0.1);
+    }
+    .features {
+      padding: 5rem 2rem;
+      background: var(--bg-card);
+    }
+    .feature-title {
+      color: var(--text-primary);
+    }
+    .features-grid {
+      max-width: 1200px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 2rem;
+    }
+    .feature-card {
+      text-align: center;
+      padding: 2rem;
+    }
+    .feature-icon {
+      font-size: 3rem;
+      margin-bottom: 1rem;
+    }
+    .feature-title {
+      font-size: 1.25rem;
+      margin-bottom: 0.75rem;
+    }
+    .feature-desc {
+      color: var(--gray-600);
+      line-height: 1.6;
+    }
+    @media (max-width: 768px) {
+      .hero-title { font-size: 2rem; }
+      .hero-subtitle { font-size: 1rem; }
+    }
+  </style>
+</head>
+<body>
+  <section class="landing-hero">
+    <div class="hero-content">
+      <div class="hero-logo">🛡️</div>
+      <h1 class="hero-title">CyberHub</h1>
+      <p class="hero-subtitle">
+        The official cybersecurity lab, cyber warfare range, and eLearning platform
+        of the Cyber Saguaros at the University of Arizona.
+      </p>
+      <div class="hero-buttons">
+        <a href="/register" class="btn btn-hero btn-hero-primary">Get Started</a>
+        <a href="/login" class="btn btn-hero btn-hero-outline">Sign In</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="features">
+    <div class="features-grid">
+      <div class="feature-card">
+        <div class="feature-icon">🔥</div>
+        <h3 class="feature-title">The Crucible</h3>
+        <p class="feature-desc">CTF-style cyber warfare range with isolated lanes, vulnerable hosts, and real-time scoring.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🧪</div>
+        <h3 class="feature-title">CyberLabs</h3>
+        <p class="feature-desc">On-demand virtualization environments for student projects, research, and hands-on learning.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">⚒️</div>
+        <h3 class="feature-title">The Forge</h3>
+        <p class="feature-desc">Malware analysis and sandbox environment for deep threat research and behavioral analysis.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🏥</div>
+        <h3 class="feature-title">Clinic-in-a-Box</h3>
+        <p class="feature-desc">AI-powered cyber risk assessment training with realistic client profiles and stakeholder interviews.</p>
+      </div>
+    </div>
+  </section>
+
+  <script src="/js/app.js"></script>
+  <script>
+    // If already logged in, redirect to dashboard
+    (async () => {
+      try {
+        await API.auth.verify();
+        window.location.href = '/hub';
+      } catch (e) {
+        // Not logged in, stay on landing page
+      }
+    })();
+  </script>
+</body>
+</html>
